@@ -1,0 +1,8 @@
+[Desktop Entry]
+Name=SigilSmith
+Comment=Mod loader for Baldur's Gate 3 (Linux)
+Exec=sigilsmith
+Icon=sigilsmith
+Terminal=true
+Type=Application
+Categories=Game;Utility;

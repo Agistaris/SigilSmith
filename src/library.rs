@@ -1,0 +1,368 @@
+use anyhow::{Context, Result};
+use serde::{Deserialize, Serialize};
+use std::{
+    collections::HashMap,
+    fs,
+    path::{Path, PathBuf},
+};
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Library {
+    pub mods: Vec<ModEntry>,
+    pub profiles: Vec<Profile>,
+    pub active_profile: String,
+}
+
+impl Library {
+    pub fn load_or_create(data_dir: &Path) -> Result<Self> {
+        let library_path = data_dir.join("library.json");
+        if library_path.exists() {
+            let raw = fs::read_to_string(&library_path).context("read library.json")?;
+            let mut library: Library = serde_json::from_str(&raw).context("parse library.json")?;
+            if library.profiles.is_empty() {
+                library.profiles.push(Profile::new("Default"));
+            }
+            if library.active_profile.is_empty() {
+                library.active_profile = library.profiles[0].name.clone();
+            } else if !library
+                .profiles
+                .iter()
+                .any(|profile| profile.name == library.active_profile)
+            {
+                library.active_profile = library.profiles[0].name.clone();
+            }
+            return Ok(library);
+        }
+
+        let library = Library {
+            mods: Vec::new(),
+            profiles: vec![Profile::new("Default")],
+            active_profile: "Default".to_string(),
+        };
+        library.save(data_dir)?;
+        Ok(library)
+    }
+
+    pub fn save(&self, data_dir: &Path) -> Result<()> {
+        let library_path = data_dir.join("library.json");
+        let raw = serde_json::to_string_pretty(self).context("serialize library.json")?;
+        fs::write(library_path, raw).context("write library.json")?;
+        Ok(())
+    }
+
+    pub fn active_profile_mut(&mut self) -> Option<&mut Profile> {
+        self.profiles
+            .iter_mut()
+            .find(|profile| profile.name == self.active_profile)
+    }
+
+    pub fn active_profile(&self) -> Option<&Profile> {
+        self.profiles
+            .iter()
+            .find(|profile| profile.name == self.active_profile)
+    }
+
+    pub fn ensure_mods_in_profiles(&mut self) {
+        let mod_ids: Vec<String> = self.mods.iter().map(|m| m.id.clone()).collect();
+        for profile in &mut self.profiles {
+            profile.ensure_mods(&mod_ids);
+        }
+    }
+
+    pub fn index_by_id(&self) -> HashMap<String, ModEntry> {
+        self.mods
+            .iter()
+            .cloned()
+            .map(|mod_entry| (mod_entry.id.clone(), mod_entry))
+            .collect()
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Profile {
+    pub name: String,
+    pub order: Vec<ProfileEntry>,
+    #[serde(default)]
+    pub file_overrides: Vec<FileOverride>,
+}
+
+impl Profile {
+    pub fn new(name: &str) -> Self {
+        Self {
+            name: name.to_string(),
+            order: Vec::new(),
+            file_overrides: Vec::new(),
+        }
+    }
+
+    pub fn ensure_mods(&mut self, mod_ids: &[String]) {
+        let mod_set: std::collections::HashSet<&String> = mod_ids.iter().collect();
+        for id in mod_ids {
+            if !self.order.iter().any(|entry| entry.id == *id) {
+                self.order.push(ProfileEntry {
+                    id: id.clone(),
+                    enabled: false,
+                });
+            }
+        }
+        self.file_overrides
+            .retain(|override_entry| mod_set.contains(&override_entry.mod_id));
+    }
+
+    pub fn move_up(&mut self, index: usize) {
+        if index == 0 || index >= self.order.len() {
+            return;
+        }
+        self.order.swap(index, index - 1);
+    }
+
+    pub fn move_down(&mut self, index: usize) {
+        if index + 1 >= self.order.len() {
+            return;
+        }
+        self.order.swap(index, index + 1);
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProfileEntry {
+    pub id: String,
+    pub enabled: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FileOverride {
+    pub kind: TargetKind,
+    pub relative_path: String,
+    pub mod_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ModEntry {
+    pub id: String,
+    pub name: String,
+    pub added_at: i64,
+    pub targets: Vec<InstallTarget>,
+    #[serde(default)]
+    pub target_overrides: Vec<TargetOverride>,
+    #[serde(default)]
+    pub source_label: Option<String>,
+}
+
+impl ModEntry {
+    pub fn display_name(&self) -> String {
+        if let Some(label) = &self.source_label {
+            let cleaned = clean_source_label(label);
+            if !cleaned.is_empty() {
+                return cleaned;
+            }
+        }
+        self.name.clone()
+    }
+
+    pub fn source_label(&self) -> Option<&str> {
+        self.source_label.as_deref()
+    }
+
+    pub fn display_type(&self) -> String {
+        let mut kinds = Vec::new();
+        let mut has_pak = false;
+        let mut has_generated = false;
+        let mut has_data = false;
+        let mut has_bin = false;
+
+        for target in &self.targets {
+            match target {
+                InstallTarget::Pak { .. } => has_pak = true,
+                InstallTarget::Generated { .. } => has_generated = true,
+                InstallTarget::Data { .. } => has_data = true,
+                InstallTarget::Bin { .. } => has_bin = true,
+            }
+        }
+
+        if has_pak {
+            kinds.push("Pak");
+        }
+        if has_generated {
+            kinds.push("Generated");
+        }
+        if has_data {
+            kinds.push("Data");
+        }
+        if has_bin {
+            kinds.push("Bin");
+        }
+
+        if kinds.is_empty() {
+            "Unknown".to_string()
+        } else {
+            kinds.join("+")
+        }
+    }
+
+    pub fn has_target_kind(&self, kind: TargetKind) -> bool {
+        self.targets.iter().any(|target| target.kind() == kind)
+    }
+
+    pub fn is_target_enabled(&self, kind: TargetKind) -> bool {
+        if !self.has_target_kind(kind) {
+            return false;
+        }
+
+        self.target_overrides
+            .iter()
+            .find(|override_entry| override_entry.kind == kind)
+            .map(|override_entry| override_entry.enabled)
+            .unwrap_or(true)
+    }
+
+    pub fn toggle_target(&mut self, kind: TargetKind) -> Option<bool> {
+        if !self.has_target_kind(kind) {
+            return None;
+        }
+
+        if let Some(existing) = self
+            .target_overrides
+            .iter_mut()
+            .find(|override_entry| override_entry.kind == kind)
+        {
+            existing.enabled = !existing.enabled;
+            if existing.enabled {
+                self.target_overrides
+                    .retain(|override_entry| override_entry.kind != kind);
+                return Some(true);
+            }
+            return Some(existing.enabled);
+        }
+
+        self.target_overrides.push(TargetOverride {
+            kind,
+            enabled: false,
+        });
+        Some(false)
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum InstallTarget {
+    Pak { file: String, info: PakInfo },
+    Generated { dir: String },
+    Data { dir: String },
+    Bin { dir: String },
+}
+
+impl InstallTarget {
+    pub fn kind(&self) -> TargetKind {
+        match self {
+            InstallTarget::Pak { .. } => TargetKind::Pak,
+            InstallTarget::Generated { .. } => TargetKind::Generated,
+            InstallTarget::Data { .. } => TargetKind::Data,
+            InstallTarget::Bin { .. } => TargetKind::Bin,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[serde(rename_all = "snake_case")]
+pub enum TargetKind {
+    Pak,
+    Generated,
+    Data,
+    Bin,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TargetOverride {
+    pub kind: TargetKind,
+    pub enabled: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PakInfo {
+    pub uuid: String,
+    pub name: String,
+    pub folder: String,
+    pub version: u64,
+    pub md5: Option<String>,
+    pub publish_handle: Option<u64>,
+    pub author: Option<String>,
+    pub description: Option<String>,
+    pub module_type: Option<String>,
+}
+
+impl PakInfo {
+    pub fn from_module_info(info: larian_formats::bg3::ModuleInfo) -> Self {
+        Self {
+            uuid: info.uuid,
+            name: info.name,
+            folder: info.folder,
+            version: info.version,
+            md5: info.md5,
+            publish_handle: None,
+            author: info.author,
+            description: info.description,
+            module_type: info.module_type,
+        }
+    }
+}
+
+pub fn library_mod_root(data_dir: &Path) -> PathBuf {
+    data_dir.join("mods")
+}
+
+pub fn clean_source_label(label: &str) -> String {
+    let raw = label.trim().replace('_', " ");
+    if raw.is_empty() {
+        return String::new();
+    }
+
+    let joiner = if raw.contains(" - ") { " - " } else { "-" };
+    let parts: Vec<&str> = raw.split('-').collect();
+    let mut idx = parts.len();
+    let mut numeric_segments: Vec<&str> = Vec::new();
+
+    while idx > 0 {
+        let seg = parts[idx - 1].trim();
+        if seg.is_empty() {
+            idx -= 1;
+            continue;
+        }
+        if seg.chars().all(|c| c.is_ascii_digit()) {
+            numeric_segments.push(seg);
+            idx -= 1;
+        } else {
+            break;
+        }
+    }
+
+    if !numeric_segments.is_empty() {
+        let last_len = numeric_segments[0].len();
+        if !(last_len >= 6 || numeric_segments.len() >= 2) {
+            idx = parts.len();
+        }
+    }
+
+    let mut cleaned_parts = Vec::new();
+    for part in parts.iter().take(idx) {
+        let trimmed = part.trim();
+        if !trimmed.is_empty() {
+            cleaned_parts.push(trimmed);
+        }
+    }
+
+    let mut base = cleaned_parts.join(joiner);
+    base = base.split_whitespace().collect::<Vec<_>>().join(" ");
+    base.trim().to_string()
+}
+
+pub fn normalize_label(label: &str) -> String {
+    let cleaned = clean_source_label(label);
+    let mut out = String::new();
+    for ch in cleaned.chars() {
+        if ch.is_ascii_alphanumeric() {
+            out.push(ch.to_ascii_lowercase());
+        }
+    }
+    out
+}

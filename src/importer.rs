@@ -1,0 +1,505 @@
+use crate::library::{library_mod_root, InstallTarget, ModEntry, PakInfo};
+use anyhow::{Context, Result};
+use blake3::Hasher;
+use larian_formats::lspk;
+use std::{
+    fs,
+    io,
+    path::{Path, PathBuf},
+    process::{Command, Stdio},
+    time::{SystemTime, UNIX_EPOCH},
+};
+use walkdir::WalkDir;
+
+pub struct ImportResult {
+    pub mods: Vec<ModEntry>,
+    pub unrecognized: bool,
+}
+
+pub fn import_path(path: &Path, data_dir: &Path) -> Result<ImportResult> {
+    if !path.exists() {
+        return Ok(ImportResult {
+            mods: Vec::new(),
+            unrecognized: false,
+        });
+    }
+
+    fs::create_dir_all(library_mod_root(data_dir)).context("create mod library root")?;
+
+    let result = if path.is_dir() {
+        import_from_dir(path, data_dir, None, false)?
+    } else {
+        let source_label = source_label_for_archive(path);
+        match path.extension().and_then(|ext| ext.to_str()).unwrap_or("") {
+            "pak" | "PAK" => ImportResult {
+                mods: import_pak_file(path, data_dir)?,
+                unrecognized: false,
+            },
+            "zip" | "ZIP" => import_archive_zip(path, data_dir, source_label.as_deref())?,
+            "7z" | "7Z" => import_archive_7z(path, data_dir, source_label.as_deref())?,
+            _ => ImportResult {
+                mods: Vec::new(),
+                unrecognized: true,
+            },
+        }
+    };
+
+    Ok(result)
+}
+
+fn import_archive_zip(
+    path: &Path,
+    data_dir: &Path,
+    source_label: Option<&str>,
+) -> Result<ImportResult> {
+    let temp_dir = make_temp_dir(data_dir, "zip")?;
+    if let Err(err) = extract_zip(path, &temp_dir) {
+        let _ = fs::remove_dir_all(&temp_dir);
+        return Err(err);
+    }
+    let result = import_from_dir(&temp_dir, data_dir, source_label, true);
+    let _ = fs::remove_dir_all(&temp_dir);
+    result
+}
+
+fn import_archive_7z(
+    path: &Path,
+    data_dir: &Path,
+    source_label: Option<&str>,
+) -> Result<ImportResult> {
+    let temp_dir = make_temp_dir(data_dir, "7z")?;
+    if let Err(err) = extract_7z(path, &temp_dir) {
+        let _ = fs::remove_dir_all(&temp_dir);
+        return Err(err);
+    }
+    let result = import_from_dir(&temp_dir, data_dir, source_label, true);
+    let _ = fs::remove_dir_all(&temp_dir);
+    result
+}
+
+fn import_from_dir(
+    path: &Path,
+    data_dir: &Path,
+    source_label: Option<&str>,
+    allow_move: bool,
+) -> Result<ImportResult> {
+    let scan = scan_payload(path)?;
+    let unrecognized = scan.pak_files.is_empty() && !scan.has_loose_targets();
+    let allow_move = allow_move && !scan.has_overlap();
+    let mut mods = Vec::new();
+    let mut last_error: Option<anyhow::Error> = None;
+
+    let use_archive_label = scan.pak_files.len() == 1;
+
+    for pak_path in &scan.pak_files {
+        let label = if use_archive_label {
+            source_label
+        } else {
+            pak_path
+                .file_stem()
+                .and_then(|stem| stem.to_str())
+        };
+        match import_single_pak(pak_path, data_dir, label) {
+            Ok(entry) => mods.push(entry),
+            Err(err) => {
+                last_error = Some(err.context(format!("import pak {:?}", pak_path)));
+            }
+        }
+    }
+
+    if scan.has_loose_targets() {
+        match import_loose(path, data_dir, &scan, source_label, allow_move) {
+            Ok(entry) => mods.push(entry),
+            Err(err) => {
+                last_error = Some(err.context("import loose files"));
+            }
+        }
+    }
+
+    if mods.is_empty() {
+        if let Some(err) = last_error {
+            return Err(err);
+        }
+    }
+
+    Ok(ImportResult { mods, unrecognized })
+}
+
+fn import_pak_file(path: &Path, data_dir: &Path) -> Result<Vec<ModEntry>> {
+    let label = source_label_for_archive(path);
+    Ok(vec![import_single_pak(path, data_dir, label.as_deref())?])
+}
+
+fn import_single_pak(path: &Path, data_dir: &Path, source_label: Option<&str>) -> Result<ModEntry> {
+    let file = fs::File::open(path).context("open .pak")?;
+    let lspk = lspk::Reader::new(file)?.read()?;
+    let module_info = lspk.extract_meta_lsx()?.deserialize_as_mod_pak()?.module_info;
+    let pak_info = PakInfo::from_module_info(module_info.clone());
+
+    let mod_id = pak_info.uuid.clone();
+    let mod_root = library_mod_root(data_dir).join(&mod_id);
+    fs::create_dir_all(&mod_root).context("create mod storage")?;
+
+    let filename = format!("{}.pak", pak_info.folder);
+    let dest = mod_root.join(&filename);
+    fs::copy(path, &dest).context("copy .pak")?;
+
+    Ok(ModEntry {
+        id: mod_id,
+        name: pak_info.name.clone(),
+        added_at: now_timestamp(),
+        targets: vec![InstallTarget::Pak {
+            file: filename,
+            info: pak_info,
+        }],
+        target_overrides: Vec::new(),
+        source_label: source_label.map(|label| label.to_string()),
+    })
+}
+
+fn import_loose(
+    path: &Path,
+    data_dir: &Path,
+    scan: &PayloadScan,
+    source_label: Option<&str>,
+    allow_move: bool,
+) -> Result<ModEntry> {
+    let mod_id = hash_path(path);
+    let mod_root = library_mod_root(data_dir).join(&mod_id);
+    fs::create_dir_all(&mod_root).context("create loose mod storage")?;
+
+    let mut targets = Vec::new();
+
+    if let Some(data_dir) = &scan.data_dir {
+        let dest = mod_root.join("Data");
+        if allow_move {
+            move_or_copy_dir(data_dir, &dest)?;
+        } else {
+            copy_dir(data_dir, &dest)?;
+        }
+        targets.push(InstallTarget::Data {
+            dir: "Data".to_string(),
+        });
+    }
+
+    if let Some(generated_dir) = &scan.generated_dir {
+        let dest = mod_root.join("Generated");
+        if allow_move {
+            move_or_copy_dir(generated_dir, &dest)?;
+        } else {
+            copy_dir(generated_dir, &dest)?;
+        }
+        targets.push(InstallTarget::Generated {
+            dir: "Generated".to_string(),
+        });
+    } else if let Some(public_dir) = &scan.public_dir {
+        let dest = mod_root.join("Generated").join("Public");
+        if allow_move {
+            move_or_copy_dir(public_dir, &dest)?;
+        } else {
+            copy_dir(public_dir, &dest)?;
+        }
+        targets.push(InstallTarget::Generated {
+            dir: "Generated".to_string(),
+        });
+    }
+
+    if let Some(bin_dir) = &scan.bin_dir {
+        let dest = mod_root.join("bin");
+        if allow_move {
+            move_or_copy_dir(bin_dir, &dest)?;
+        } else {
+            copy_dir(bin_dir, &dest)?;
+        }
+        targets.push(InstallTarget::Bin {
+            dir: "bin".to_string(),
+        });
+    }
+
+    let name = if let Some(label) = source_label {
+        format!("Loose Files: {label}")
+    } else {
+        path.file_name()
+            .and_then(|s| s.to_str())
+            .map(|s| format!("Loose Files: {s}"))
+            .unwrap_or_else(|| "Loose Files".to_string())
+    };
+
+    Ok(ModEntry {
+        id: mod_id,
+        name,
+        added_at: now_timestamp(),
+        targets,
+        target_overrides: Vec::new(),
+        source_label: source_label.map(|label| label.to_string()),
+    })
+}
+
+fn source_label_for_archive(path: &Path) -> Option<String> {
+    path.file_stem()
+        .and_then(|s| s.to_str())
+        .map(|s| s.to_string())
+}
+
+fn scan_payload(root: &Path) -> Result<PayloadScan> {
+    let mut pak_files = Vec::new();
+    let mut data_candidates = Vec::new();
+    let mut generated_candidates = Vec::new();
+    let mut bin_candidates = Vec::new();
+    let mut public_candidates = Vec::new();
+
+    for entry in WalkDir::new(root).follow_links(false) {
+        let entry = entry?;
+        let path = entry.path();
+
+        if is_ignored_path(path) {
+            continue;
+        }
+
+        if entry.file_type().is_file() {
+            if path
+                .extension()
+                .and_then(|ext| ext.to_str())
+                .map(|ext| ext.eq_ignore_ascii_case("pak"))
+                .unwrap_or(false)
+            {
+                pak_files.push(path.to_path_buf());
+            }
+        }
+
+        if entry.file_type().is_dir() {
+            let name = entry.file_name().to_string_lossy().to_lowercase();
+            let depth = relative_depth(root, path);
+            if name == "data" {
+                data_candidates.push((path.to_path_buf(), depth));
+            } else if name == "generated" {
+                generated_candidates.push((path.to_path_buf(), depth));
+            } else if name == "bin" {
+                bin_candidates.push((path.to_path_buf(), depth));
+            } else if name == "public" {
+                if has_parent_named(path, "generated") || has_parent_named(path, "data") {
+                    continue;
+                }
+                public_candidates.push((path.to_path_buf(), depth));
+            }
+        }
+    }
+
+    let data_dir = pick_shallowest(data_candidates);
+    let generated_dir = pick_shallowest(generated_candidates);
+    let bin_dir = pick_shallowest(bin_candidates);
+    let public_dir = pick_shallowest(public_candidates);
+
+    Ok(PayloadScan {
+        pak_files,
+        data_dir,
+        generated_dir,
+        bin_dir,
+        public_dir,
+    })
+}
+
+fn pick_shallowest(mut candidates: Vec<(PathBuf, usize)>) -> Option<PathBuf> {
+    candidates.sort_by_key(|(_, depth)| *depth);
+    candidates.into_iter().map(|(path, _)| path).next()
+}
+
+fn relative_depth(root: &Path, path: &Path) -> usize {
+    path.strip_prefix(root)
+        .map(|p| p.components().count())
+        .unwrap_or(usize::MAX)
+}
+
+fn is_ignored_path(path: &Path) -> bool {
+    path.components().any(|component| {
+        let part = component.as_os_str().to_string_lossy();
+        part.eq_ignore_ascii_case("__MACOSX") || part == ".git" || part == ".svn"
+    })
+}
+
+fn extract_zip(path: &Path, dest: &Path) -> Result<()> {
+    match extract_with_7z(path, dest) {
+        Ok(Some(())) => return Ok(()),
+        Ok(None) => {}
+        Err(err) => return Err(err),
+    }
+
+    let file = fs::File::open(path).context("open zip")?;
+    let mut archive = zip::ZipArchive::new(file).context("read zip")?;
+
+    for i in 0..archive.len() {
+        let mut file = archive.by_index(i).context("zip entry")?;
+        let Some(out_path) = file.enclosed_name() else {
+            continue;
+        };
+
+        let out_path = dest.join(out_path);
+        if file.is_dir() {
+            fs::create_dir_all(&out_path).context("create zip dir")?;
+            continue;
+        }
+
+        if let Some(parent) = out_path.parent() {
+            fs::create_dir_all(parent).context("create zip dir")?;
+        }
+
+        let mut out_file = fs::File::create(&out_path).context("write zip entry")?;
+        std::io::copy(&mut file, &mut out_file).context("extract zip entry")?;
+    }
+
+    Ok(())
+}
+
+fn extract_7z(path: &Path, dest: &Path) -> Result<()> {
+    match extract_with_7z(path, dest) {
+        Ok(Some(())) => Ok(()),
+        Ok(None) => sevenz_rust::decompress_file(path, dest)
+            .with_context(|| format!("extract 7z archive {path:?}")),
+        Err(err) => Err(err),
+    }
+}
+
+fn extract_with_7z(path: &Path, dest: &Path) -> Result<Option<()>> {
+    let mut command = Command::new("7z");
+    let output = command
+        .arg("x")
+        .arg("-y")
+        .arg("-mmt=on")
+        .arg(format!("-o{}", dest.display()))
+        .arg(path)
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .output();
+
+    let output = match output {
+        Ok(output) => output,
+        Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(err) => {
+            return Err(err).context("launch 7z");
+        }
+    };
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(anyhow::anyhow!("7z extraction failed: {}", stderr.trim()));
+    }
+
+    Ok(Some(()))
+}
+
+fn copy_dir(source: &Path, dest: &Path) -> Result<()> {
+    for entry in WalkDir::new(source) {
+        let entry = entry?;
+        let rel = entry.path().strip_prefix(source).context("rel path")?;
+        let target = dest.join(rel);
+        if entry.file_type().is_dir() {
+            fs::create_dir_all(&target).context("create dir")?;
+        } else if entry.file_type().is_file() {
+            if let Some(parent) = target.parent() {
+                fs::create_dir_all(parent).context("create file dir")?;
+            }
+            fs::copy(entry.path(), &target).context("copy file")?;
+        }
+    }
+    Ok(())
+}
+
+fn move_or_copy_dir(source: &Path, dest: &Path) -> Result<()> {
+    if dest.exists() {
+        fs::remove_dir_all(dest).context("remove existing target")?;
+    }
+    if let Some(parent) = dest.parent() {
+        fs::create_dir_all(parent).context("create target parent")?;
+    }
+    match fs::rename(source, dest) {
+        Ok(_) => Ok(()),
+        Err(_) => copy_dir(source, dest),
+    }
+}
+
+fn make_temp_dir(data_dir: &Path, suffix: &str) -> Result<PathBuf> {
+    let temp_root = data_dir.join("tmp");
+    fs::create_dir_all(&temp_root).context("create temp root")?;
+
+    let name = format!("import-{}-{}", now_timestamp(), suffix);
+    let temp_dir = temp_root.join(name);
+    fs::create_dir_all(&temp_dir).context("create temp dir")?;
+    Ok(temp_dir)
+}
+
+fn hash_path(path: &Path) -> String {
+    let mut hasher = Hasher::new();
+    hasher.update(path.to_string_lossy().as_bytes());
+    if let Ok(meta) = fs::metadata(path) {
+        if let Ok(modified) = meta.modified() {
+            if let Ok(duration) = modified.duration_since(UNIX_EPOCH) {
+                hasher.update(&duration.as_secs().to_le_bytes());
+            }
+        }
+    }
+
+    let hash = hasher.finalize();
+    format!("loose-{}", hash.to_hex())
+}
+
+fn now_timestamp() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64
+}
+
+#[derive(Debug)]
+struct PayloadScan {
+    pak_files: Vec<PathBuf>,
+    data_dir: Option<PathBuf>,
+    generated_dir: Option<PathBuf>,
+    bin_dir: Option<PathBuf>,
+    public_dir: Option<PathBuf>,
+}
+
+impl PayloadScan {
+    fn has_loose_targets(&self) -> bool {
+        self.data_dir.is_some()
+            || self.generated_dir.is_some()
+            || self.bin_dir.is_some()
+            || self.public_dir.is_some()
+    }
+
+    fn has_overlap(&self) -> bool {
+        let mut paths = Vec::new();
+        if let Some(path) = &self.data_dir {
+            paths.push(path);
+        }
+        if let Some(path) = &self.generated_dir {
+            paths.push(path);
+        }
+        if let Some(path) = &self.bin_dir {
+            paths.push(path);
+        }
+        if let Some(path) = &self.public_dir {
+            paths.push(path);
+        }
+
+        for (idx, path) in paths.iter().enumerate() {
+            for other in paths.iter().skip(idx + 1) {
+                if is_parent_path(path, other) || is_parent_path(other, path) {
+                    return true;
+                }
+            }
+        }
+
+        false
+    }
+}
+
+fn is_parent_path(parent: &Path, child: &Path) -> bool {
+    child.starts_with(parent) && child != parent
+}
+
+fn has_parent_named(path: &Path, needle: &str) -> bool {
+    path.ancestors()
+        .skip(1)
+        .filter_map(|ancestor| ancestor.file_name())
+        .any(|name| name.to_string_lossy().eq_ignore_ascii_case(needle))
+}
