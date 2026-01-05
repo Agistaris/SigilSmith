@@ -11,7 +11,19 @@ SigilSmith is a Linux-first TUI mod manager for Baldur's Gate 3. It focuses on n
 - Rust (stable toolchain)
 - BG3 installed (Steam native or Proton)
 
-## Run
+## Install
+
+Prebuilt Linux packages are published on GitHub Releases (AppImage, `.deb`, `.rpm`, and `.tar.gz`).
+See `docs/INSTALL.md` for the full install guide.
+
+### From Source
+
+```bash
+cargo build --release
+./target/release/sigilsmith
+```
+
+## Run (Dev)
 
 ```bash
 cargo run
@@ -32,10 +44,11 @@ cargo run
 - `m` move mode
 - `u` move up
 - `n` move down
-- `1` toggle pak target
-- `2` toggle Generated target
-- `3` toggle Data target
-- `4` toggle Bin target
+- `1` override: Auto (default target selection)
+- `2` override: Pak
+- `3` override: Generated
+- `4` override: Data
+- `5` override: Bin
 - `Left/Right/Enter` cycle conflict winner (Conflicts)
 - `Backspace` clear conflict override (Conflicts)
 - `PgUp/PgDn` scroll log
@@ -44,6 +57,17 @@ cargo run
 - `Del` remove mod from library
 - `d` deploy to game
 - `q` quit
+
+## Docs
+
+- `docs/INSTALL.md` install options and packages
+- `docs/RELEASE.md` release checklist and build steps
+- `docs/PUBLISH.md` publishing to mod sites
+- `docs/SUPPORT.md` donation options and setup
+
+## Support
+
+Support links (Ko-fi + GitHub Sponsors) are coming next update.
 
 ## Library Location
 

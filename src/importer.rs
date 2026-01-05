@@ -1,5 +1,5 @@
 use crate::library::{library_mod_root, InstallTarget, ModEntry, PakInfo};
-use anyhow::{Context, Result};
+use anyhow::{anyhow, Context, Result};
 use blake3::Hasher;
 use larian_formats::lspk;
 use std::{
@@ -132,8 +132,17 @@ fn import_pak_file(path: &Path, data_dir: &Path) -> Result<Vec<ModEntry>> {
 
 fn import_single_pak(path: &Path, data_dir: &Path, source_label: Option<&str>) -> Result<ModEntry> {
     let file = fs::File::open(path).context("open .pak")?;
-    let lspk = lspk::Reader::new(file)?.read()?;
-    let module_info = lspk.extract_meta_lsx()?.deserialize_as_mod_pak()?.module_info;
+    let lspk = lspk::Reader::new(file)
+        .context("read .pak header")?
+        .read()
+        .context("read .pak index")?;
+    let meta = lspk
+        .extract_meta_lsx()
+        .map_err(|_| anyhow!("missing meta.lsx"))?;
+    let module_info = meta
+        .deserialize_as_mod_pak()
+        .context("parse meta.lsx")?
+        .module_info;
     let pak_info = PakInfo::from_module_info(module_info.clone());
 
     let mod_id = pak_info.uuid.clone();

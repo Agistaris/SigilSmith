@@ -4,7 +4,9 @@ use crate::{
     deploy,
     game::{self, GameId},
     importer,
-    library::{FileOverride, normalize_label, Library, ModEntry, ProfileEntry, TargetKind},
+    library::{
+        FileOverride, normalize_label, Library, ModEntry, ProfileEntry, TargetKind, TargetOverride,
+    },
 };
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
@@ -30,6 +32,7 @@ pub enum InputPurpose {
     DuplicateProfile { source: String },
     ExportProfile { profile: String },
     ImportProfile,
+    FilterMods,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -220,8 +223,7 @@ pub struct App {
     pub focus: Focus,
     pub explorer_selected: usize,
     pub toast: Option<Toast>,
-    hint_index: usize,
-    last_hint_at: Instant,
+    pub mod_filter: String,
     import_queue: VecDeque<PathBuf>,
     import_active: Option<PathBuf>,
     import_tx: Sender<ImportMessage>,
@@ -297,8 +299,7 @@ impl App {
             focus: Focus::Mods,
             explorer_selected: 0,
             toast: None,
-            hint_index: 0,
-            last_hint_at: Instant::now(),
+            mod_filter: String::new(),
             import_queue: VecDeque::new(),
             import_active: None,
             import_tx,
@@ -341,11 +342,72 @@ impl App {
         Ok(app)
     }
 
-    pub fn profile_entries(&self) -> Vec<ProfileEntry> {
-        self.library
-            .active_profile()
-            .map(|profile| profile.order.clone())
-            .unwrap_or_default()
+    pub fn profile_counts(&self) -> (usize, usize) {
+        let Some(profile) = self.library.active_profile() else {
+            return (0, 0);
+        };
+        let total = profile.order.len();
+        let enabled = profile.order.iter().filter(|entry| entry.enabled).count();
+        (total, enabled)
+    }
+
+    pub fn visible_profile_indices(&self) -> Vec<usize> {
+        let Some(profile) = self.library.active_profile() else {
+            return Vec::new();
+        };
+        let mod_map = self.library.index_by_id();
+        let filter = self.mod_filter_normalized();
+        profile
+            .order
+            .iter()
+            .enumerate()
+            .filter_map(|(index, entry)| {
+                let mod_entry = mod_map.get(&entry.id)?;
+                if let Some(filter) = filter.as_deref() {
+                    if !mod_matches_filter(mod_entry, filter) {
+                        return None;
+                    }
+                }
+                Some(index)
+            })
+            .collect()
+    }
+
+    pub fn visible_profile_entries(&self) -> Vec<(usize, ProfileEntry)> {
+        let Some(profile) = self.library.active_profile() else {
+            return Vec::new();
+        };
+        let indices = self.visible_profile_indices();
+        indices
+            .into_iter()
+            .filter_map(|index| profile.order.get(index).cloned().map(|entry| (index, entry)))
+            .collect()
+    }
+
+    pub fn selected_profile_index(&self) -> Option<usize> {
+        let indices = self.visible_profile_indices();
+        indices.get(self.selected).copied()
+    }
+
+    fn selected_profile_id(&self) -> Option<String> {
+        let Some(profile) = self.library.active_profile() else {
+            return None;
+        };
+        let index = self.selected_profile_index()?;
+        profile.order.get(index).map(|entry| entry.id.clone())
+    }
+
+    pub fn mod_filter_active(&self) -> bool {
+        !self.mod_filter.trim().is_empty()
+    }
+
+    fn mod_filter_normalized(&self) -> Option<String> {
+        let trimmed = self.mod_filter.trim();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed.to_lowercase())
+        }
     }
 
     pub fn rename_preview(&self) -> Option<(String, String)> {
@@ -1168,31 +1230,11 @@ impl App {
     }
 
     pub fn tick(&mut self) {
-        if self.last_hint_at.elapsed() >= Duration::from_secs(4) {
-            self.hint_index = (self.hint_index + 1) % HINTS.len();
-            self.last_hint_at = Instant::now();
-        }
         if let Some(toast) = &self.toast {
             if toast.expires_at <= Instant::now() {
                 self.toast = None;
             }
         }
-    }
-
-    pub fn hint(&self) -> &'static str {
-        if self.move_mode {
-            return "Move mode: arrows to reorder | Enter/Esc to exit";
-        }
-        if self.focus == Focus::Explorer {
-            return "Explorer: Enter select | a/r/F2 | c | e export | p import | Tab focus";
-        }
-        if self.focus == Focus::Conflicts {
-            return "Conflicts: arrows select | Enter/Left/Right cycle | Backspace clear";
-        }
-        if !self.paths_ready() {
-            return "Setup required: press g to set game paths";
-        }
-        HINTS[self.hint_index]
     }
 
     pub fn paths_ready(&self) -> bool {
@@ -1272,6 +1314,26 @@ impl App {
         self.status = "Drop detected: importing after pause".to_string();
     }
 
+    pub fn enter_mod_filter(&mut self) {
+        self.move_mode = false;
+        self.input_mode = InputMode::Editing {
+            prompt: "Filter mods".to_string(),
+            buffer: self.mod_filter.clone(),
+            purpose: InputPurpose::FilterMods,
+            auto_submit: false,
+            last_edit_at: Instant::now(),
+        };
+        self.status = "Filter mods: type to match, Enter to apply".to_string();
+    }
+
+    pub fn clear_mod_filter(&mut self) {
+        if self.mod_filter.trim().is_empty() {
+            self.status = "Filter already cleared".to_string();
+            return;
+        }
+        self.set_mod_filter(String::new());
+    }
+
     pub fn handle_submit(&mut self, purpose: InputPurpose, value: String) -> Result<()> {
         match purpose {
             InputPurpose::ImportPath => self.import_mod(value),
@@ -1282,7 +1344,40 @@ impl App {
             InputPurpose::DuplicateProfile { source } => self.duplicate_profile(source, value),
             InputPurpose::ExportProfile { profile } => self.export_profile(profile, value),
             InputPurpose::ImportProfile => self.import_profile(value),
+            InputPurpose::FilterMods => {
+                self.set_mod_filter(value);
+                Ok(())
+            }
         }
+    }
+
+    fn set_mod_filter(&mut self, value: String) {
+        let trimmed = value.trim();
+        let previous = self.selected_profile_id();
+        self.mod_filter = trimmed.to_string();
+        self.selected = 0;
+        if let Some(previous_id) = previous {
+            if let Some(profile) = self.library.active_profile() {
+                let indices = self.visible_profile_indices();
+                if let Some(pos) = indices.iter().position(|index| {
+                    profile
+                        .order
+                        .get(*index)
+                        .map(|entry| entry.id == previous_id)
+                        .unwrap_or(false)
+                }) {
+                    self.selected = pos;
+                }
+            }
+        }
+        if self.mod_filter.is_empty() {
+            self.status = "Filter cleared".to_string();
+            self.log_info("Filter cleared".to_string());
+        } else {
+            self.status = format!("Filter set: \"{}\"", self.mod_filter);
+            self.log_info(format!("Filter set: \"{}\"", self.mod_filter));
+        }
+        self.clamp_selection();
     }
 
     pub fn import_mod(&mut self, raw_path: String) -> Result<()> {
@@ -1989,10 +2084,13 @@ impl App {
     }
 
     pub fn toggle_selected(&mut self) {
+        let Some(index) = self.selected_profile_index() else {
+            return;
+        };
         let Some(profile) = self.library.active_profile_mut() else {
             return;
         };
-        if let Some(entry) = profile.order.get_mut(self.selected) {
+        if let Some(entry) = profile.order.get_mut(index) {
             entry.enabled = !entry.enabled;
             self.queue_auto_deploy("enable toggle");
         }
@@ -2014,10 +2112,7 @@ impl App {
     }
 
     pub fn remove_selected(&mut self) {
-        let selected_id = match self.library.active_profile() {
-            Some(profile) => profile.order.get(self.selected).map(|entry| entry.id.clone()),
-            None => None,
-        };
+        let selected_id = self.selected_profile_id();
         let Some(selected_id) = selected_id else {
             return;
         };
@@ -2029,17 +2124,12 @@ impl App {
 
         self.status = "Mod removed from library".to_string();
         self.log_info("Mod removed from library".to_string());
-        if self.selected > 0 {
-            self.selected -= 1;
-        }
+        self.clamp_selection();
         self.queue_auto_deploy("mod removed");
     }
 
-    pub fn toggle_target(&mut self, kind: TargetKind) {
-        let selected_id = match self.library.active_profile() {
-            Some(profile) => profile.order.get(self.selected).map(|entry| entry.id.clone()),
-            None => None,
-        };
+    pub fn select_target_override(&mut self, selection: Option<TargetKind>) {
+        let selected_id = self.selected_profile_id();
         let Some(selected_id) = selected_id else {
             return;
         };
@@ -2052,34 +2142,62 @@ impl App {
             return;
         };
 
-        let Some(enabled) = mod_entry.toggle_target(kind) else {
-            self.status = "Target not present for this mod".to_string();
-            return;
-        };
-
-        let label = match kind {
-            TargetKind::Pak => "Pak",
-            TargetKind::Generated => "Generated",
-            TargetKind::Data => "Data",
-            TargetKind::Bin => "Bin",
-        };
-        self.status = format!("Target {label}: {}", if enabled { "enabled" } else { "disabled" });
+        if let Some(kind) = selection {
+            if !mod_entry.has_target_kind(kind) {
+                self.status = "Target not present for this mod".to_string();
+                return;
+            }
+            let mut present = HashSet::new();
+            for target in &mod_entry.targets {
+                present.insert(target.kind());
+            }
+            mod_entry.target_overrides.clear();
+            for present_kind in present {
+                mod_entry.target_overrides.push(TargetOverride {
+                    kind: present_kind,
+                    enabled: present_kind == kind,
+                });
+            }
+            let label = match kind {
+                TargetKind::Pak => "Pak",
+                TargetKind::Generated => "Generated",
+                TargetKind::Data => "Data",
+                TargetKind::Bin => "Bin",
+            };
+            self.status = format!("Target override: {label}");
+        } else {
+            mod_entry.target_overrides.clear();
+            self.status = "Target override: Auto".to_string();
+        }
         let _ = self.library.save(&self.config.data_dir);
-        self.queue_auto_deploy("target toggle");
+        self.queue_auto_deploy("target override");
     }
 
     pub fn move_selected_up(&mut self) {
+        let indices = self.visible_profile_indices();
+        if indices.is_empty() || self.selected == 0 {
+            return;
+        }
+        let current_index = match indices.get(self.selected) {
+            Some(index) => *index,
+            None => return,
+        };
+        let prev_index = match indices.get(self.selected - 1) {
+            Some(index) => *index,
+            None => return,
+        };
         let Some(profile) = self.library.active_profile_mut() else {
             return;
         };
-        let len = profile.order.len();
-        if self.selected == 0 || self.selected >= len {
+        if current_index >= profile.order.len() || prev_index >= profile.order.len() {
             return;
         }
-        profile.move_up(self.selected);
-        if self.selected > 0 {
-            self.selected -= 1;
+        if current_index == prev_index + 1 {
+            profile.move_up(current_index);
+        } else {
+            profile.order.swap(current_index, prev_index);
         }
+        self.selected = self.selected.saturating_sub(1);
         if self.move_mode {
             self.move_dirty = true;
         } else {
@@ -2088,22 +2206,140 @@ impl App {
     }
 
     pub fn move_selected_down(&mut self) {
+        let indices = self.visible_profile_indices();
+        if indices.is_empty() || self.selected + 1 >= indices.len() {
+            return;
+        }
+        let current_index = match indices.get(self.selected) {
+            Some(index) => *index,
+            None => return,
+        };
+        let next_index = match indices.get(self.selected + 1) {
+            Some(index) => *index,
+            None => return,
+        };
         let Some(profile) = self.library.active_profile_mut() else {
             return;
         };
-        let len = profile.order.len();
-        if self.selected + 1 >= len {
+        if current_index >= profile.order.len() || next_index >= profile.order.len() {
             return;
         }
-        profile.move_down(self.selected);
-        if self.selected + 1 < profile.order.len() {
-            self.selected += 1;
+        if next_index == current_index + 1 {
+            profile.move_down(current_index);
+        } else {
+            profile.order.swap(current_index, next_index);
         }
+        self.selected = (self.selected + 1).min(indices.len().saturating_sub(1));
         if self.move_mode {
             self.move_dirty = true;
         } else {
             self.queue_auto_deploy("order changed");
         }
+    }
+
+    pub fn enable_visible_mods(&mut self) {
+        let indices = self.visible_profile_indices();
+        if indices.is_empty() {
+            self.status = "No visible mods to enable".to_string();
+            return;
+        }
+        let Some(profile) = self.library.active_profile_mut() else {
+            return;
+        };
+        let mut changed = 0;
+        for index in indices {
+            if let Some(entry) = profile.order.get_mut(index) {
+                if !entry.enabled {
+                    entry.enabled = true;
+                    changed += 1;
+                }
+            }
+        }
+        if changed == 0 {
+            self.status = "Visible mods already enabled".to_string();
+            return;
+        }
+        self.status = format!("Enabled {changed} mod(s)");
+        self.log_info(format!("Enabled {changed} mod(s)"));
+        self.queue_auto_deploy("enable all");
+    }
+
+    pub fn disable_visible_mods(&mut self) {
+        let indices = self.visible_profile_indices();
+        if indices.is_empty() {
+            self.status = "No visible mods to disable".to_string();
+            return;
+        }
+        let Some(profile) = self.library.active_profile_mut() else {
+            return;
+        };
+        let mut changed = 0;
+        for index in indices {
+            if let Some(entry) = profile.order.get_mut(index) {
+                if entry.enabled {
+                    entry.enabled = false;
+                    changed += 1;
+                }
+            }
+        }
+        if changed == 0 {
+            self.status = "Visible mods already disabled".to_string();
+            return;
+        }
+        self.status = format!("Disabled {changed} mod(s)");
+        self.log_info(format!("Disabled {changed} mod(s)"));
+        self.queue_auto_deploy("disable all");
+    }
+
+    pub fn invert_visible_mods(&mut self) {
+        let indices = self.visible_profile_indices();
+        if indices.is_empty() {
+            self.status = "No visible mods to invert".to_string();
+            return;
+        }
+        let Some(profile) = self.library.active_profile_mut() else {
+            return;
+        };
+        for index in indices {
+            if let Some(entry) = profile.order.get_mut(index) {
+                entry.enabled = !entry.enabled;
+            }
+        }
+        self.status = "Toggled visible mods".to_string();
+        self.log_info("Toggled visible mods".to_string());
+        self.queue_auto_deploy("invert selection");
+    }
+
+    pub fn clear_visible_overrides(&mut self) {
+        let indices = self.visible_profile_indices();
+        if indices.is_empty() {
+            self.status = "No visible mods to clear overrides".to_string();
+            return;
+        }
+        let mod_ids: HashSet<String> = {
+            let Some(profile) = self.library.active_profile() else {
+                return;
+            };
+            indices
+                .iter()
+                .filter_map(|index| profile.order.get(*index).map(|entry| entry.id.clone()))
+                .collect()
+        };
+        let mut changed = 0;
+        for mod_entry in &mut self.library.mods {
+            if mod_ids.contains(&mod_entry.id) && !mod_entry.target_overrides.is_empty() {
+                mod_entry.target_overrides.clear();
+                changed += 1;
+            }
+        }
+        if changed == 0 {
+            self.status = "No overrides to clear".to_string();
+            return;
+        }
+        let _ = self.library.save(&self.config.data_dir);
+        self.status = format!("Cleared overrides on {changed} mod(s)");
+        self.log_info(format!("Cleared overrides on {changed} mod(s)"));
+        self.queue_auto_deploy("clear overrides");
     }
 
     fn queue_auto_deploy(&mut self, reason: &str) {
@@ -2315,11 +2551,7 @@ impl App {
     }
 
     pub fn clamp_selection(&mut self) {
-        let len = self
-            .library
-            .active_profile()
-            .map(|profile| profile.order.len())
-            .unwrap_or(0);
+        let len = self.visible_profile_indices().len();
         if len == 0 {
             self.selected = 0;
         } else if self.selected >= len {
@@ -2342,20 +2574,25 @@ impl App {
     }
 }
 
+fn mod_matches_filter(mod_entry: &ModEntry, filter: &str) -> bool {
+    let filter = filter.trim();
+    if filter.is_empty() {
+        return true;
+    }
+    let filter = filter.to_lowercase();
+    let mut haystacks = Vec::new();
+    haystacks.push(mod_entry.display_name());
+    haystacks.push(mod_entry.name.clone());
+    haystacks.push(mod_entry.id.clone());
+    if let Some(source) = mod_entry.source_label() {
+        haystacks.push(source.to_string());
+    }
+    haystacks
+        .into_iter()
+        .any(|value| value.to_lowercase().contains(&filter))
+}
+
 const LOG_CAPACITY: usize = 200;
-const HINTS: &[&str] = &[
-    "Drag & drop: .pak/.zip/.7z or Data/Generated/Public/bin folders",
-    "i: import path",
-    "Tab: cycle focus (Explorer/Mods/Conflicts)",
-    "Space: enable/disable (auto-deploy)",
-    "m: move mode",
-    "u/n: move mod order (auto-deploy)",
-    "Del: remove selected mod",
-    "g: set game paths",
-    "b: rollback last backup",
-    "1-4: toggle targets (Pak/Generated/Data/Bin)",
-    "PgUp/PgDn: scroll log",
-];
 
 fn expand_tilde(input: &str) -> PathBuf {
     let mut value = input.trim().to_string();
@@ -2472,6 +2709,9 @@ fn summarize_error(error: &str) -> String {
     }
     if lower.contains("not a directory") {
         return "expected a folder".to_string();
+    }
+    if lower.contains("missing meta.lsx") || lower.contains("meta.lsx") {
+        return "mod metadata missing".to_string();
     }
 
     last.to_string()

@@ -16,18 +16,36 @@ use ratatui::{
     text::{Line, Span},
     widgets::{
         Block, BorderType, Borders, Cell, Clear, List, ListItem, ListState, Padding, Paragraph,
-        Row, Table, TableState, Wrap,
+        Row, Scrollbar, ScrollbarOrientation, ScrollbarState, Table, TableState,
     },
 };
-use std::{io, path::Path, time::{Duration, Instant}};
+use std::{
+    io,
+    path::Path,
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+};
 
-const SIDE_PANEL_WIDTH: u16 = 44;
+const SIDE_PANEL_WIDTH: u16 = 40;
+const STATUS_WIDTH: u16 = SIDE_PANEL_WIDTH;
+const STATUS_HEIGHT: u16 = 3;
+const HEADER_HEIGHT: u16 = 3;
+const DETAILS_HEIGHT: u16 = 9;
+const CONTEXT_HEIGHT: u16 = 18;
+const LOG_MIN_HEIGHT: u16 = 5;
+const CONFLICTS_BAR_HEIGHT: u16 = STATUS_HEIGHT;
+const FOOTER_HEIGHT: u16 = 8;
+const FILTER_HEIGHT: u16 = 1;
+const TABLE_MIN_HEIGHT: u16 = 6;
+const MARQUEE_STEP_MS: u128 = 180;
+const SUBPANEL_PAD_X: u16 = 0;
+const SUBPANEL_PAD_TOP: u16 = 0;
 
 #[derive(Clone)]
 struct Theme {
     accent: Color,
     accent_soft: Color,
     border: Color,
+    row_alt_bg: Color,
     text: Color,
     muted: Color,
     success: Color,
@@ -35,28 +53,31 @@ struct Theme {
     error: Color,
     header_bg: Color,
     log_bg: Color,
+    subpanel_bg: Color,
 }
 
 impl Theme {
     fn new() -> Self {
         Self {
-            accent: Color::Rgb(120, 190, 255),
-            accent_soft: Color::Rgb(70, 110, 160),
-            border: Color::Rgb(65, 75, 90),
-            text: Color::Rgb(220, 230, 240),
-            muted: Color::Rgb(135, 145, 155),
-            success: Color::Rgb(120, 220, 140),
-            warning: Color::Rgb(230, 200, 120),
-            error: Color::Rgb(235, 100, 95),
-            header_bg: Color::Rgb(22, 28, 36),
-            log_bg: Color::Rgb(16, 20, 26),
+            accent: Color::Rgb(120, 198, 255),
+            accent_soft: Color::Rgb(58, 92, 138),
+            border: Color::Rgb(72, 84, 102),
+            row_alt_bg: Color::Rgb(26, 30, 36),
+            text: Color::Rgb(216, 226, 236),
+            muted: Color::Rgb(124, 134, 146),
+            success: Color::Rgb(120, 220, 150),
+            warning: Color::Rgb(235, 200, 120),
+            error: Color::Rgb(240, 104, 100),
+            header_bg: Color::Rgb(18, 24, 34),
+            log_bg: Color::Rgb(13, 18, 26),
+            subpanel_bg: Color::Rgb(18, 30, 48),
         }
     }
 
     fn block(&self, title: &'static str) -> Block<'static> {
         Block::default()
             .borders(Borders::ALL)
-            .border_type(BorderType::Rounded)
+            .border_type(BorderType::Plain)
             .border_style(Style::default().fg(self.border))
             .title(Span::styled(
                 title,
@@ -67,21 +88,23 @@ impl Theme {
     }
 
     fn panel(&self, title: &'static str) -> Block<'static> {
-        self.block(title).padding(Padding {
-            left: 1,
-            right: 1,
-            top: 1,
-            bottom: 0,
-        })
+        self.block(title)
     }
 
-    fn panel_dense(&self, title: &'static str) -> Block<'static> {
-        self.block(title).padding(Padding {
-            left: 0,
-            right: 1,
-            top: 1,
-            bottom: 0,
-        })
+    fn panel_tight(&self, title: &'static str) -> Block<'static> {
+        self.block(title)
+    }
+
+    fn subpanel(&self, title: &'static str) -> Block<'static> {
+        Block::default()
+            .borders(Borders::NONE)
+            .title(Span::styled(
+                title,
+                Style::default()
+                    .fg(self.accent)
+                    .add_modifier(Modifier::BOLD),
+            ))
+            .style(Style::default().bg(self.subpanel_bg))
     }
 }
 
@@ -284,9 +307,23 @@ fn handle_explorer_mode(app: &mut App, key: KeyEvent) -> Result<()> {
 
 fn handle_mods_mode(app: &mut App, key: KeyEvent) -> Result<()> {
     match (key.code, key.modifiers) {
+        (KeyCode::Char('f'), mods) | (KeyCode::Char('F'), mods)
+            if mods.contains(KeyModifiers::CONTROL) =>
+        {
+            app.enter_mod_filter();
+        }
+        (KeyCode::Char('l'), mods) | (KeyCode::Char('L'), mods)
+            if mods.contains(KeyModifiers::CONTROL) =>
+        {
+            app.clear_mod_filter();
+        }
         (KeyCode::Char('m'), _) | (KeyCode::Char('M'), _) => app.toggle_move_mode(),
         (KeyCode::Enter, _) | (KeyCode::Esc, _) if app.move_mode => app.toggle_move_mode(),
         (KeyCode::Char(' '), _) => app.toggle_selected(),
+        (KeyCode::Char('a'), _) | (KeyCode::Char('A'), _) => app.enable_visible_mods(),
+        (KeyCode::Char('s'), _) | (KeyCode::Char('S'), _) => app.disable_visible_mods(),
+        (KeyCode::Char('x'), _) | (KeyCode::Char('X'), _) => app.invert_visible_mods(),
+        (KeyCode::Char('c'), _) | (KeyCode::Char('C'), _) => app.clear_visible_overrides(),
         (KeyCode::Delete, _) | (KeyCode::Backspace, _) => app.remove_selected(),
         (KeyCode::Char('k'), _) | (KeyCode::Char('K'), _) | (KeyCode::Up, _) => {
             if app.move_mode {
@@ -304,10 +341,11 @@ fn handle_mods_mode(app: &mut App, key: KeyEvent) -> Result<()> {
         }
         (KeyCode::Char('u'), _) | (KeyCode::Char('U'), _) => app.move_selected_up(),
         (KeyCode::Char('n'), _) | (KeyCode::Char('N'), _) => app.move_selected_down(),
-        (KeyCode::Char('1'), _) => app.toggle_target(TargetKind::Pak),
-        (KeyCode::Char('2'), _) => app.toggle_target(TargetKind::Generated),
-        (KeyCode::Char('3'), _) => app.toggle_target(TargetKind::Data),
-        (KeyCode::Char('4'), _) => app.toggle_target(TargetKind::Bin),
+        (KeyCode::Char('1'), _) => app.select_target_override(None),
+        (KeyCode::Char('2'), _) => app.select_target_override(Some(TargetKind::Pak)),
+        (KeyCode::Char('3'), _) => app.select_target_override(Some(TargetKind::Generated)),
+        (KeyCode::Char('4'), _) => app.select_target_override(Some(TargetKind::Data)),
+        (KeyCode::Char('5'), _) => app.select_target_override(Some(TargetKind::Bin)),
         (KeyCode::Char(c), mods)
             if !mods.contains(KeyModifiers::CONTROL) && !mods.contains(KeyModifiers::ALT) =>
         {
@@ -366,6 +404,7 @@ fn handle_input_mode(
                 }
                 InputPurpose::SetupGameRoot => "Game root setup cancelled".to_string(),
                 InputPurpose::SetupLarianDir => "User dir setup cancelled".to_string(),
+                InputPurpose::FilterMods => "Filter cancelled".to_string(),
             };
             app.set_toast(&cancel_message, ToastLevel::Warn, Duration::from_secs(2));
             if matches!(
@@ -379,7 +418,8 @@ fn handle_input_mode(
             let value = buffer.trim().to_string();
             app.input_mode = InputMode::Normal;
             keep_editing = false;
-            if !value.is_empty() {
+            let should_submit = !value.is_empty() || matches!(purpose, InputPurpose::FilterMods);
+            if should_submit {
                 if let Err(err) = app.handle_submit(purpose.clone(), value) {
                     app.status = format!("Action failed: {err}");
                     app.log_error(format!("Action failed: {err}"));
@@ -621,92 +661,157 @@ fn should_start_import(c: char) -> bool {
 fn draw(frame: &mut Frame<'_>, app: &App) {
     let area = frame.size();
     let theme = Theme::new();
-    let focus_label = match app.focus {
-        Focus::Explorer => "Explorer",
-        Focus::Mods => "Mod Stack",
-        Focus::Conflicts => "Conflicts",
-    };
     let chunks = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Length(3), Constraint::Min(10), Constraint::Length(11)])
+        .constraints([
+            Constraint::Length(HEADER_HEIGHT),
+            Constraint::Min(10),
+            Constraint::Length(FOOTER_HEIGHT),
+        ])
         .split(area);
 
-    let (rows, total_mods, enabled_mods) = build_rows(app, &theme);
+    let (rows, counts) = build_rows(app, &theme);
     let profile_label = app.active_profile_label();
     let renaming_active = app.is_renaming_active_profile();
-    let header = Paragraph::new(vec![
+    let filter_active = app.mod_filter_active();
+    let mods_label = format_visible_count(counts.visible_total, counts.total);
+    let enabled_label = format_enabled_count(
+        counts.visible_enabled,
+        counts.visible_total,
+        counts.enabled,
+        filter_active,
+    );
+    let status_color = status_color(app, &theme);
+    frame.render_widget(
+        Block::default().style(Style::default().bg(theme.header_bg)),
+        chunks[0],
+    );
+    let header_rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(1),
+            Constraint::Length(1),
+            Constraint::Length(1),
+        ])
+        .split(chunks[0]);
+    let mut header_line_area = header_rows[1];
+    if header_line_area.width > 2 {
+        header_line_area.x = header_line_area.x.saturating_add(1);
+        header_line_area.width = header_line_area.width.saturating_sub(2);
+    }
+
+    let title_text = format!("SigilSmith | {}", app.game_id.display_name());
+    let stats_text = format!(
+        "Profile: {} | Mods {} | Enabled {}",
+        profile_label, mods_label, enabled_label
+    );
+    let available = header_line_area.width as usize;
+    let mut left_width = title_text.chars().count().min(available);
+    let mut right_width = stats_text.chars().count().min(available.saturating_sub(left_width));
+    let min_middle = 1usize;
+    if left_width + right_width + min_middle > available {
+        let overflow = left_width + right_width + min_middle - available;
+        if right_width >= left_width {
+            right_width = right_width.saturating_sub(overflow);
+        } else {
+            left_width = left_width.saturating_sub(overflow);
+        }
+    }
+    let middle_width = available.saturating_sub(left_width + right_width);
+    let header_line_chunks = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Length(left_width as u16),
+            Constraint::Length(middle_width as u16),
+            Constraint::Length(right_width as u16),
+        ])
+        .split(header_line_area);
+
+    let title_prefix = "SigilSmith";
+    let title_bar = " | ";
+    let max_title = header_line_chunks[0].width as usize;
+    let title_line = if max_title <= title_prefix.len() {
+        Line::from(Span::styled(
+            truncate_text(title_prefix, max_title),
+            Style::default()
+                .fg(theme.accent)
+                .add_modifier(Modifier::BOLD),
+        ))
+    } else {
+        let game_width = max_title.saturating_sub(title_prefix.len() + title_bar.len());
+        let game_name = truncate_text(app.game_id.display_name(), game_width);
         Line::from(vec![
             Span::styled(
-                "SigilSmith",
+                title_prefix,
                 Style::default()
                     .fg(theme.accent)
                     .add_modifier(Modifier::BOLD),
             ),
-            Span::raw("  "),
-            Span::styled(app.game_id.display_name(), Style::default().fg(theme.text)),
-            Span::raw("  "),
-            Span::styled(
-                focus_label,
-                Style::default()
-                    .fg(theme.muted)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            if app.move_mode {
-                Span::styled(
-                    "  MOVE",
-                    Style::default().fg(theme.warning).add_modifier(Modifier::BOLD),
-                )
+            Span::styled(title_bar, Style::default().fg(theme.muted)),
+            Span::styled(game_name, Style::default().fg(theme.text)),
+        ])
+    };
+    let title = Paragraph::new(title_line)
+        .style(Style::default().bg(theme.header_bg))
+        .alignment(Alignment::Left);
+    frame.render_widget(title, header_line_chunks[0]);
+
+    if middle_width > 0 {
+        let tabs_line = build_focus_tabs_line(app, &theme);
+        let tabs = Paragraph::new(tabs_line)
+            .style(Style::default().bg(theme.header_bg))
+            .alignment(Alignment::Center);
+        frame.render_widget(tabs, header_line_chunks[1]);
+    }
+
+    let stats_line = Line::from(vec![
+        Span::styled("Profile: ", Style::default().fg(theme.muted)),
+        Span::styled(
+            profile_label,
+            Style::default().fg(if renaming_active {
+                theme.warning
             } else {
-                Span::raw("")
-            },
-        ]),
-        Line::from(""),
-        Line::from(vec![
-            Span::styled("Profile: ", Style::default().fg(theme.muted)),
-            Span::styled(
-                profile_label,
-                Style::default().fg(if renaming_active {
-                    theme.warning
-                } else {
-                    theme.accent
-                }),
-            ),
-            if renaming_active {
-                Span::styled(" (renaming)", Style::default().fg(theme.muted))
-            } else {
-                Span::raw("")
-            },
-            Span::raw("   "),
-            Span::styled("Mods: ", Style::default().fg(theme.muted)),
-            Span::styled(total_mods.to_string(), Style::default().fg(theme.text)),
-            Span::raw("   "),
-            Span::styled("Enabled: ", Style::default().fg(theme.muted)),
-            Span::styled(
-                enabled_mods.to_string(),
-                Style::default().fg(theme.success).add_modifier(Modifier::BOLD),
-            ),
-        ]),
-    ])
-    .style(Style::default().bg(theme.header_bg))
-    .alignment(Alignment::Center);
-    frame.render_widget(header, chunks[0]);
+                theme.accent
+            }),
+        ),
+        Span::styled(" | ", Style::default().fg(theme.muted)),
+        Span::styled("Mods ", Style::default().fg(theme.muted)),
+        Span::styled(mods_label.clone(), Style::default().fg(theme.text)),
+        Span::styled(" | ", Style::default().fg(theme.muted)),
+        Span::styled("Enabled ", Style::default().fg(theme.muted)),
+        Span::styled(
+            enabled_label.clone(),
+            Style::default().fg(theme.success).add_modifier(Modifier::BOLD),
+        ),
+    ]);
+    let stats = Paragraph::new(stats_line)
+        .style(Style::default().bg(theme.header_bg))
+        .alignment(Alignment::Right);
+    frame.render_widget(stats, header_line_chunks[2]);
 
     let body_chunks = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints([
-            Constraint::Length(SIDE_PANEL_WIDTH),
-            Constraint::Min(20),
-            Constraint::Length(SIDE_PANEL_WIDTH),
-        ])
+        .constraints([Constraint::Length(SIDE_PANEL_WIDTH), Constraint::Min(20)])
         .split(chunks[1]);
+    let left_chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(10), Constraint::Length(CONTEXT_HEIGHT)])
+        .split(body_chunks[0]);
 
+    let explorer_block = theme
+        .panel_tight("Explorer")
+        .border_style(Style::default().fg(if app.focus == Focus::Explorer {
+            theme.accent
+        } else {
+            theme.border
+        }));
     let explorer_items = build_explorer_items(app, &theme);
     if explorer_items.is_empty() {
         let empty = Paragraph::new("No games available.")
             .style(Style::default().fg(theme.muted))
-            .block(theme.panel("Explorer"))
+            .block(explorer_block)
             .alignment(Alignment::Center);
-        frame.render_widget(empty, body_chunks[0]);
+        frame.render_widget(empty, left_chunks[0]);
     } else {
         let highlight_style = if app.focus == Focus::Explorer {
             Style::default()
@@ -714,31 +819,72 @@ fn draw(frame: &mut Frame<'_>, app: &App) {
                 .fg(Color::Black)
                 .add_modifier(Modifier::BOLD)
         } else {
-            Style::default().fg(theme.text)
+            Style::default().bg(theme.header_bg).fg(theme.text)
         };
         let explorer = List::new(explorer_items)
-            .block(theme.panel("Explorer"))
+            .block(explorer_block)
             .highlight_style(highlight_style)
-            .highlight_symbol(if app.focus == Focus::Explorer { ">" } else { " " });
+            .highlight_symbol("");
         let mut state = ListState::default();
         state.select(Some(app.explorer_selected));
-        frame.render_stateful_widget(explorer, body_chunks[0], &mut state);
+        frame.render_stateful_widget(explorer, left_chunks[0], &mut state);
     }
 
+    let mod_stack_block = theme
+        .block("Mod Stack")
+        .border_style(Style::default().fg(if app.focus == Focus::Mods {
+            theme.accent
+        } else {
+            theme.border
+        }));
+    let mod_stack_inner = mod_stack_block.inner(body_chunks[1]);
+    frame.render_widget(mod_stack_block, body_chunks[1]);
+
+    let details_height = DETAILS_HEIGHT
+        .min(mod_stack_inner.height.saturating_sub(TABLE_MIN_HEIGHT + FILTER_HEIGHT).max(3));
+    let mod_chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(FILTER_HEIGHT),
+            Constraint::Min(TABLE_MIN_HEIGHT),
+            Constraint::Length(details_height),
+        ])
+        .split(mod_stack_inner);
+
+    render_filter_bar(frame, app, &theme, mod_chunks[0], &counts);
+
+    let table_chunks = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Min(10), Constraint::Length(1)])
+        .split(mod_chunks[1]);
+
+    let row_count = rows.len();
     if rows.is_empty() {
         let empty = Paragraph::new("Drop a mod archive or folder to import.")
             .style(Style::default().fg(theme.muted))
-            .block(theme.panel_dense("Mod Stack"))
             .alignment(Alignment::Center);
-        frame.render_widget(empty, body_chunks[1]);
+        frame.render_widget(empty, table_chunks[0]);
     } else {
+        if table_chunks[0].height > 0 {
+            let header_bg_area = Rect {
+                x: table_chunks[0].x,
+                y: table_chunks[0].y,
+                width: table_chunks[0].width.saturating_add(table_chunks[1].width),
+                height: 1,
+            };
+            frame.render_widget(
+                Block::default().style(Style::default().bg(theme.header_bg)),
+                header_bg_area,
+            );
+        }
         let table = Table::new(
             rows,
             [
                 Constraint::Length(3),
                 Constraint::Length(5),
-                Constraint::Length(7),
                 Constraint::Length(6),
+                Constraint::Length(5),
+                Constraint::Length(10),
                 Constraint::Min(10),
             ],
         )
@@ -747,32 +893,97 @@ fn draw(frame: &mut Frame<'_>, app: &App) {
             Cell::from("Order"),
             Cell::from("Kind"),
             Cell::from("Path"),
+            Cell::from("Override"),
             Cell::from("Mod"),
         ])
-        .style(Style::default().fg(theme.text).add_modifier(Modifier::BOLD)))
-        .column_spacing(1)
-        .block(theme.panel_dense("Mod Stack"))
+        .style(
+            Style::default()
+                .fg(theme.accent)
+                .bg(theme.header_bg)
+                .add_modifier(Modifier::BOLD),
+        ))
+        .column_spacing(3)
         .highlight_style(if app.focus == Focus::Mods {
             Style::default()
                 .bg(theme.accent_soft)
                 .fg(Color::Black)
                 .add_modifier(Modifier::BOLD)
         } else {
-            Style::default().fg(theme.text)
+            Style::default().bg(theme.header_bg).fg(theme.text)
         })
-        .highlight_symbol(if app.focus == Focus::Mods { ">" } else { " " });
+        .highlight_symbol("");
 
         let mut state = TableState::default();
         state.select(Some(app.selected));
-        frame.render_stateful_widget(table, body_chunks[1], &mut state);
+        let view_height = table_chunks[0].height.saturating_sub(1) as usize;
+        let table_area = Rect {
+            x: table_chunks[0].x,
+            y: table_chunks[0].y,
+            width: table_chunks[0]
+                .width
+                .saturating_add(table_chunks[1].width),
+            height: table_chunks[0].height,
+        };
+        extend_table_stripes(
+            frame,
+            &theme,
+            table_area,
+            state.offset(),
+            row_count,
+            view_height,
+            app.selected,
+            app.focus == Focus::Mods,
+        );
+        frame.render_stateful_widget(table, table_chunks[0], &mut state);
+        if row_count > view_height && view_height > 0 {
+            let mut scroll_state = ScrollbarState::new(row_count)
+                .position(state.offset())
+                .viewport_content_length(view_height);
+            let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
+                .track_symbol(Some("|"))
+                .thumb_symbol("#")
+                .begin_symbol(None)
+                .end_symbol(None)
+                .track_style(Style::default().fg(theme.border))
+                .thumb_style(Style::default().fg(theme.accent));
+            frame.render_stateful_widget(scrollbar, table_chunks[1], &mut scroll_state);
+        }
     }
 
-    let right_chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Length(9), Constraint::Min(8), Constraint::Length(9)])
-        .split(body_chunks[2]);
+    let details_block = theme.subpanel("Details");
+    let details_fill = Block::default().style(Style::default().bg(theme.subpanel_bg));
+    frame.render_widget(details_fill, mod_chunks[2]);
+    let details_inner = details_block.inner(mod_chunks[2]);
+    let details_content_width =
+        details_inner.width.saturating_sub(SUBPANEL_PAD_X.saturating_mul(2)) as usize;
+    let details_lines = build_details(app, &theme, details_content_width);
+    let details_lines = pad_lines(
+        details_lines,
+        SUBPANEL_PAD_X as usize,
+        SUBPANEL_PAD_TOP as usize,
+    );
+    let details = Paragraph::new(details_lines)
+        .style(Style::default().fg(theme.text).bg(theme.subpanel_bg))
+        .block(details_block);
+    frame.render_widget(details, mod_chunks[2]);
 
-    let navigator = Paragraph::new(vec![
+    let context_block = theme.block("Context");
+    let context_inner = context_block.inner(left_chunks[1]);
+    frame.render_widget(context_block, left_chunks[1]);
+
+    let min_context_lines = 7u16;
+    let legend_height = details_height.min(
+        context_inner
+            .height
+            .saturating_sub(min_context_lines)
+            .max(3),
+    );
+    let context_chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(min_context_lines), Constraint::Length(legend_height)])
+        .split(context_inner);
+
+    let context_lines = vec![
         Line::from(Span::styled("Active", Style::default().fg(theme.accent))),
         Line::from(vec![
             Span::styled("Game: ", Style::default().fg(theme.muted)),
@@ -796,10 +1007,10 @@ fn draw(frame: &mut Frame<'_>, app: &App) {
         ]),
         Line::from(vec![
             Span::styled("Mods: ", Style::default().fg(theme.muted)),
-            Span::styled(total_mods.to_string(), Style::default().fg(theme.text)),
+            Span::styled(mods_label.clone(), Style::default().fg(theme.text)),
             Span::raw("   "),
             Span::styled("Enabled: ", Style::default().fg(theme.muted)),
-            Span::styled(enabled_mods.to_string(), Style::default().fg(theme.text)),
+            Span::styled(enabled_label.clone(), Style::default().fg(theme.text)),
         ]),
         Line::from(vec![
             Span::styled("Conflicts: ", Style::default().fg(theme.muted)),
@@ -817,55 +1028,132 @@ fn draw(frame: &mut Frame<'_>, app: &App) {
             "Auto-deploy: On",
             Style::default().fg(theme.muted),
         )),
-    ])
-    .style(Style::default().fg(theme.text))
-    .block(theme.panel("Context"));
-    frame.render_widget(navigator, right_chunks[0]);
+    ];
+    let context_widget = Paragraph::new(context_lines)
+        .style(Style::default().fg(theme.text));
+    frame.render_widget(context_widget, context_chunks[0]);
 
-    let details_block = theme.panel("Details");
-    let details_inner = details_block.inner(right_chunks[1]);
-    let details_lines = build_details(app, &theme, details_inner.width as usize);
-    let details = Paragraph::new(details_lines)
-        .style(Style::default().fg(theme.text))
-        .block(details_block)
-        .wrap(Wrap { trim: false });
-    frame.render_widget(details, right_chunks[1]);
-
-    if app.focus == Focus::Conflicts {
-        let conflict_block = theme.panel("Conflicts");
-        let conflict_inner = conflict_block.inner(right_chunks[2]);
-        let conflict_lines = build_conflict_lines(app, &theme, conflict_inner.height as usize);
-        let conflicts = Paragraph::new(conflict_lines)
-            .style(Style::default().fg(theme.text))
-            .block(conflict_block);
-        frame.render_widget(conflicts, right_chunks[2]);
-    } else {
-        let overrides = Paragraph::new(build_override_lines(app, &theme))
-            .style(Style::default().fg(theme.text))
-            .block(theme.panel("Overrides"));
-        frame.render_widget(overrides, right_chunks[2]);
-    }
+    let legend_block = theme.subpanel("Legend");
+    let legend_fill = Block::default().style(Style::default().bg(theme.subpanel_bg));
+    frame.render_widget(legend_fill, context_chunks[1]);
+    let legend_inner = legend_block.inner(context_chunks[1]);
+    let legend_content_width =
+        legend_inner.width.saturating_sub(SUBPANEL_PAD_X.saturating_mul(2)) as usize;
+    let legend_content_height = legend_inner.height.saturating_sub(SUBPANEL_PAD_TOP) as usize;
+    let legend_lines = build_legend_lines(
+        app,
+        &theme,
+        legend_content_width,
+        legend_content_height,
+    );
+    let legend_lines = pad_lines(
+        legend_lines,
+        SUBPANEL_PAD_X as usize,
+        SUBPANEL_PAD_TOP as usize,
+    );
+    let overrides = Paragraph::new(legend_lines)
+        .style(Style::default().fg(theme.text).bg(theme.subpanel_bg))
+        .block(legend_block);
+    frame.render_widget(overrides, context_chunks[1]);
 
     let footer_chunks = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Length(4), Constraint::Length(7)])
+        .constraints([
+            Constraint::Min(LOG_MIN_HEIGHT),
+            Constraint::Length(CONFLICTS_BAR_HEIGHT),
+        ])
         .split(chunks[2]);
 
-    let status_block = theme.panel("Status");
-    let status_inner = status_block.inner(footer_chunks[0]);
-    let footer = Paragraph::new(status_bar_line(app, status_inner.width))
-        .style(Style::default().fg(theme.text))
-        .block(status_block);
-    frame.render_widget(footer, footer_chunks[0]);
-
-    let log_area = footer_chunks[1];
+    let log_area = footer_chunks[0];
     let log_block = theme.panel("Log").style(Style::default().bg(theme.log_bg));
     let log_inner = log_block.inner(log_area);
-    let log_lines = build_log_lines(app, &theme, log_inner.height as usize);
+    frame.render_widget(log_block, log_area);
+    let log_chunks = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Min(10), Constraint::Length(1)])
+        .split(log_inner);
+    let log_lines = build_log_lines(app, &theme, log_chunks[0].height as usize);
     let log = Paragraph::new(log_lines)
-        .style(Style::default().fg(theme.text).bg(theme.log_bg))
-        .block(log_block);
-    frame.render_widget(log, log_area);
+        .style(Style::default().fg(theme.text).bg(theme.log_bg));
+    frame.render_widget(log, log_chunks[0]);
+    let log_total = app.logs.len();
+    let log_view = log_chunks[0].height.max(1) as usize;
+    let max_scroll = log_total.saturating_sub(log_view);
+    let scroll = app.log_scroll.min(max_scroll);
+    let log_start = log_total.saturating_sub(log_view + scroll);
+    if log_total > log_view && log_view > 0 {
+        let mut scroll_state = ScrollbarState::new(log_total)
+            .position(log_start)
+            .viewport_content_length(log_view);
+        let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
+            .track_symbol(Some("|"))
+            .thumb_symbol("#")
+            .begin_symbol(None)
+            .end_symbol(None)
+            .track_style(Style::default().fg(theme.border))
+            .thumb_style(Style::default().fg(theme.accent));
+        frame.render_stateful_widget(scrollbar, log_chunks[1], &mut scroll_state);
+    }
+
+    let status_row = footer_chunks[1];
+    let bottom_chunks = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Min(10), Constraint::Length(STATUS_WIDTH)])
+        .split(status_row);
+
+    let conflict_area = bottom_chunks[0];
+    let status_area = bottom_chunks[1];
+
+    let conflict_bg = if app.focus == Focus::Conflicts {
+        theme.accent_soft
+    } else {
+        theme.log_bg
+    };
+    let conflict_block = Block::default()
+        .borders(Borders::NONE)
+        .style(Style::default().bg(conflict_bg))
+        .padding(Padding {
+            left: 1,
+            right: 1,
+            top: 0,
+            bottom: 0,
+        });
+    frame.render_widget(conflict_block.clone(), conflict_area);
+    let conflict_inner = conflict_block.inner(conflict_area);
+    if conflict_inner.height > 0 && conflict_inner.width > 0 {
+        let line_y = conflict_inner.y + (conflict_inner.height.saturating_sub(1) / 2);
+        let line_area = Rect {
+            x: conflict_inner.x,
+            y: line_y,
+            width: conflict_inner.width,
+            height: 1,
+        };
+        let conflict_line = build_conflict_banner(app, &theme, line_area.width as usize);
+        let conflicts = Paragraph::new(conflict_line)
+            .style(Style::default().bg(conflict_bg))
+            .alignment(Alignment::Left);
+        frame.render_widget(conflicts, line_area);
+    }
+
+    let status_bg = conflict_bg;
+    let status_block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(status_color))
+        .style(Style::default().bg(status_bg))
+        .padding(Padding {
+            left: 1,
+            right: 1,
+            top: 0,
+            bottom: 0,
+        });
+    let status_inner = status_block.inner(status_area);
+    let status_text = truncate_text(&app.status, status_inner.width as usize);
+    let status_widget = Paragraph::new(status_text)
+        .style(Style::default().fg(status_color).bg(status_bg))
+        .alignment(Alignment::Left)
+        .block(status_block);
+    frame.render_widget(status_widget, status_area);
 
     if app.dialog.is_some() {
         draw_dialog(frame, app, &theme);
@@ -873,40 +1161,143 @@ fn draw(frame: &mut Frame<'_>, app: &App) {
     draw_toast(frame, app, &theme, chunks[1]);
 }
 
-fn status_bar_line(app: &App, width: u16) -> String {
-    let width = width as usize;
-    let (left, right) = match &app.input_mode {
-        InputMode::Normal => (format!("Status: {}", app.status), app.hint().to_string()),
+fn current_filter_value(app: &App) -> (String, bool) {
+    match &app.input_mode {
         InputMode::Editing {
-            prompt,
+            purpose: InputPurpose::FilterMods,
             buffer,
-            auto_submit,
             ..
-        } => {
-            let right = if *auto_submit {
-                "Auto import: pause to accept | Esc cancel"
-            } else {
-                "Enter confirm | Esc cancel"
-            };
-            (format!("{prompt}: {buffer}"), right.to_string())
-        }
+        } => (buffer.clone(), true),
+        _ => (app.mod_filter.clone(), false),
+    }
+}
+
+fn render_filter_bar(
+    frame: &mut Frame<'_>,
+    app: &App,
+    theme: &Theme,
+    area: Rect,
+    counts: &ModCounts,
+) {
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+    frame.render_widget(
+        Block::default().style(Style::default().bg(theme.header_bg)),
+        area,
+    );
+    let (filter_value, editing) = current_filter_value(app);
+    let trimmed = filter_value.trim();
+    let filter_active = !trimmed.is_empty();
+    let placeholder = if editing { "<type to filter>" } else { "<all>" };
+    let value_text = if filter_active { trimmed } else { placeholder };
+    let value_style = if editing {
+        Style::default()
+            .fg(theme.warning)
+            .add_modifier(Modifier::BOLD)
+    } else if filter_active {
+        Style::default().fg(theme.accent)
+    } else {
+        Style::default().fg(theme.muted)
     };
+    let right_label = if app.mod_filter_active() {
+        format!("Showing: {}/{}", counts.visible_total, counts.total)
+    } else {
+        format!("Total: {}", counts.total)
+    };
+    let right_width = right_label.chars().count() as u16;
+    let right_width = right_width.min(area.width);
+    let filter_chunks = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Min(10), Constraint::Length(right_width)])
+        .split(area);
+    let left_line = Line::from(vec![
+        Span::styled("Filter: ", Style::default().fg(theme.muted)),
+        Span::styled(value_text.to_string(), value_style),
+    ]);
+    let left = Paragraph::new(left_line)
+        .style(Style::default().bg(theme.header_bg))
+        .alignment(Alignment::Left);
+    frame.render_widget(left, filter_chunks[0]);
+    let right = Paragraph::new(Line::from(Span::styled(
+        right_label,
+        Style::default().fg(theme.muted),
+    )))
+    .style(Style::default().bg(theme.header_bg))
+    .alignment(Alignment::Right);
+    frame.render_widget(right, filter_chunks[1]);
+}
 
-    if width == 0 {
-        return String::new();
-    }
-
-    if left.len() + right.len() + 1 > width {
-        let available = width.saturating_sub(left.len() + 1);
-        let mut trimmed_right = right;
-        if trimmed_right.len() > available {
-            trimmed_right.truncate(available);
+fn build_focus_tabs_line(app: &App, theme: &Theme) -> Line<'static> {
+    let tabs = [
+        ("Explorer", Focus::Explorer),
+        ("Mods", Focus::Mods),
+        ("Conflicts", Focus::Conflicts),
+    ];
+    let mut spans = Vec::new();
+    for (index, (label, focus)) in tabs.iter().enumerate() {
+        if index > 0 {
+            spans.push(Span::styled(" | ", Style::default().fg(theme.muted)));
         }
-        return format!("{left} {}", trimmed_right);
+        let style = if app.focus == *focus {
+            Style::default()
+                .fg(theme.accent)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(theme.muted)
+        };
+        spans.push(Span::styled((*label).to_string(), style));
     }
+    Line::from(spans)
+}
 
-    let spaces = width - left.len() - right.len();
-    format!("{left}{}{}", " ".repeat(spaces), right)
+fn format_visible_count(visible: usize, total: usize) -> String {
+    if total == 0 {
+        "0".to_string()
+    } else if visible == total {
+        total.to_string()
+    } else {
+        format!("{visible}/{total}")
+    }
+}
+
+fn format_enabled_count(
+    visible_enabled: usize,
+    visible_total: usize,
+    enabled_total: usize,
+    filter_active: bool,
+) -> String {
+    if filter_active {
+        if visible_total == 0 {
+            "0".to_string()
+        } else {
+            format!("{visible_enabled}/{visible_total}")
+        }
+    } else {
+        enabled_total.to_string()
+    }
+}
+
+fn status_color(app: &App, theme: &Theme) -> Color {
+    let lower = app.status.to_lowercase();
+    if lower.contains("failed")
+        || lower.contains("error")
+        || lower.contains("denied")
+        || lower.contains("blocked")
+    {
+        return theme.error;
+    }
+    if lower.contains("missing")
+        || lower.contains("invalid")
+        || lower.contains("not found")
+        || lower.contains("warning")
+    {
+        return theme.warning;
+    }
+    if lower.contains("ready") || lower.contains("complete") {
+        return theme.success;
+    }
+    theme.accent
 }
 
 fn build_log_lines(app: &App, theme: &Theme, height: usize) -> Vec<Line<'static>> {
@@ -945,67 +1336,132 @@ fn build_log_lines(app: &App, theme: &Theme, height: usize) -> Vec<Line<'static>
         .collect()
 }
 
-fn build_conflict_lines(app: &App, theme: &Theme, height: usize) -> Vec<Line<'static>> {
-    if height == 0 {
-        return Vec::new();
+fn extend_table_stripes(
+    frame: &mut Frame<'_>,
+    theme: &Theme,
+    area: Rect,
+    offset: usize,
+    row_count: usize,
+    view_height: usize,
+    selected: usize,
+    focused: bool,
+) {
+    if area.width == 0 || area.height <= 1 || view_height == 0 {
+        return;
     }
-    if app.conflicts_scanning() {
-        return vec![Line::from(Span::styled(
-            "Scanning conflicts...",
-            Style::default().fg(theme.muted),
-        ))];
+    let body_height = area.height.saturating_sub(1) as usize;
+    let visible = row_count
+        .saturating_sub(offset)
+        .min(body_height)
+        .min(view_height);
+    if visible == 0 {
+        return;
     }
-    if app.conflicts_pending() {
-        return vec![Line::from(Span::styled(
-            "Conflict scan queued...",
-            Style::default().fg(theme.muted),
-        ))];
-    }
-    if app.conflicts.is_empty() {
-        return vec![Line::from(Span::styled(
-            "No conflicts detected.",
-            Style::default().fg(theme.muted),
-        ))];
-    }
-
-    let total = app.conflicts.len();
-    let view = height.max(1);
-    let selected = app.conflict_selected.min(total.saturating_sub(1));
-    let start = if selected + 1 > view {
-        selected + 1 - view
-    } else {
-        0
-    };
-    let end = (start + view).min(total);
-
-    app.conflicts[start..end]
-        .iter()
-        .enumerate()
-        .map(|(offset, conflict)| {
-            let index = start + offset;
-            let selected_line = index == selected && app.focus == Focus::Conflicts;
-            let marker = if conflict.overridden { "*" } else { " " };
-            let kind = conflict_short_label(conflict.target);
-            let mut label = format!(
-                "{marker}[{kind}] {} -> {}",
-                conflict.relative_path.to_string_lossy(),
-                conflict.winner_name
-            );
-            let others = conflict.candidates.len().saturating_sub(1);
-            if others > 0 {
-                label.push_str(&format!(" (+{others})"));
-            }
-            let style = if selected_line {
-                Style::default()
-                    .bg(theme.accent_soft)
-                    .fg(Color::Black)
-                    .add_modifier(Modifier::BOLD)
-            } else {
-                Style::default().fg(theme.text)
+    let start_y = area.y + 1;
+    for i in 0..visible {
+        let row_index = offset + i;
+        let bg = if focused && row_index == selected {
+            Some(theme.accent_soft)
+        } else if row_index % 2 == 1 {
+            Some(theme.row_alt_bg)
+        } else {
+            None
+        };
+        if let Some(color) = bg {
+            let stripe_area = Rect {
+                x: area.x,
+                y: start_y + i as u16,
+                width: area.width,
+                height: 1,
             };
-            Line::from(Span::styled(label, style))
-        })
-        .collect()
+            frame.render_widget(
+                Block::default().style(Style::default().bg(color)),
+                stripe_area,
+            );
+        }
+    }
+}
+
+fn build_conflict_banner(app: &App, theme: &Theme, width: usize) -> Line<'static> {
+    if width == 0 {
+        return Line::from("");
+    }
+
+    let label = "Conflicts: ";
+    if width <= label.len() {
+        return Line::from(Span::styled(
+            truncate_text(label.trim_end(), width),
+            Style::default().fg(theme.accent),
+        ));
+    }
+
+    let (message, color, use_marquee) = if app.conflicts_scanning() {
+        ("scanning...".to_string(), theme.muted, false)
+    } else if app.conflicts_pending() {
+        ("scan queued...".to_string(), theme.muted, false)
+    } else if app.conflicts.is_empty() {
+        ("none".to_string(), theme.muted, false)
+    } else {
+        let total = app.conflicts.len();
+        let selected = app.conflict_selected.min(total.saturating_sub(1));
+        let conflict = &app.conflicts[selected];
+        let kind = conflict_short_label(conflict.target);
+        let mut message = format!(
+            "{}/{} [{}] {} -> {}",
+            selected + 1,
+            total,
+            kind,
+            conflict.relative_path.to_string_lossy(),
+            conflict.winner_name
+        );
+        let others = conflict.candidates.len().saturating_sub(1);
+        if others > 0 {
+            message.push_str(&format!(" (+{others})"));
+        }
+        (message, theme.warning, true)
+    };
+
+    let available = width.saturating_sub(label.len());
+    let fitted = if available == 0 {
+        String::new()
+    } else if use_marquee && message.chars().count() > available {
+        marquee_text(&message, available)
+    } else {
+        truncate_text(&message, available)
+    };
+
+    let focused = app.focus == Focus::Conflicts;
+    let label_style = Style::default().fg(if focused { Color::Black } else { theme.accent });
+    let value_style = Style::default().fg(if focused { Color::Black } else { color });
+
+    Line::from(vec![
+        Span::styled(label, label_style),
+        Span::styled(fitted, value_style),
+    ])
+}
+
+fn marquee_text(value: &str, width: usize) -> String {
+    if width == 0 {
+        return String::new();
+    }
+    let chars: Vec<char> = value.chars().collect();
+    if chars.len() <= width {
+        return value.to_string();
+    }
+    let mut scroll = chars.clone();
+    scroll.extend("   ".chars());
+    let len = scroll.len().max(1);
+    let tick = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+        / MARQUEE_STEP_MS;
+    let offset = (tick as usize) % len;
+    let mut out = String::new();
+    for i in 0..width {
+        out.push(scroll[(offset + i) % len]);
+    }
+    out
 }
 
 fn draw_dialog(frame: &mut Frame<'_>, app: &App, theme: &Theme) {
@@ -1138,6 +1594,10 @@ fn mode_toast(app: &App) -> Option<(String, ToastLevel)> {
                     let path = value("<path>");
                     format!("Set user dir: {path} | {hint}")
                 }
+                InputPurpose::FilterMods => {
+                    let filter = value("<all>");
+                    format!("Filter mods: {filter} | {hint}")
+                }
             };
             Some((message, ToastLevel::Info))
         }
@@ -1239,16 +1699,16 @@ fn explorer_prefix(items: &[ExplorerItem], index: usize) -> String {
     let mut out = String::new();
     for level in 1..depth {
         if has_next_at_depth(items, index, level) {
-            out.push_str("| ");
+            out.push_str("|   ");
         } else {
-            out.push_str("  ");
+            out.push_str("    ");
         }
     }
 
     let branch = if has_next_at_depth(items, index, depth) {
-        "|- "
+        "|-- "
     } else {
-        "+- "
+        "\\-- "
     };
     out.push_str(branch);
     out
@@ -1278,8 +1738,8 @@ fn explorer_line(
 
     match &item.kind {
         ExplorerItemKind::Game(_) => {
-            let prefix = if item.expanded { "[-]" } else { "[+]" };
-            spans.push(Span::styled(prefix, muted));
+            let expander = if item.expanded { "v" } else { ">" };
+            spans.push(Span::styled(expander, muted));
             spans.push(Span::raw(" "));
             let marker_style = if item.active {
                 Style::default().fg(theme.success)
@@ -1292,8 +1752,8 @@ fn explorer_line(
             spans.push(Span::styled(item.label.clone(), label_style));
         }
         ExplorerItemKind::ProfilesHeader(_) => {
-            let prefix = if item.expanded { "[-]" } else { "[+]" };
-            spans.push(Span::styled(prefix, muted));
+            let expander = if item.expanded { "v" } else { ">" };
+            spans.push(Span::styled(expander, muted));
             spans.push(Span::raw(" "));
             spans.push(Span::styled(item.label.clone(), label_style.fg(theme.accent)));
         }
@@ -1321,27 +1781,55 @@ fn explorer_line(
     Line::from(spans)
 }
 
-fn build_rows(app: &App, theme: &Theme) -> (Vec<Row<'static>>, usize, usize) {
+struct ModCounts {
+    total: usize,
+    enabled: usize,
+    visible_total: usize,
+    visible_enabled: usize,
+}
+
+fn build_rows(app: &App, theme: &Theme) -> (Vec<Row<'static>>, ModCounts) {
     let mut rows = Vec::new();
-    let mut enabled_count = 0;
-    let profile_entries = app.profile_entries();
+    let mut visible_enabled = 0;
+    let (total, enabled) = app.profile_counts();
+    let profile_entries = app.visible_profile_entries();
     let mod_map = app.library.index_by_id();
 
-    for (index, entry) in profile_entries.iter().enumerate() {
+    for (row_index, (order_index, entry)) in profile_entries.iter().enumerate() {
         let Some(mod_entry) = mod_map.get(&entry.id) else {
             continue;
         };
         if entry.enabled {
-            enabled_count += 1;
+            visible_enabled += 1;
         }
-        rows.push(row_for_entry(index, entry.enabled, mod_entry, theme));
+        rows.push(row_for_entry(
+            row_index,
+            *order_index,
+            entry.enabled,
+            mod_entry,
+            theme,
+        ));
     }
 
-    let total = rows.len();
-    (rows, total, enabled_count)
+    let visible_total = rows.len();
+    (
+        rows,
+        ModCounts {
+            total,
+            enabled,
+            visible_total,
+            visible_enabled,
+        },
+    )
 }
 
-fn row_for_entry(index: usize, enabled: bool, mod_entry: &ModEntry, theme: &Theme) -> Row<'static> {
+fn row_for_entry(
+    row_index: usize,
+    order_index: usize,
+    enabled: bool,
+    mod_entry: &ModEntry,
+    theme: &Theme,
+) -> Row<'static> {
     let (enabled_text, enabled_style) = if enabled {
         ("[x]", Style::default().fg(theme.success))
     } else {
@@ -1354,134 +1842,68 @@ fn row_for_entry(index: usize, enabled: bool, mod_entry: &ModEntry, theme: &Them
         _ => Style::default().fg(theme.text),
     };
     let (state_label, state_style) = mod_path_label(mod_entry, theme);
-    Row::new(vec![
+    let (override_label, override_style) = mod_override_label(mod_entry, theme, true);
+    let mut row = Row::new(vec![
         Cell::from(enabled_text.to_string()).style(enabled_style),
-        Cell::from((index + 1).to_string()),
+        Cell::from((order_index + 1).to_string()),
         Cell::from(kind.to_string()).style(kind_style),
         Cell::from(state_label.to_string()).style(state_style),
+        Cell::from(override_label).style(override_style),
         Cell::from(mod_entry.display_name()),
-    ])
+    ]);
+    if row_index % 2 == 1 {
+        row = row.style(Style::default().bg(theme.row_alt_bg));
+    }
+    row
 }
 
-fn wrap_text(value: &str, max_width: usize) -> Vec<String> {
+fn truncate_text(value: &str, max_width: usize) -> String {
     if max_width == 0 {
-        return Vec::new();
+        return String::new();
     }
-
-    let mut lines = Vec::new();
-    let mut current = String::new();
-
-    for word in value.split_whitespace() {
-        let word_len = word.chars().count();
-        if word_len > max_width {
-            if !current.is_empty() {
-                lines.push(current);
-                current = String::new();
-            }
-            let mut chunk = String::new();
-            let mut count = 0;
-            for ch in word.chars() {
-                if count == max_width {
-                    lines.push(chunk);
-                    chunk = String::new();
-                    count = 0;
-                }
-                chunk.push(ch);
-                count += 1;
-            }
-            if !chunk.is_empty() {
-                lines.push(chunk);
-            }
-        } else {
-            let current_len = current.chars().count();
-            let next_len = if current.is_empty() {
-                word_len
-            } else {
-                current_len + 1 + word_len
-            };
-            if next_len > max_width {
-                lines.push(current);
-                current = word.to_string();
-            } else {
-                if !current.is_empty() {
-                    current.push(' ');
-                }
-                current.push_str(word);
-            }
-        }
+    let len = value.chars().count();
+    if len <= max_width {
+        return value.to_string();
     }
-
-    if !current.is_empty() {
-        lines.push(current);
+    if max_width <= 3 {
+        return value.chars().take(max_width).collect();
     }
-
-    if lines.is_empty() && !value.is_empty() {
-        let mut chunk = String::new();
-        let mut count = 0;
-        for ch in value.chars() {
-            if count == max_width {
-                lines.push(chunk);
-                chunk = String::new();
-                count = 0;
-            }
-            chunk.push(ch);
-            count += 1;
-        }
-        if !chunk.is_empty() {
-            lines.push(chunk);
-        }
-    }
-
-    lines
+    let take = max_width.saturating_sub(3);
+    let mut out = value.chars().take(take).collect::<String>();
+    out.push_str("...");
+    out
 }
 
-fn push_wrapped_kv(
-    lines: &mut Vec<Line<'static>>,
-    label: &str,
-    value: &str,
-    label_style: Style,
-    value_style: Style,
-    max_width: usize,
-) {
-    if max_width == 0 {
-        return;
+fn pad_lines(
+    lines: Vec<Line<'static>>,
+    left_pad: usize,
+    top_pad: usize,
+) -> Vec<Line<'static>> {
+    if left_pad == 0 && top_pad == 0 {
+        return lines;
     }
 
-    let label_text = format!("{label}: ");
-    let label_len = label_text.len();
+    let mut out = Vec::with_capacity(lines.len() + top_pad);
+    for _ in 0..top_pad {
+        out.push(Line::from(""));
+    }
 
-    if max_width <= label_len + 1 {
-        lines.push(Line::from(Span::styled(label_text, label_style)));
-        for part in wrap_text(value, max_width) {
-            lines.push(Line::from(Span::styled(part, value_style)));
+    let prefix = " ".repeat(left_pad);
+    for line in lines {
+        if left_pad == 0 {
+            out.push(line);
+            continue;
         }
-        return;
+        let mut spans = Vec::with_capacity(line.spans.len() + 1);
+        spans.push(Span::raw(prefix.clone()));
+        spans.extend(line.spans);
+        out.push(Line::from(spans));
     }
 
-    let wrapped = wrap_text(value, max_width.saturating_sub(label_len));
-    if wrapped.is_empty() {
-        lines.push(Line::from(vec![
-            Span::styled(label_text, label_style),
-            Span::styled(String::new(), value_style),
-        ]));
-        return;
-    }
-
-    lines.push(Line::from(vec![
-        Span::styled(label_text.clone(), label_style),
-        Span::styled(wrapped[0].clone(), value_style),
-    ]));
-
-    let indent = " ".repeat(label_len);
-    for part in wrapped.iter().skip(1) {
-        lines.push(Line::from(vec![
-            Span::raw(indent.clone()),
-            Span::styled(part.clone(), value_style),
-        ]));
-    }
+    out
 }
 
-fn push_wrapped_prefixed(
+fn push_truncated_prefixed(
     lines: &mut Vec<Line<'static>>,
     prefix: &str,
     prefix_style: Style,
@@ -1494,25 +1916,12 @@ fn push_wrapped_prefixed(
     }
 
     let prefix_len = prefix.len();
-    let available = max_width.saturating_sub(prefix_len).max(1);
-    let wrapped = wrap_text(value, available);
-    if wrapped.is_empty() {
-        lines.push(Line::from(Span::styled(prefix.to_string(), prefix_style)));
-        return;
-    }
-
+    let available = max_width.saturating_sub(prefix_len);
+    let value_text = truncate_text(value, available);
     lines.push(Line::from(vec![
         Span::styled(prefix.to_string(), prefix_style),
-        Span::styled(wrapped[0].clone(), value_style),
+        Span::styled(value_text, value_style),
     ]));
-
-    let indent = " ".repeat(prefix_len);
-    for part in wrapped.iter().skip(1) {
-        lines.push(Line::from(vec![
-            Span::raw(indent.clone()),
-            Span::styled(part.clone(), value_style),
-        ]));
-    }
 }
 
 fn build_details(app: &App, theme: &Theme, width: usize) -> Vec<Line<'static>> {
@@ -1523,136 +1932,115 @@ fn build_details(app: &App, theme: &Theme, width: usize) -> Vec<Line<'static>> {
         return build_conflict_details(app, theme, width);
     }
 
-    let profile_entries = app.profile_entries();
+    let profile_entries = app.visible_profile_entries();
     let mod_map = app.library.index_by_id();
 
-    let Some(entry) = profile_entries.get(app.selected) else {
+    let Some((order_index, entry)) = profile_entries.get(app.selected) else {
         return vec![Line::from("No mod selected.")];
     };
     let Some(mod_entry) = mod_map.get(&entry.id) else {
         return vec![Line::from("No mod selected.")];
     };
 
-    let mut lines = Vec::new();
     let label_style = Style::default().fg(theme.muted);
     let value_style = Style::default().fg(theme.text);
+    let mut rows = Vec::new();
     let display_name = mod_entry.display_name();
-    push_wrapped_kv(
-        &mut lines,
-        "Name",
-        &display_name,
+    rows.push(KvRow {
+        label: "Name".to_string(),
+        value: display_name.clone(),
         label_style,
         value_style,
-        width,
-    );
+    });
     if display_name != mod_entry.name {
-        push_wrapped_kv(
-            &mut lines,
-            "Internal",
-            &mod_entry.name,
+        rows.push(KvRow {
+            label: "Internal".to_string(),
+            value: mod_entry.name.clone(),
             label_style,
             value_style,
-            width,
-        );
+        });
     }
     if let Some(source_label) = mod_entry.source_label() {
         if source_label != display_name {
-            push_wrapped_kv(
-                &mut lines,
-                "Source",
-                source_label,
+            rows.push(KvRow {
+                label: "Source".to_string(),
+                value: source_label.to_string(),
                 label_style,
                 value_style,
-                width,
-            );
+            });
         }
     }
     let enabled_label = if entry.enabled { "Yes" } else { "No" };
     let enabled_style =
         Style::default().fg(if entry.enabled { theme.success } else { theme.muted });
-    push_wrapped_kv(
-        &mut lines,
-        "Enabled",
-        enabled_label,
+    rows.push(KvRow {
+        label: "Enabled".to_string(),
+        value: enabled_label.to_string(),
         label_style,
-        enabled_style,
-        width,
-    );
-    let order_label = (app.selected + 1).to_string();
-    push_wrapped_kv(&mut lines, "Order", &order_label, label_style, value_style, width);
+        value_style: enabled_style,
+    });
+    let order_label = (order_index + 1).to_string();
+    rows.push(KvRow {
+        label: "Order".to_string(),
+        value: order_label,
+        label_style,
+        value_style,
+    });
     let type_label = mod_entry.display_type();
-    push_wrapped_kv(
-        &mut lines,
-        "Type",
-        &type_label,
+    rows.push(KvRow {
+        label: "Type".to_string(),
+        value: type_label,
         label_style,
         value_style,
-        width,
-    );
+    });
     let targets_label = targets_summary(mod_entry);
-    push_wrapped_kv(
-        &mut lines,
-        "Targets",
-        &targets_label,
+    rows.push(KvRow {
+        label: "Targets".to_string(),
+        value: targets_label,
         label_style,
         value_style,
-        width,
-    );
+    });
     let (path_label, path_style) = mod_path_label(mod_entry, theme);
-    push_wrapped_kv(
-        &mut lines,
-        "Path",
-        path_label,
+    rows.push(KvRow {
+        label: "Path".to_string(),
+        value: path_label.to_string(),
         label_style,
-        path_style,
-        width,
-    );
-    let overrides_label = if mod_entry.target_overrides.is_empty() {
-        "Auto"
-    } else {
-        "Custom"
-    };
-    push_wrapped_kv(
-        &mut lines,
-        "Overrides",
-        overrides_label,
+        value_style: path_style,
+    });
+    let (override_label, override_style) = mod_override_label(mod_entry, theme, false);
+    rows.push(KvRow {
+        label: "Override".to_string(),
+        value: override_label,
         label_style,
-        value_style,
-        width,
-    );
-    push_wrapped_kv(
-        &mut lines,
-        "ID",
-        &mod_entry.id,
+        value_style: override_style,
+    });
+    rows.push(KvRow {
+        label: "ID".to_string(),
+        value: mod_entry.id.clone(),
         label_style,
         value_style,
-        width,
-    );
+    });
 
     if let Some(info) = mod_entry.targets.iter().find_map(|target| match target {
         InstallTarget::Pak { info, .. } => Some(info),
         _ => None,
     }) {
-        push_wrapped_kv(
-            &mut lines,
-            "Folder",
-            &info.folder,
+        rows.push(KvRow {
+            label: "Folder".to_string(),
+            value: info.folder.clone(),
             label_style,
             value_style,
-            width,
-        );
+        });
         let version_label = info.version.to_string();
-        push_wrapped_kv(
-            &mut lines,
-            "Version",
-            &version_label,
+        rows.push(KvRow {
+            label: "Version".to_string(),
+            value: version_label,
             label_style,
             value_style,
-            width,
-        );
+        });
     }
 
-    lines
+    format_kv_lines(&rows, width)
 }
 
 fn build_explorer_details(app: &App, theme: &Theme, width: usize) -> Vec<Line<'static>> {
@@ -1662,17 +2050,14 @@ fn build_explorer_details(app: &App, theme: &Theme, width: usize) -> Vec<Line<'s
 
     match item.kind {
         ExplorerItemKind::Game(game_id) => {
-            let mut lines = Vec::new();
             let label_style = Style::default().fg(theme.muted);
             let value_style = Style::default().fg(theme.text);
-            push_wrapped_kv(
-                &mut lines,
-                "Game",
-                game_id.display_name(),
+            let mut rows = vec![KvRow {
+                label: "Game".to_string(),
+                value: game_id.display_name().to_string(),
                 label_style,
                 value_style,
-                width,
-            );
+            }];
             if game_id == app.game_id {
                 let root = if app.config.game_root.as_os_str().is_empty() {
                     "Not set".to_string()
@@ -1684,22 +2069,18 @@ fn build_explorer_details(app: &App, theme: &Theme, width: usize) -> Vec<Line<'s
                 } else {
                     app.config.larian_dir.display().to_string()
                 };
-                push_wrapped_kv(
-                    &mut lines,
-                    "Root",
-                    &root,
+                rows.push(KvRow {
+                    label: "Root".to_string(),
+                    value: root,
                     label_style,
                     value_style,
-                    width,
-                );
-                push_wrapped_kv(
-                    &mut lines,
-                    "User dir",
-                    &user_dir,
+                });
+                rows.push(KvRow {
+                    label: "User dir".to_string(),
+                    value: user_dir,
                     label_style,
                     value_style,
-                    width,
-                );
+                });
                 let status_style =
                     Style::default().fg(if app.paths_ready() { theme.success } else { theme.warning });
                 let status_label = if app.paths_ready() {
@@ -1707,24 +2088,21 @@ fn build_explorer_details(app: &App, theme: &Theme, width: usize) -> Vec<Line<'s
                 } else {
                     "Setup required"
                 };
-                push_wrapped_kv(
-                    &mut lines,
-                    "Status",
-                    status_label,
+                rows.push(KvRow {
+                    label: "Status".to_string(),
+                    value: status_label.to_string(),
                     label_style,
-                    status_style,
-                    width,
-                );
+                    value_style: status_style,
+                });
+                format_kv_lines(&rows, width)
             } else {
-                lines.push(Line::from(Span::styled(
-                    "Select game to load profiles.",
+                vec![Line::from(Span::styled(
+                    truncate_text("Select game to load profiles.", width),
                     Style::default().fg(theme.muted),
-                )));
+                ))]
             }
-            lines
         }
         ExplorerItemKind::Profile { name, .. } => {
-            let mut lines = Vec::new();
             let label_style = Style::default().fg(theme.muted);
             let value_style = Style::default().fg(theme.text);
             let mut display_name = name.clone();
@@ -1738,20 +2116,12 @@ fn build_explorer_details(app: &App, theme: &Theme, width: usize) -> Vec<Line<'s
                     };
                 }
             }
-            push_wrapped_kv(
-                &mut lines,
-                "Profile",
-                &display_name,
+            let mut rows = vec![KvRow {
+                label: "Profile".to_string(),
+                value: display_name,
                 label_style,
                 value_style,
-                width,
-            );
-            if app.is_renaming_profile(&name) {
-                lines.push(Line::from(Span::styled(
-                    "Renaming...",
-                    Style::default().fg(theme.warning),
-                )));
-            }
+            }];
             if let Some(profile) = app
                 .library
                 .profiles
@@ -1761,23 +2131,26 @@ fn build_explorer_details(app: &App, theme: &Theme, width: usize) -> Vec<Line<'s
                 let enabled = profile.order.iter().filter(|entry| entry.enabled).count();
                 let mods_label = profile.order.len().to_string();
                 let enabled_label = enabled.to_string();
-                push_wrapped_kv(
-                    &mut lines,
-                    "Mods",
-                    &mods_label,
+                rows.push(KvRow {
+                    label: "Mods".to_string(),
+                    value: mods_label,
                     label_style,
                     value_style,
-                    width,
-                );
+                });
                 let enabled_style = Style::default().fg(theme.success);
-                push_wrapped_kv(
-                    &mut lines,
-                    "Enabled",
-                    &enabled_label,
+                rows.push(KvRow {
+                    label: "Enabled".to_string(),
+                    value: enabled_label,
                     label_style,
-                    enabled_style,
-                    width,
-                );
+                    value_style: enabled_style,
+                });
+            }
+            let mut lines = format_kv_lines(&rows, width);
+            if app.is_renaming_profile(&name) {
+                lines.push(Line::from(Span::styled(
+                    "Renaming...",
+                    Style::default().fg(theme.warning),
+                )));
             }
             if item.active {
                 lines.push(Line::from(Span::styled(
@@ -1788,15 +2161,15 @@ fn build_explorer_details(app: &App, theme: &Theme, width: usize) -> Vec<Line<'s
             lines
         }
         ExplorerItemKind::ProfilesHeader(_) => vec![Line::from(Span::styled(
-            "Profiles in this game.",
+            truncate_text("Profiles in this game.", width),
             Style::default().fg(theme.muted),
         ))],
         ExplorerItemKind::NewProfile(_) => vec![Line::from(Span::styled(
-            "Press Enter to create a new profile.",
+            truncate_text("Press Enter to create a new profile.", width),
             Style::default().fg(theme.muted),
         ))],
         ExplorerItemKind::Info(_) => vec![Line::from(Span::styled(
-            "Select the game to inspect profiles.",
+            truncate_text("Select the game to inspect profiles.", width),
             Style::default().fg(theme.muted),
         ))],
     }
@@ -1822,35 +2195,30 @@ fn build_conflict_details(app: &App, theme: &Theme, width: usize) -> Vec<Line<'s
         ))];
     };
 
-    let mut lines = Vec::new();
     let label_style = Style::default().fg(theme.muted);
     let value_style = Style::default().fg(theme.text);
-    push_wrapped_kv(
-        &mut lines,
-        "Target",
-        conflict_target_label(conflict.target),
+    let mut rows = Vec::new();
+    rows.push(KvRow {
+        label: "Target".to_string(),
+        value: target_kind_label(conflict.target).to_string(),
         label_style,
         value_style,
-        width,
-    );
+    });
     let path_label = conflict.relative_path.to_string_lossy().to_string();
-    push_wrapped_kv(
-        &mut lines,
-        "Path",
-        &path_label,
+    rows.push(KvRow {
+        label: "Path".to_string(),
+        value: path_label,
         label_style,
         value_style,
-        width,
-    );
+    });
     let winner_style = Style::default().fg(theme.success);
-    push_wrapped_kv(
-        &mut lines,
-        "Winner",
-        &conflict.winner_name,
+    rows.push(KvRow {
+        label: "Winner".to_string(),
+        value: conflict.winner_name.clone(),
         label_style,
-        winner_style,
-        width,
-    );
+        value_style: winner_style,
+    });
+    let mut lines = format_kv_lines(&rows, width);
     if conflict.overridden {
         lines.push(Line::from(Span::styled(
             "Override active",
@@ -1870,7 +2238,7 @@ fn build_conflict_details(app: &App, theme: &Theme, width: usize) -> Vec<Line<'s
             Style::default().fg(theme.muted)
         };
         let prefix = format!("{marker} ");
-        push_wrapped_prefixed(&mut lines, &prefix, style, &candidate.mod_name, style, width);
+        push_truncated_prefixed(&mut lines, &prefix, style, &candidate.mod_name, style, width);
     }
 
     lines
@@ -1903,6 +2271,59 @@ fn mod_path_label(mod_entry: &ModEntry, theme: &Theme) -> (&'static str, Style) 
     ("Valid", Style::default().fg(theme.success))
 }
 
+fn mod_override_label(mod_entry: &ModEntry, theme: &Theme, compact: bool) -> (String, Style) {
+    let mut kinds = Vec::new();
+    for target in &mod_entry.targets {
+        let kind = target.kind();
+        if !kinds.contains(&kind) {
+            kinds.push(kind);
+        }
+    }
+    if kinds.is_empty() {
+        return ("None".to_string(), Style::default().fg(theme.muted));
+    }
+
+    let enabled: Vec<TargetKind> = kinds
+        .iter()
+        .copied()
+        .filter(|kind| mod_entry.is_target_enabled(*kind))
+        .collect();
+
+    if mod_entry.target_overrides.is_empty() {
+        return (
+            format!("Auto [{}]", override_key_label(None)),
+            Style::default().fg(theme.muted),
+        );
+    }
+
+    if enabled.len() == 1 {
+        let kind_label = if compact {
+            target_kind_short_label(enabled[0])
+        } else {
+            target_kind_label(enabled[0])
+        };
+        let label = format!(
+            "{} [{}]",
+            kind_label,
+            override_key_label(Some(enabled[0]))
+        );
+        return (
+            label,
+            Style::default().fg(theme.accent).add_modifier(Modifier::BOLD),
+        );
+    }
+
+    let (label, color) = if enabled.is_empty() {
+        ("None", theme.error)
+    } else {
+        ("Custom", theme.warning)
+    };
+    (
+        label.to_string(),
+        Style::default().fg(color).add_modifier(Modifier::BOLD),
+    )
+}
+
 fn targets_summary(mod_entry: &ModEntry) -> String {
     let mut targets = Vec::new();
     for target in &mod_entry.targets {
@@ -1920,12 +2341,31 @@ fn targets_summary(mod_entry: &ModEntry) -> String {
     }
 }
 
-fn conflict_target_label(target: TargetKind) -> &'static str {
+fn target_kind_label(target: TargetKind) -> &'static str {
     match target {
         TargetKind::Pak => "Pak",
         TargetKind::Generated => "Generated",
         TargetKind::Data => "Data",
         TargetKind::Bin => "Bin",
+    }
+}
+
+fn target_kind_short_label(target: TargetKind) -> &'static str {
+    match target {
+        TargetKind::Pak => "Pak",
+        TargetKind::Generated => "Gen",
+        TargetKind::Data => "Data",
+        TargetKind::Bin => "Bin",
+    }
+}
+
+fn override_key_label(kind: Option<TargetKind>) -> &'static str {
+    match kind {
+        None => "1",
+        Some(TargetKind::Pak) => "2",
+        Some(TargetKind::Generated) => "3",
+        Some(TargetKind::Data) => "4",
+        Some(TargetKind::Bin) => "5",
     }
 }
 
@@ -1938,77 +2378,219 @@ fn conflict_short_label(target: TargetKind) -> &'static str {
     }
 }
 
-fn build_override_lines(app: &App, theme: &Theme) -> Vec<Line<'static>> {
-    if app.focus == Focus::Explorer {
-        return vec![
-            Line::from(Span::styled(
-                "Explorer actions",
-                Style::default().fg(theme.accent),
-            )),
-            Line::from(Span::raw("Enter: select/expand")),
-            Line::from(Span::raw("a: new profile")),
-            Line::from(Span::raw("r/F2: rename profile")),
-            Line::from(Span::raw("c: duplicate profile")),
-            Line::from(Span::raw("e: export profile")),
-            Line::from(Span::raw("p: import profile")),
-            Line::from(Span::raw("Tab: cycle focus")),
-        ];
-    }
-    if app.focus == Focus::Conflicts {
-        return vec![
-            Line::from(Span::styled(
-                "Conflict actions",
-                Style::default().fg(theme.accent),
-            )),
-            Line::from(Span::raw("Enter/Left/Right: cycle winner")),
-            Line::from(Span::raw("Backspace: clear override")),
-            Line::from(Span::raw("Up/Down: select conflict")),
-            Line::from(Span::raw("Tab: cycle focus")),
-        ];
+struct LegendRow {
+    key: String,
+    action: String,
+}
+
+struct KvRow {
+    label: String,
+    value: String,
+    label_style: Style,
+    value_style: Style,
+}
+
+fn build_legend_lines(
+    app: &App,
+    theme: &Theme,
+    width: usize,
+    height: usize,
+) -> Vec<Line<'static>> {
+    if width == 0 || height == 0 {
+        return Vec::new();
     }
 
-    let profile_entries = app.profile_entries();
-    let mod_map = app.library.index_by_id();
-
-    let Some(entry) = profile_entries.get(app.selected) else {
-        return vec![Line::from("No mod selected.")];
-    };
-    let Some(mod_entry) = mod_map.get(&entry.id) else {
-        return vec![Line::from("No mod selected.")];
-    };
-
-    let mut lines = Vec::new();
-    lines.push(Line::from(Span::styled(
-        "Toggle targets (1-4)",
-        Style::default().fg(theme.accent),
-    )));
-
-    for (label, kind, key) in [
-        ("Pak", TargetKind::Pak, '1'),
-        ("Generated", TargetKind::Generated, '2'),
-        ("Data", TargetKind::Data, '3'),
-        ("Bin", TargetKind::Bin, '4'),
-    ] {
-        let line = if mod_entry.has_target_kind(kind) {
-            let enabled = mod_entry.is_target_enabled(kind);
-            let marker = if enabled { "[x]" } else { "[ ]" };
-            let style = if enabled {
-                Style::default().fg(theme.success)
-            } else {
-                Style::default().fg(theme.muted)
-            };
-            Line::from(vec![
-                Span::styled(marker, style),
-                Span::raw(format!(" {label} ({key})")),
-            ])
-        } else {
-            Line::from(Span::styled(
-                format!("- {label} ({key})"),
-                Style::default().fg(theme.muted),
-            ))
-        };
-        lines.push(line);
+    let mut rows = Vec::new();
+    match app.focus {
+        Focus::Explorer => {
+            rows.extend([
+                LegendRow {
+                    key: "Enter".to_string(),
+                    action: "Select or expand".to_string(),
+                },
+                LegendRow {
+                    key: "[x]".to_string(),
+                    action: "Active profile".to_string(),
+                },
+                LegendRow {
+                    key: "[ ]".to_string(),
+                    action: "Inactive profile".to_string(),
+                },
+                LegendRow {
+                    key: "a".to_string(),
+                    action: "New profile".to_string(),
+                },
+                LegendRow {
+                    key: "r/F2".to_string(),
+                    action: "Rename profile".to_string(),
+                },
+                LegendRow {
+                    key: "c".to_string(),
+                    action: "Duplicate profile".to_string(),
+                },
+                LegendRow {
+                    key: "e".to_string(),
+                    action: "Export profile".to_string(),
+                },
+                LegendRow {
+                    key: "p".to_string(),
+                    action: "Import profile".to_string(),
+                },
+                LegendRow {
+                    key: "Tab".to_string(),
+                    action: "Cycle focus".to_string(),
+                },
+            ]);
+        }
+        Focus::Conflicts => {
+            rows.extend([
+                LegendRow {
+                    key: "Arrows".to_string(),
+                    action: "Select conflict".to_string(),
+                },
+                LegendRow {
+                    key: "Enter".to_string(),
+                    action: "Cycle winner".to_string(),
+                },
+                LegendRow {
+                    key: "Left/Right".to_string(),
+                    action: "Cycle winner".to_string(),
+                },
+                LegendRow {
+                    key: "Backspace".to_string(),
+                    action: "Clear override".to_string(),
+                },
+                LegendRow {
+                    key: "Tab".to_string(),
+                    action: "Cycle focus".to_string(),
+                },
+            ]);
+        }
+        Focus::Mods => {
+            rows.extend([
+                LegendRow {
+                    key: "Space".to_string(),
+                    action: "Toggle enable".to_string(),
+                },
+                LegendRow {
+                    key: "m".to_string(),
+                    action: "Move mode".to_string(),
+                },
+                LegendRow {
+                    key: "u/n".to_string(),
+                    action: "Move order".to_string(),
+                },
+                LegendRow {
+                    key: "Del".to_string(),
+                    action: "Remove mod".to_string(),
+                },
+                LegendRow {
+                    key: "Override [1-5]".to_string(),
+                    action: "Auto/Pak/Gen/Data/Bin".to_string(),
+                },
+                LegendRow {
+                    key: "a/s/x".to_string(),
+                    action: "Enable/Disable/Invert visible".to_string(),
+                },
+                LegendRow {
+                    key: "c".to_string(),
+                    action: "Clear overrides".to_string(),
+                },
+                LegendRow {
+                    key: "Ctrl+F/Ctrl+L".to_string(),
+                    action: "Filter/Clear".to_string(),
+                },
+                LegendRow {
+                    key: "Tab".to_string(),
+                    action: "Cycle focus".to_string(),
+                },
+            ]);
+        }
     }
 
+    let mut lines = format_legend_rows(&rows, width, theme);
+    if lines.len() > height {
+        lines.truncate(height);
+    }
     lines
+}
+
+fn format_legend_rows(rows: &[LegendRow], width: usize, theme: &Theme) -> Vec<Line<'static>> {
+    if width == 0 {
+        return Vec::new();
+    }
+    let key_width = rows
+        .iter()
+        .map(|row| row.key.chars().count())
+        .max()
+        .unwrap_or(0)
+        .min(width);
+    let spacing = 2usize;
+    let action_width = width.saturating_sub(key_width + spacing);
+
+    rows.iter()
+        .map(|row| {
+            let key_text = truncate_text(&row.key, key_width);
+            let key_len = key_text.chars().count();
+            let pad = " ".repeat(key_width.saturating_sub(key_len) + spacing);
+            let action_text = truncate_text(&row.action, action_width);
+            Line::from(vec![
+                Span::styled(
+                    key_text,
+                    Style::default()
+                        .fg(theme.accent)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::raw(pad),
+                Span::styled(action_text, Style::default().fg(theme.text)),
+            ])
+        })
+        .collect()
+}
+
+fn format_kv_lines(rows: &[KvRow], width: usize) -> Vec<Line<'static>> {
+    if width == 0 || rows.is_empty() {
+        return Vec::new();
+    }
+
+    let max_label = rows
+        .iter()
+        .map(|row| row.label.chars().count())
+        .max()
+        .unwrap_or(0);
+    if width <= 2 {
+        return rows
+            .iter()
+            .map(|row| {
+                Line::from(Span::styled(
+                    truncate_text(&row.label, width),
+                    row.label_style,
+                ))
+            })
+            .collect();
+    }
+
+    let label_width = max_label.min(width.saturating_sub(2));
+    let value_width = width.saturating_sub(label_width + 2);
+
+    rows.iter()
+        .map(|row| {
+            if value_width == 0 {
+                return Line::from(Span::styled(
+                    truncate_text(&row.label, width),
+                    row.label_style,
+                ));
+            }
+            let label_text = truncate_text(&row.label, label_width);
+            let label_len = label_text.chars().count();
+            let pad = " ".repeat(label_width.saturating_sub(label_len));
+            let value_text = truncate_text(&row.value, value_width);
+            Line::from(vec![
+                Span::styled(label_text, row.label_style),
+                Span::raw(pad),
+                Span::styled(": ", row.label_style),
+                Span::styled(value_text, row.value_style),
+            ])
+        })
+        .collect()
 }

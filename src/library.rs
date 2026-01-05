@@ -216,31 +216,6 @@ impl ModEntry {
             .unwrap_or(true)
     }
 
-    pub fn toggle_target(&mut self, kind: TargetKind) -> Option<bool> {
-        if !self.has_target_kind(kind) {
-            return None;
-        }
-
-        if let Some(existing) = self
-            .target_overrides
-            .iter_mut()
-            .find(|override_entry| override_entry.kind == kind)
-        {
-            existing.enabled = !existing.enabled;
-            if existing.enabled {
-                self.target_overrides
-                    .retain(|override_entry| override_entry.kind != kind);
-                return Some(true);
-            }
-            return Some(existing.enabled);
-        }
-
-        self.target_overrides.push(TargetOverride {
-            kind,
-            enabled: false,
-        });
-        Some(false)
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
