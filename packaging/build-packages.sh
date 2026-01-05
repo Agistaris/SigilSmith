@@ -27,7 +27,7 @@ fi
 cargo deb --no-build
 cp "$ROOT/target/debian"/*.deb "$DIST_DIR/"
 
-cargo rpm build --release
+cargo rpm build
 cp "$ROOT/target/rpmbuild/RPMS"/*/*.rpm "$DIST_DIR/"
 
 "$ROOT/packaging/build-appimage.sh"

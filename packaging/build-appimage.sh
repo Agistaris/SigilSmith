@@ -19,6 +19,8 @@ mkdir -p "$APPDIR/usr/bin" "$APPDIR/usr/share/applications" "$APPDIR/usr/share/i
 cp "$ROOT/target/release/sigilsmith" "$APPDIR/usr/bin/"
 cp "$ROOT/packaging/sigilsmith.desktop" "$APPDIR/usr/share/applications/"
 cp "$ROOT/packaging/icons/sigilsmith.svg" "$APPDIR/usr/share/icons/hicolor/scalable/apps/"
+cp "$ROOT/packaging/sigilsmith.desktop" "$APPDIR/sigilsmith.desktop"
+cp "$ROOT/packaging/icons/sigilsmith.svg" "$APPDIR/sigilsmith.svg"
 
 cat <<'APP' > "$APPDIR/AppRun"
 #!/bin/sh

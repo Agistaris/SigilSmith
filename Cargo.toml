@@ -36,10 +36,13 @@ assets = [
 
 [package.metadata.rpm]
 package = "sigilsmith"
-summary = "Mod loader for Baldur's Gate 3 (Linux)"
-license = "MIT"
-assets = [
-  { source = "target/release/sigilsmith", dest = "/usr/bin/sigilsmith", mode = "755" },
-  { source = "packaging/sigilsmith.desktop", dest = "/usr/share/applications/sigilsmith.desktop", mode = "644" },
-  { source = "packaging/icons/sigilsmith.svg", dest = "/usr/share/icons/hicolor/scalable/apps/sigilsmith.svg", mode = "644" },
-]
+
+[package.metadata.rpm.cargo]
+buildflags = ["--release"]
+
+[package.metadata.rpm.targets]
+sigilsmith = { path = "/usr/bin/sigilsmith" }
+
+[package.metadata.rpm.files]
+"sigilsmith.desktop" = { path = "/usr/share/applications/sigilsmith.desktop" }
+"icons" = { path = "/usr/share/icons/hicolor/scalable/apps" }
