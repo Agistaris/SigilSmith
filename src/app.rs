@@ -61,10 +61,18 @@ pub enum DialogChoice {
 }
 
 #[derive(Debug, Clone)]
+pub struct DialogToggle {
+    pub label: String,
+    pub checked: bool,
+}
+
+#[derive(Debug, Clone)]
 pub enum DialogKind {
     Overwrite,
     Similar,
     Unrecognized { path: PathBuf, label: String },
+    DeleteProfile { name: String },
+    DeleteMod { id: String, name: String },
 }
 
 #[derive(Debug, Clone)]
@@ -75,6 +83,7 @@ pub struct Dialog {
     pub no_label: String,
     pub choice: DialogChoice,
     pub kind: DialogKind,
+    pub toggle: Option<DialogToggle>,
 }
 
 #[derive(Debug, Clone)]
@@ -224,6 +233,7 @@ pub struct App {
     pub explorer_selected: usize,
     pub toast: Option<Toast>,
     pub mod_filter: String,
+    pub settings_menu: Option<SettingsMenu>,
     import_queue: VecDeque<PathBuf>,
     import_active: Option<PathBuf>,
     import_tx: Sender<ImportMessage>,
@@ -246,6 +256,11 @@ pub struct App {
     pub conflict_selected: usize,
     explorer_game_expanded: HashSet<GameId>,
     explorer_profiles_expanded: HashSet<GameId>,
+}
+
+#[derive(Debug, Clone)]
+pub struct SettingsMenu {
+    pub selected: usize,
 }
 
 impl App {
@@ -300,6 +315,7 @@ impl App {
             explorer_selected: 0,
             toast: None,
             mod_filter: String::new(),
+            settings_menu: None,
             import_queue: VecDeque::new(),
             import_active: None,
             import_tx,
@@ -452,6 +468,46 @@ impl App {
             level,
             expires_at: Instant::now() + duration,
         });
+    }
+
+    pub fn open_settings_menu(&mut self) {
+        self.settings_menu = Some(SettingsMenu { selected: 0 });
+    }
+
+    pub fn close_settings_menu(&mut self) {
+        self.settings_menu = None;
+    }
+
+    pub fn toggle_settings_menu(&mut self) {
+        if self.settings_menu.is_some() {
+            self.close_settings_menu();
+        } else {
+            self.open_settings_menu();
+        }
+    }
+
+    pub fn toggle_confirm_profile_delete(&mut self) -> Result<()> {
+        self.app_config.confirm_profile_delete = !self.app_config.confirm_profile_delete;
+        self.app_config.save()?;
+        let state = if self.app_config.confirm_profile_delete {
+            "enabled"
+        } else {
+            "disabled"
+        };
+        self.status = format!("Confirm profile delete {state}");
+        Ok(())
+    }
+
+    pub fn toggle_confirm_mod_delete(&mut self) -> Result<()> {
+        self.app_config.confirm_mod_delete = !self.app_config.confirm_mod_delete;
+        self.app_config.save()?;
+        let state = if self.app_config.confirm_mod_delete {
+            "enabled"
+        } else {
+            "disabled"
+        };
+        self.status = format!("Confirm mod delete {state}");
+        Ok(())
     }
 
     pub fn conflicts_scanning(&self) -> bool {
@@ -649,7 +705,7 @@ impl App {
         self.status = match self.focus {
             Focus::Explorer => "Focus: explorer".to_string(),
             Focus::Mods => "Focus: mod stack".to_string(),
-            Focus::Conflicts => "Focus: conflicts".to_string(),
+            Focus::Conflicts => "Focus: overrides".to_string(),
         };
     }
 
@@ -664,8 +720,8 @@ impl App {
             return Ok(());
         }
         if self.conflict_active || self.conflict_pending {
-            self.status = "Game switch blocked: conflict scan running".to_string();
-            self.log_warn("Game switch blocked: conflict scan running".to_string());
+            self.status = "Game switch blocked: override scan running".to_string();
+            self.log_warn("Game switch blocked: override scan running".to_string());
             return Ok(());
         }
 
@@ -954,6 +1010,46 @@ impl App {
         Ok(())
     }
 
+    pub fn prompt_delete_profile(&mut self, name: String) {
+        if self.dialog.is_some() {
+            return;
+        }
+
+        let message = format!("Delete profile \"{name}\"?\nThis cannot be undone.");
+        self.open_dialog(Dialog {
+            title: "Delete Profile".to_string(),
+            message,
+            yes_label: "Delete".to_string(),
+            no_label: "Cancel".to_string(),
+            choice: DialogChoice::No,
+            kind: DialogKind::DeleteProfile { name },
+            toggle: Some(DialogToggle {
+                label: "Don't ask again for this action".to_string(),
+                checked: false,
+            }),
+        });
+    }
+
+    pub fn prompt_delete_mod(&mut self, id: String, name: String) {
+        if self.dialog.is_some() {
+            return;
+        }
+
+        let message = format!("Remove mod \"{name}\"?\nThis will delete it from the library.");
+        self.open_dialog(Dialog {
+            title: "Remove Mod".to_string(),
+            message,
+            yes_label: "Remove".to_string(),
+            no_label: "Cancel".to_string(),
+            choice: DialogChoice::No,
+            kind: DialogKind::DeleteMod { id, name },
+            toggle: Some(DialogToggle {
+                label: "Don't ask again for this action".to_string(),
+                checked: false,
+            }),
+        });
+    }
+
     pub fn delete_profile(&mut self, name: String) -> Result<()> {
         if self.library.profiles.len() <= 1 {
             self.status = "Cannot delete the last profile".to_string();
@@ -1106,8 +1202,8 @@ impl App {
         updated.overridden = updated.winner_id != updated.default_winner_id;
         self.conflicts[index] = updated;
 
-        self.status = "Conflict override updated".to_string();
-        self.log_info("Conflict override updated".to_string());
+        self.status = "Override updated".to_string();
+        self.log_info("Override updated".to_string());
         self.queue_auto_deploy("conflict override");
         Ok(())
     }
@@ -1902,6 +1998,7 @@ impl App {
             no_label: "Skip".to_string(),
             choice: DialogChoice::No,
             kind,
+            toggle: None,
         });
     }
 
@@ -1955,6 +2052,7 @@ impl App {
             no_label: "Cancel".to_string(),
             choice: DialogChoice::No,
             kind: DialogKind::Unrecognized { path, label },
+            toggle: None,
         });
     }
 
@@ -1999,6 +2097,38 @@ impl App {
                     self.stage_imports(vec![entry], &path);
                 } else {
                     self.log_warn(format!("Skipped unrecognized layout: {label}"));
+                }
+            }
+            DialogKind::DeleteProfile { name } => {
+                if matches!(choice, DialogChoice::Yes) {
+                    if let Some(toggle) = dialog.toggle {
+                        if toggle.checked {
+                            self.app_config.confirm_profile_delete = false;
+                            let _ = self.app_config.save();
+                        }
+                    }
+                    if let Err(err) = self.delete_profile(name) {
+                        self.status = format!("Profile delete failed: {err}");
+                        self.log_error(format!("Profile delete failed: {err}"));
+                    }
+                }
+            }
+            DialogKind::DeleteMod { id, name } => {
+                if matches!(choice, DialogChoice::Yes) {
+                    if let Some(toggle) = dialog.toggle {
+                        if toggle.checked {
+                            self.app_config.confirm_mod_delete = false;
+                            let _ = self.app_config.save();
+                        }
+                    }
+                    if !self.remove_mod_by_id(&id) {
+                        self.status = "No mod removed".to_string();
+                        return;
+                    }
+                    self.status = format!("Mod removed: {name}");
+                    self.log_info(format!("Mod removed: {name}"));
+                    self.clamp_selection();
+                    self.queue_auto_deploy("mod removed");
                 }
             }
         }
@@ -2175,6 +2305,26 @@ impl App {
         self.log_info("Mod removed from library".to_string());
         self.clamp_selection();
         self.queue_auto_deploy("mod removed");
+    }
+
+    pub fn request_remove_selected(&mut self) {
+        let Some(selected_id) = self.selected_profile_id() else {
+            return;
+        };
+        let Some(entry) = self
+            .library
+            .mods
+            .iter()
+            .find(|mod_entry| mod_entry.id == selected_id)
+        else {
+            return;
+        };
+
+        if self.app_config.confirm_mod_delete {
+            self.prompt_delete_mod(entry.id.clone(), entry.display_name());
+        } else {
+            self.remove_selected();
+        }
     }
 
     pub fn select_target_override(&mut self, selection: Option<TargetKind>) {
@@ -2552,11 +2702,11 @@ impl App {
                 if self.conflict_selected >= count {
                     self.conflict_selected = 0;
                 }
-                self.log_info(format!("Conflict scan complete: {count} conflict(s)"));
+                self.log_info(format!("Override scan complete: {count} override(s)"));
             }
             ConflictMessage::Failed { error } => {
-                self.status = format!("Conflict scan failed: {error}");
-                self.log_error(format!("Conflict scan failed: {error}"));
+                self.status = format!("Override scan failed: {error}");
+                self.log_error(format!("Override scan failed: {error}"));
             }
         }
     }

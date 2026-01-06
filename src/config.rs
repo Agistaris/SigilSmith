@@ -7,6 +7,10 @@ use std::{fs, path::PathBuf};
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppConfig {
     pub active_game: GameId,
+    #[serde(default = "default_true")]
+    pub confirm_profile_delete: bool,
+    #[serde(default = "default_true")]
+    pub confirm_mod_delete: bool,
 }
 
 impl AppConfig {
@@ -26,6 +30,8 @@ impl AppConfig {
 
         let config = AppConfig {
             active_game: GameId::default(),
+            confirm_profile_delete: true,
+            confirm_mod_delete: true,
         };
         config.save()?;
         Ok(config)
@@ -97,6 +103,10 @@ impl GameConfig {
 pub fn data_dir_for_game(game: GameId) -> Result<PathBuf> {
     let base = base_data_dir()?;
     Ok(base.join(game.data_dir_name()))
+}
+
+fn default_true() -> bool {
+    true
 }
 
 fn base_data_dir() -> Result<PathBuf> {
