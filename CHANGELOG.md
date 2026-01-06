@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.3.0
+
+- Overrides focus no longer tints the details/log panels; focus is shown via border + banner.
+- Overrides banner gains a subtle inline highlight behind its text.
+
 ## 0.2.9
 
 - Left panels now match the dark blue log tone.

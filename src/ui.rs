@@ -1039,11 +1039,7 @@ fn draw(frame: &mut Frame<'_>, app: &App) {
     } else {
         theme.border
     };
-    let details_bg = if details_focus {
-        theme.accent_soft
-    } else {
-        theme.log_bg
-    };
+    let details_bg = theme.log_bg;
     let details_block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Plain)
@@ -1204,11 +1200,7 @@ fn draw(frame: &mut Frame<'_>, app: &App) {
     frame.render_widget(overrides, context_chunks[1]);
 
     let log_area = lower_chunks[1];
-    let log_bg = if app.focus == Focus::Conflicts {
-        theme.accent_soft
-    } else {
-        theme.log_bg
-    };
+    let log_bg = theme.log_bg;
     let log_block = theme.panel("Log").style(Style::default().bg(log_bg));
     let log_inner = log_block.inner(log_area);
     frame.render_widget(log_block, log_area);
@@ -1268,6 +1260,21 @@ fn draw(frame: &mut Frame<'_>, app: &App) {
             width: conflict_inner.width,
             height: 1,
         };
+        if overrides_focused && line_area.width > 0 {
+            let bar_width = conflict_line_width(app, &theme, line_area.width as usize);
+            if bar_width > 0 {
+                let bar_area = Rect {
+                    x: line_area.x,
+                    y: line_area.y,
+                    width: bar_width.min(line_area.width),
+                    height: 1,
+                };
+                frame.render_widget(
+                    Block::default().style(Style::default().bg(theme.row_alt_bg)),
+                    bar_area,
+                );
+            }
+        }
         let conflict_line = build_conflict_banner(app, &theme, line_area.width as usize);
         let conflicts = Paragraph::new(conflict_line)
             .style(Style::default().bg(conflict_bg))
@@ -1706,6 +1713,86 @@ fn build_conflict_banner(app: &App, theme: &Theme, width: usize) -> Line<'static
     }
 
     Line::from(spans)
+}
+
+fn conflict_line_width(app: &App, _theme: &Theme, width: usize) -> u16 {
+    if width == 0 {
+        return 0;
+    }
+    let label = "Overrides: ";
+    if width <= label.len() {
+        return width as u16;
+    }
+    if app.conflicts_scanning() || app.conflicts_pending() || app.conflicts.is_empty() {
+        return width as u16;
+    }
+    let total = app.conflicts.len();
+    let selected_index = app.conflict_selected.min(total.saturating_sub(1));
+    let manual_count = app.conflicts.iter().filter(|entry| entry.overridden).count();
+    let auto_count = total.saturating_sub(manual_count);
+    let auto_text = format!("Auto ({auto_count})");
+    let manual_text = format!("Manual ({manual_count})");
+
+    let available = width.saturating_sub(label.len());
+    if !matches!(app.focus, Focus::Conflicts) {
+        let mut short_auto = auto_text.clone();
+        let mut short_manual = if manual_count > 0 {
+            manual_text.clone()
+        } else {
+            String::new()
+        };
+        let mut total_len = short_auto.len()
+            + if short_manual.is_empty() { 0 } else { 3 }
+            + short_manual.len();
+        if total_len > available {
+            short_auto = format!("A({auto_count})");
+            if !short_manual.is_empty() {
+                short_manual = format!("M({manual_count})");
+                total_len = short_auto.len() + 1 + short_manual.len();
+            } else {
+                total_len = short_auto.len();
+            }
+        }
+        if total_len > available && !short_manual.is_empty() {
+            short_manual.clear();
+            total_len = short_auto.len();
+        }
+        if total_len > available {
+            short_auto = truncate_text(&short_auto, available);
+            total_len = short_auto.chars().count();
+        }
+        return (label.len() + total_len).min(width) as u16;
+    }
+
+    let hint = " ←/→ cycle  ↑/↓ choose";
+    let index_text = format!("{}/{} ", selected_index + 1, total);
+    let index_len = index_text.chars().count();
+    let mut remaining = available.saturating_sub(index_len);
+    let hint_len = if hint.chars().count() > remaining {
+        0
+    } else {
+        hint.chars().count()
+    };
+    remaining = remaining.saturating_sub(hint_len);
+    let mut short_auto = auto_text;
+    let mut short_manual = manual_text;
+    let mut total_len = short_auto.len() + 3 + short_manual.len();
+    if total_len > remaining {
+        short_auto = format!("A({auto_count})");
+        short_manual = format!("M({manual_count})");
+        total_len = short_auto.len() + 1 + short_manual.len();
+    }
+    if total_len > remaining {
+        short_manual.clear();
+        total_len = short_auto.len();
+    }
+    if total_len > remaining {
+        short_auto = truncate_text(&short_auto, remaining);
+        total_len = short_auto.chars().count();
+    }
+    let hint_used = if hint_len > 0 { hint_len } else { 0 };
+    let full_len = label.len() + index_len + total_len + hint_used;
+    full_len.min(width) as u16
 }
 
 fn draw_dialog(frame: &mut Frame<'_>, app: &App, theme: &Theme) {
