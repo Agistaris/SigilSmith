@@ -236,6 +236,7 @@ pub struct App {
     pub toast: Option<Toast>,
     pub mod_filter: String,
     pub settings_menu: Option<SettingsMenu>,
+    pub smart_rank_preview: Option<SmartRankPreview>,
     import_queue: VecDeque<PathBuf>,
     import_active: Option<PathBuf>,
     import_tx: Sender<ImportMessage>,
@@ -270,6 +271,21 @@ pub struct SettingsMenu {
 pub struct OverrideSwap {
     pub from: String,
     pub to: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct SmartRankMove {
+    pub name: String,
+    pub from: usize,
+    pub to: usize,
+}
+
+#[derive(Debug, Clone)]
+pub struct SmartRankPreview {
+    pub proposed: Vec<ProfileEntry>,
+    pub report: smart_rank::SmartRankReport,
+    pub moves: Vec<SmartRankMove>,
+    pub warnings: Vec<String>,
 }
 
 impl App {
@@ -325,6 +341,7 @@ impl App {
             toast: None,
             mod_filter: String::new(),
             settings_menu: None,
+            smart_rank_preview: None,
             import_queue: VecDeque::new(),
             import_active: None,
             import_tx,
@@ -521,7 +538,7 @@ impl App {
         Ok(())
     }
 
-    pub fn run_smart_ranking(&mut self) {
+    pub fn open_smart_rank_preview(&mut self) {
         if self.is_busy() {
             self.status = "Smart ranking blocked: busy".to_string();
             self.log_warn("Smart ranking blocked: busy".to_string());
@@ -543,7 +560,7 @@ impl App {
             }
         };
 
-        let Some(profile) = self.library.active_profile_mut() else {
+        let Some(profile) = self.library.active_profile() else {
             self.status = "Smart ranking skipped: no profile".to_string();
             return;
         };
@@ -553,46 +570,87 @@ impl App {
             return;
         }
 
-        let moved = result.report.moved;
-        let total = result.report.total;
-        let missing = result.report.missing;
-        if moved == 0 {
-            self.status = if missing > 0 {
-                format!("Smart ranking: no changes ({total} mods, {missing} missing)")
-            } else {
-                format!("Smart ranking: no changes ({total} mods)")
+        let mod_map = self.library.index_by_id();
+        let mut current_index = HashMap::new();
+        for (index, entry) in profile.order.iter().enumerate() {
+            current_index.insert(entry.id.clone(), index);
+        }
+        let mut proposed_index = HashMap::new();
+        for (index, entry) in result.order.iter().enumerate() {
+            proposed_index.insert(entry.id.clone(), index);
+        }
+        let mut moves = Vec::new();
+        for (id, from) in current_index {
+            let Some(to) = proposed_index.get(&id).copied() else {
+                continue;
             };
-        } else {
-            profile.order = result.order;
-            if let Err(err) = self.library.save(&self.config.data_dir) {
-                self.status = format!("Smart ranking save failed: {err}");
-                self.log_error(format!("Smart ranking save failed: {err}"));
-                return;
+            if from == to {
+                continue;
             }
-            if missing > 0 {
-                self.status = format!(
-                    "Smart ranking: reordered {moved}/{total} (missing {missing})"
-                );
-            } else {
-                self.status = format!("Smart ranking: reordered {moved}/{total} mod(s)");
-            }
-            self.queue_auto_deploy("smart ranking");
+            let name = mod_map
+                .get(&id)
+                .map(|mod_entry| mod_entry.display_name())
+                .unwrap_or_else(|| id.clone());
+            moves.push(SmartRankMove { name, from, to });
+        }
+        moves.sort_by_key(|entry| entry.from);
+
+        let missing = result.report.missing;
+        if moves.is_empty() && missing == 0 && result.warnings.is_empty() {
+            self.status = "Smart ranking: no changes".to_string();
+            return;
         }
 
-        if result.report.conflicts > 0 {
+        self.smart_rank_preview = Some(SmartRankPreview {
+            proposed: result.order,
+            report: result.report,
+            moves,
+            warnings: result.warnings,
+        });
+        self.status = "Smart ranking preview ready".to_string();
+    }
+
+    pub fn apply_smart_rank_preview(&mut self) {
+        let Some(preview) = self.smart_rank_preview.take() else {
+            return;
+        };
+        let Some(profile) = self.library.active_profile_mut() else {
+            self.status = "Smart ranking skipped: no profile".to_string();
+            return;
+        };
+        if preview.proposed.len() != profile.order.len() {
+            self.status = "Smart ranking skipped: incomplete order".to_string();
+            return;
+        }
+        profile.order = preview.proposed;
+        if let Err(err) = self.library.save(&self.config.data_dir) {
+            self.status = format!("Smart ranking save failed: {err}");
+            self.log_error(format!("Smart ranking save failed: {err}"));
+            return;
+        }
+        let moved = preview.report.moved;
+        let total = preview.report.total;
+        let missing = preview.report.missing;
+        if missing > 0 {
+            self.status = format!("Smart ranking applied: {moved}/{total} (missing {missing})");
+        } else {
+            self.status = format!("Smart ranking applied: {moved}/{total} mod(s)");
+        }
+        if preview.report.conflicts > 0 {
             self.log_info(format!(
                 "Smart ranking analyzed {} conflict set(s)",
-                result.report.conflicts
+                preview.report.conflicts
             ));
         }
-        if result.report.missing > 0 {
-            self.log_warn(format!(
-                "Smart ranking partial: {} mod(s) missing data",
-                result.report.missing
-            ));
-        }
-        for warning in result.warnings {
+        for warning in preview.warnings {
             self.log_warn(warning);
+        }
+        self.queue_auto_deploy("smart ranking");
+    }
+
+    pub fn cancel_smart_rank_preview(&mut self) {
+        if self.smart_rank_preview.take().is_some() {
+            self.status = "Smart ranking canceled".to_string();
         }
     }
 

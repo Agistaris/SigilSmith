@@ -49,6 +49,7 @@ struct RankItem {
     file_count: usize,
     total_bytes: u64,
     conflict_files: usize,
+    conflict_partners: usize,
     original_index: usize,
     has_data: bool,
 }
@@ -122,6 +123,7 @@ pub fn smart_rank_profile(config: &GameConfig, library: &Library) -> Result<Smar
             file_count,
             total_bytes,
             conflict_files: 0,
+            conflict_partners: 0,
             original_index: index,
             has_data,
         });
@@ -130,11 +132,16 @@ pub fn smart_rank_profile(config: &GameConfig, library: &Library) -> Result<Smar
     let mut conflicts = 0usize;
     for group in [RankGroup::Loose, RankGroup::Pak] {
         let mut path_counts: HashMap<String, usize> = HashMap::new();
+        let mut path_mods: HashMap<String, Vec<String>> = HashMap::new();
         for item in items.iter().filter(|item| {
             item.group == group && item.enabled && item.has_data
         }) {
             for path in &item.file_paths {
                 *path_counts.entry(path.clone()).or_insert(0) += 1;
+                path_mods
+                    .entry(path.clone())
+                    .or_default()
+                    .push(item.id.clone());
             }
         }
         conflicts += path_counts.values().filter(|count| **count > 1).count();
@@ -142,47 +149,33 @@ pub fn smart_rank_profile(config: &GameConfig, library: &Library) -> Result<Smar
         for item in items.iter_mut().filter(|item| item.group == group) {
             if !item.enabled || !item.has_data {
                 item.conflict_files = 0;
+                item.conflict_partners = 0;
                 continue;
             }
             let mut conflict_files = 0usize;
+            let mut partners = HashSet::new();
             for path in &item.file_paths {
                 if path_counts.get(path).copied().unwrap_or(0) > 1 {
                     conflict_files += 1;
+                    if let Some(mods) = path_mods.get(path) {
+                        for id in mods {
+                            if id != &item.id {
+                                partners.insert(id.clone());
+                            }
+                        }
+                    }
                 }
             }
             item.conflict_files = conflict_files;
+            item.conflict_partners = partners.len();
         }
     }
 
-    items.sort_by(|a, b| {
-        let group = (a.group as u8).cmp(&(b.group as u8));
-        if group != std::cmp::Ordering::Equal {
-            return group;
-        }
-        let enabled = b.enabled.cmp(&a.enabled);
-        if enabled != std::cmp::Ordering::Equal {
-            return enabled;
-        }
-        let data = b.has_data.cmp(&a.has_data);
-        if data != std::cmp::Ordering::Equal {
-            return data;
-        }
-        let a_conflicts = a.conflict_files > 0;
-        let b_conflicts = b.conflict_files > 0;
-        let conflict_group = b_conflicts.cmp(&a_conflicts);
-        if conflict_group != std::cmp::Ordering::Equal {
-            return conflict_group;
-        }
-        let size = b.total_bytes.cmp(&a.total_bytes);
-        if size != std::cmp::Ordering::Equal {
-            return size;
-        }
-        let count = b.file_count.cmp(&a.file_count);
-        if count != std::cmp::Ordering::Equal {
-            return count;
-        }
-        a.original_index.cmp(&b.original_index)
-    });
+    let loose_order = rank_group_order(&items, RankGroup::Loose);
+    let pak_order = rank_group_order(&items, RankGroup::Pak);
+    let mut new_ids = Vec::new();
+    new_ids.extend(loose_order);
+    new_ids.extend(pak_order);
 
     let entry_map: HashMap<String, ProfileEntry> = profile
         .order
@@ -191,8 +184,8 @@ pub fn smart_rank_profile(config: &GameConfig, library: &Library) -> Result<Smar
         .map(|entry| (entry.id.clone(), entry))
         .collect();
     let mut new_order = Vec::new();
-    for item in items {
-        if let Some(entry) = entry_map.get(&item.id) {
+    for id in &new_ids {
+        if let Some(entry) = entry_map.get(id) {
             new_order.push(entry.clone());
         }
     }
@@ -214,6 +207,52 @@ pub fn smart_rank_profile(config: &GameConfig, library: &Library) -> Result<Smar
         },
         warnings,
     })
+}
+
+fn rank_group_order(items: &[RankItem], group: RankGroup) -> Vec<String> {
+    let mut group_items: Vec<&RankItem> = items.iter().filter(|item| item.group == group).collect();
+    group_items.sort_by_key(|item| item.original_index);
+
+    let mut ranked: Vec<&RankItem> = group_items
+        .iter()
+        .copied()
+        .filter(|item| item.enabled && item.has_data && item.conflict_files > 0)
+        .collect();
+    ranked.sort_by(|a, b| {
+        let partners = b.conflict_partners.cmp(&a.conflict_partners);
+        if partners != std::cmp::Ordering::Equal {
+            return partners;
+        }
+        let conflicts = b.conflict_files.cmp(&a.conflict_files);
+        if conflicts != std::cmp::Ordering::Equal {
+            return conflicts;
+        }
+        let size = b.total_bytes.cmp(&a.total_bytes);
+        if size != std::cmp::Ordering::Equal {
+            return size;
+        }
+        let count = b.file_count.cmp(&a.file_count);
+        if count != std::cmp::Ordering::Equal {
+            return count;
+        }
+        a.original_index.cmp(&b.original_index)
+    });
+
+    let reorder_set: HashSet<String> = ranked.iter().map(|item| item.id.clone()).collect();
+    let mut ranked_iter = ranked.into_iter();
+    let mut out = Vec::new();
+    for item in group_items {
+        if reorder_set.contains(&item.id) {
+            if let Some(next) = ranked_iter.next() {
+                out.push(next.id.clone());
+            } else {
+                out.push(item.id.clone());
+            }
+        } else {
+            out.push(item.id.clone());
+        }
+    }
+    out
 }
 
 fn scan_mod_files(

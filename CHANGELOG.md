@@ -2,7 +2,7 @@
 
 ## 0.3.3
 
-- Adds AI Smart Ranking (pak + loose scan) from the settings menu.
+- Adds AI Smart Ranking preview (pak + loose scan) with apply/cancel.
 - Adds a release notes helper script for release-only publishing.
 
 ## 0.3.2

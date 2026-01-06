@@ -163,6 +163,9 @@ fn run_loop(terminal: &mut Terminal<impl Backend>, app: &mut App) -> Result<()> 
 }
 
 fn handle_key(app: &mut App, key: KeyEvent) -> Result<()> {
+    if app.smart_rank_preview.is_some() {
+        return handle_smart_rank_preview(app, key);
+    }
     if app.dialog.is_some() {
         return handle_dialog_mode(app, key);
     }
@@ -223,6 +226,19 @@ fn handle_dialog_mode(app: &mut App, key: KeyEvent) -> Result<()> {
         KeyCode::Esc => {
             app.dialog_set_choice(DialogChoice::No);
             app.dialog_confirm();
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+fn handle_smart_rank_preview(app: &mut App, key: KeyEvent) -> Result<()> {
+    match key.code {
+        KeyCode::Enter | KeyCode::Char('y') | KeyCode::Char('Y') => {
+            app.apply_smart_rank_preview();
+        }
+        KeyCode::Esc | KeyCode::Char('n') | KeyCode::Char('N') => {
+            app.cancel_smart_rank_preview();
         }
         _ => {}
     }
@@ -296,7 +312,7 @@ fn handle_settings_menu(app: &mut App, key: KeyEvent) -> Result<()> {
                     }
                     SettingsItemKind::ActionSmartRank => {
                         app.close_settings_menu();
-                        app.run_smart_ranking();
+                        app.open_smart_rank_preview();
                     }
                 }
             }
@@ -1448,6 +1464,9 @@ fn draw(frame: &mut Frame<'_>, app: &App) {
         draw_dialog(frame, app, &theme);
     }
     draw_toast(frame, app, &theme, chunks[1]);
+    if app.smart_rank_preview.is_some() {
+        draw_smart_rank_preview(frame, app, &theme);
+    }
     if app.settings_menu.is_some() {
         draw_settings_menu(frame, app, &theme);
     }
@@ -2101,6 +2120,156 @@ fn draw_settings_menu(frame: &mut Frame<'_>, app: &App, theme: &Theme) {
         .block(menu_block)
         .style(Style::default().fg(theme.text));
     frame.render_widget(menu_widget, menu_area);
+}
+
+fn draw_smart_rank_preview(frame: &mut Frame<'_>, app: &App, theme: &Theme) {
+    let Some(preview) = &app.smart_rank_preview else {
+        return;
+    };
+
+    let area = frame.size();
+    let max_width = area.width.saturating_sub(2).max(1);
+    let width = max_width.min(120).max(60).min(max_width);
+    let max_height = area.height.saturating_sub(2).max(1);
+    let height = max_height.min(22).max(10);
+    let x = area.x + (area.width.saturating_sub(width)) / 2;
+    let y = area.y + (area.height.saturating_sub(height)) / 2;
+    let preview_area = Rect::new(x, y, width, height);
+
+    let inner_width = preview_area.width.saturating_sub(2) as usize;
+    let inner_height = preview_area.height.saturating_sub(2) as usize;
+    let lines = build_smart_rank_preview_lines(preview, theme, inner_width, inner_height);
+
+    frame.render_widget(Clear, preview_area);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(theme.accent_soft))
+        .style(Style::default().bg(theme.header_bg))
+        .title(Span::styled(
+            "AI Smart Ranking",
+            Style::default()
+                .fg(theme.accent)
+                .add_modifier(Modifier::BOLD),
+        ));
+    let widget = Paragraph::new(lines)
+        .block(block)
+        .style(Style::default().fg(theme.text))
+        .alignment(Alignment::Left);
+    frame.render_widget(widget, preview_area);
+}
+
+fn build_smart_rank_preview_lines(
+    preview: &crate::app::SmartRankPreview,
+    theme: &Theme,
+    width: usize,
+    height: usize,
+) -> Vec<Line<'static>> {
+    if width == 0 || height == 0 {
+        return Vec::new();
+    }
+
+    let mut lines = Vec::new();
+    let moved = preview.report.moved;
+    let conflicts = preview.report.conflicts;
+    let missing = preview.report.missing;
+    lines.push(Line::from(Span::styled(
+        format!("Moved: {moved} | Conflicts: {conflicts} | Missing: {missing}"),
+        Style::default().fg(theme.text),
+    )));
+    lines.push(Line::from(Span::styled(
+        "Conflicting mods are ordered by size (big → small).",
+        Style::default().fg(theme.muted),
+    )));
+    lines.push(Line::from(Span::styled(
+        "Non-conflicting mods keep their relative order.",
+        Style::default().fg(theme.muted),
+    )));
+
+    if !preview.warnings.is_empty() {
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            "Warnings:",
+            Style::default()
+                .fg(theme.warning)
+                .add_modifier(Modifier::BOLD),
+        )));
+        for warning in preview.warnings.iter().take(2) {
+            lines.push(Line::from(Span::styled(
+                truncate_text(warning, width),
+                Style::default().fg(theme.warning),
+            )));
+        }
+    }
+
+    lines.push(Line::from(""));
+
+    let col_width = width.saturating_sub(3) / 2;
+    let col_width = col_width.max(10);
+    let header_pad = " ".repeat(col_width.saturating_sub("Current".len()));
+    let header_right_pad = " ".repeat(col_width.saturating_sub("Proposed".len()));
+    lines.push(Line::from(vec![
+        Span::styled(
+            format!("Current{header_pad}"),
+            Style::default()
+                .fg(theme.accent)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(" | ", Style::default().fg(theme.muted)),
+        Span::styled(
+            format!("Proposed{header_right_pad}"),
+            Style::default()
+                .fg(theme.accent)
+                .add_modifier(Modifier::BOLD),
+        ),
+    ]));
+
+    let mut diff_lines = Vec::new();
+    if preview.moves.is_empty() {
+        diff_lines.push(Line::from(Span::styled(
+            "No ordering changes detected.",
+            Style::default().fg(theme.muted),
+        )));
+    } else {
+        for entry in &preview.moves {
+            let left = format!("{:>2}. {}", entry.from + 1, entry.name);
+            let right = format!("{:>2}. {}", entry.to + 1, entry.name);
+            let left_text = truncate_text(&left, col_width);
+            let right_text = truncate_text(&right, col_width);
+            let left_len = left_text.chars().count();
+            let pad = " ".repeat(col_width.saturating_sub(left_len));
+            diff_lines.push(Line::from(vec![
+                Span::styled(left_text, Style::default().fg(theme.muted)),
+                Span::styled(format!("{pad} | "), Style::default().fg(theme.muted)),
+                Span::styled(right_text, Style::default().fg(theme.text)),
+            ]));
+        }
+    }
+
+    let footer = Line::from(Span::styled(
+        "Enter: apply | Esc: cancel",
+        Style::default().fg(theme.muted),
+    ));
+
+    let remaining = height.saturating_sub(lines.len() + 1);
+    if remaining == 0 {
+        lines.push(footer);
+        return lines;
+    }
+
+    if diff_lines.len() > remaining {
+        let keep = remaining.saturating_sub(1);
+        let extra = diff_lines.len().saturating_sub(keep);
+        diff_lines.truncate(keep);
+        diff_lines.push(Line::from(Span::styled(
+            format!("... {extra} more"),
+            Style::default().fg(theme.muted),
+        )));
+    }
+    lines.extend(diff_lines);
+    lines.push(footer);
+
+    lines
 }
 
 fn build_settings_menu_lines(app: &App, theme: &Theme, selected: usize) -> Vec<Line<'static>> {
