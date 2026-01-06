@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.2.9
+
+- Left panels now match the dark blue log tone.
+- Mod stack background uses a neutral dark grey.
+
 ## 0.2.8
 
 - Left panels now use a cohesive dark-blue background.

@@ -50,6 +50,7 @@ struct Theme {
     warning: Color,
     error: Color,
     header_bg: Color,
+    mod_bg: Color,
     log_bg: Color,
     subpanel_bg: Color,
 }
@@ -60,15 +61,16 @@ impl Theme {
             accent: Color::Rgb(120, 198, 255),
             accent_soft: Color::Rgb(58, 92, 138),
             border: Color::Rgb(72, 84, 102),
-            row_alt_bg: Color::Rgb(26, 30, 36),
+            row_alt_bg: Color::Rgb(30, 32, 34),
             text: Color::Rgb(216, 226, 236),
             muted: Color::Rgb(124, 134, 146),
             success: Color::Rgb(120, 220, 150),
             warning: Color::Rgb(235, 200, 120),
             error: Color::Rgb(240, 104, 100),
             header_bg: Color::Rgb(18, 24, 34),
+            mod_bg: Color::Rgb(22, 23, 25),
             log_bg: Color::Rgb(13, 18, 26),
-            subpanel_bg: Color::Rgb(18, 30, 48),
+            subpanel_bg: Color::Rgb(13, 18, 26),
         }
     }
 
@@ -904,7 +906,7 @@ fn draw(frame: &mut Frame<'_>, app: &App) {
         } else {
             theme.border
         }))
-        .style(Style::default().bg(theme.log_bg));
+        .style(Style::default().bg(theme.mod_bg));
     let mod_stack_inner = mod_stack_block.inner(body_chunks[1]);
     frame.render_widget(mod_stack_block, body_chunks[1]);
 
@@ -923,7 +925,7 @@ fn draw(frame: &mut Frame<'_>, app: &App) {
     let row_count = rows.len();
     if rows.is_empty() {
         let empty = Paragraph::new("Drop a mod archive or folder to import.")
-            .style(Style::default().fg(theme.muted).bg(theme.log_bg))
+            .style(Style::default().fg(theme.muted).bg(theme.mod_bg))
             .alignment(Alignment::Center);
         frame.render_widget(empty, table_chunks[0]);
     } else {
@@ -964,7 +966,7 @@ fn draw(frame: &mut Frame<'_>, app: &App) {
                 Constraint::Min(min_mod),
             ],
         )
-        .style(Style::default().bg(theme.log_bg).fg(theme.text))
+        .style(Style::default().bg(theme.mod_bg).fg(theme.text))
         .header(Row::new(vec![
             Cell::from("On"),
             Cell::from("Order"),
