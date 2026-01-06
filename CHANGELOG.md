@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.2.5
+
+- Details/log row now splits horizontally to reclaim vertical space.
+- Override actions border uses the focused highlight color.
+
 ## 0.2.4
 
 - Override actions border now uses the light-blue highlight when focused.

@@ -33,7 +33,6 @@ const DETAILS_HEIGHT: u16 = 10;
 const CONTEXT_HEIGHT: u16 = 19;
 const LOG_MIN_HEIGHT: u16 = 5;
 const CONFLICTS_BAR_HEIGHT: u16 = STATUS_HEIGHT;
-const FOOTER_HEIGHT: u16 = 8;
 const FILTER_HEIGHT: u16 = 1;
 const TABLE_MIN_HEIGHT: u16 = 6;
 const SUBPANEL_PAD_X: u16 = 0;
@@ -715,12 +714,12 @@ fn should_start_import(c: char) -> bool {
 fn draw(frame: &mut Frame<'_>, app: &App) {
     let area = frame.size();
     let theme = Theme::new();
-    let footer_height = FOOTER_HEIGHT.min(area.height.saturating_sub(4));
+    let bottom_height = CONFLICTS_BAR_HEIGHT.min(area.height.saturating_sub(3));
     let available = area
         .height
         .saturating_sub(HEADER_HEIGHT)
-        .saturating_sub(footer_height);
-    let details_height = DETAILS_HEIGHT.min(available.saturating_sub(10).max(3));
+        .saturating_sub(bottom_height);
+    let details_height = DETAILS_HEIGHT.min(available.saturating_sub(10).max(LOG_MIN_HEIGHT));
     let main_height = available.saturating_sub(details_height).max(6);
     let chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -728,9 +727,13 @@ fn draw(frame: &mut Frame<'_>, app: &App) {
             Constraint::Length(HEADER_HEIGHT),
             Constraint::Length(main_height),
             Constraint::Length(details_height),
-            Constraint::Length(footer_height),
+            Constraint::Length(bottom_height),
         ])
         .split(area);
+    let lower_chunks = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(65), Constraint::Percentage(35)])
+        .split(chunks[2]);
 
     let (rows, counts, target_width) = build_rows(app, &theme);
     let profile_label = app.active_profile_label();
@@ -1026,7 +1029,7 @@ fn draw(frame: &mut Frame<'_>, app: &App) {
         "Details"
     };
     let details_border = if details_focus {
-        theme.accent_soft
+        theme.accent
     } else {
         theme.border
     };
@@ -1042,8 +1045,9 @@ fn draw(frame: &mut Frame<'_>, app: &App) {
         ))
         .style(Style::default().bg(theme.subpanel_bg));
     let details_fill = Block::default().style(Style::default().bg(theme.subpanel_bg));
-    frame.render_widget(details_fill, chunks[2]);
-    let details_inner = details_block.inner(chunks[2]);
+    let details_area = lower_chunks[0];
+    frame.render_widget(details_fill, details_area);
+    let details_inner = details_block.inner(details_area);
     let details_content_width =
         details_inner.width.saturating_sub(SUBPANEL_PAD_X.saturating_mul(2)) as usize;
     let details_lines = build_details(app, &theme, details_content_width);
@@ -1055,14 +1059,14 @@ fn draw(frame: &mut Frame<'_>, app: &App) {
     let details = Paragraph::new(details_lines)
         .style(Style::default().fg(theme.text).bg(theme.subpanel_bg))
         .block(details_block);
-    frame.render_widget(details, chunks[2]);
+    frame.render_widget(details, details_area);
 
     let context_block = theme.block("Context");
     let context_inner = context_block.inner(left_chunks[1]);
     frame.render_widget(context_block, left_chunks[1]);
 
     let min_context_lines = 8u16;
-    let legend_height = chunks[2].height.min(
+    let legend_height = details_area.height.min(
         context_inner
             .height
             .saturating_sub(min_context_lines)
@@ -1185,15 +1189,7 @@ fn draw(frame: &mut Frame<'_>, app: &App) {
         .block(legend_block);
     frame.render_widget(overrides, context_chunks[1]);
 
-    let footer_chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Min(LOG_MIN_HEIGHT),
-            Constraint::Length(CONFLICTS_BAR_HEIGHT),
-        ])
-        .split(chunks[3]);
-
-    let log_area = footer_chunks[0];
+    let log_area = lower_chunks[1];
     let log_block = theme.panel("Log").style(Style::default().bg(theme.log_bg));
     let log_inner = log_block.inner(log_area);
     frame.render_widget(log_block, log_area);
@@ -1224,7 +1220,7 @@ fn draw(frame: &mut Frame<'_>, app: &App) {
         frame.render_stateful_widget(scrollbar, log_chunks[1], &mut scroll_state);
     }
 
-    let status_row = footer_chunks[1];
+    let status_row = chunks[3];
     let bottom_chunks = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([Constraint::Min(10), Constraint::Length(STATUS_WIDTH)])
