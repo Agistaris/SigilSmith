@@ -53,6 +53,7 @@ struct Theme {
     mod_bg: Color,
     log_bg: Color,
     subpanel_bg: Color,
+    swap_bg: Color,
 }
 
 impl Theme {
@@ -71,6 +72,7 @@ impl Theme {
             mod_bg: Color::Rgb(22, 23, 25),
             log_bg: Color::Rgb(13, 18, 26),
             subpanel_bg: Color::Rgb(13, 18, 26),
+            swap_bg: Color::Rgb(20, 90, 74),
         }
     }
 
@@ -996,6 +998,19 @@ fn draw(frame: &mut Frame<'_>, app: &App) {
         let mut state = TableState::default();
         state.select(Some(app.selected));
         let view_height = table_chunks[0].height.saturating_sub(1) as usize;
+        if row_count > view_height && view_height > 0 {
+            let max_offset = row_count.saturating_sub(view_height);
+            let mut offset = state.offset();
+            if app.selected < offset {
+                offset = app.selected;
+            } else if app.selected >= offset.saturating_add(view_height) {
+                offset = app.selected.saturating_add(1).saturating_sub(view_height);
+            }
+            if offset > max_offset {
+                offset = max_offset;
+            }
+            *state.offset_mut() = offset;
+        }
         let table_area = Rect {
             x: table_chunks[0].x,
             y: table_chunks[0].y,
@@ -1016,7 +1031,8 @@ fn draw(frame: &mut Frame<'_>, app: &App) {
         );
         frame.render_stateful_widget(table, table_chunks[0], &mut state);
         if row_count > view_height && view_height > 0 {
-            let mut scroll_state = ScrollbarState::new(row_count)
+            let scroll_len = row_count.saturating_sub(view_height).saturating_add(1);
+            let mut scroll_state = ScrollbarState::new(scroll_len)
                 .position(state.offset())
                 .viewport_content_length(view_height);
             let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
@@ -1041,7 +1057,12 @@ fn draw(frame: &mut Frame<'_>, app: &App) {
     } else {
         theme.border
     };
-    let details_bg = theme.log_bg;
+    let swap_info = app.override_swap_info();
+    let details_bg = if swap_info.is_some() {
+        theme.swap_bg
+    } else {
+        theme.log_bg
+    };
     let details_block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Plain)
@@ -1069,6 +1090,38 @@ fn draw(frame: &mut Frame<'_>, app: &App) {
         .style(Style::default().fg(theme.text).bg(details_bg))
         .block(details_block);
     frame.render_widget(details, details_area);
+    if let Some(swap) = swap_info {
+        if details_inner.height > 0 && details_inner.width > 0 {
+            let overlay_height = details_inner.height.min(2);
+            let overlay_area = Rect {
+                x: details_inner.x,
+                y: details_inner.y + details_inner.height.saturating_sub(overlay_height),
+                width: details_inner.width,
+                height: overlay_height,
+            };
+            let swap_text = format!("Swap: {} → {}", swap.from, swap.to);
+            let mut overlay_lines = Vec::new();
+            let overlay_width = overlay_area.width as usize;
+            if overlay_height >= 1 {
+                overlay_lines.push(Line::from(Span::styled(
+                    truncate_text(&swap_text, overlay_width),
+                    Style::default().fg(theme.header_bg),
+                )));
+            }
+            if overlay_height >= 2 {
+                overlay_lines.push(Line::from(Span::styled(
+                    "Loading swap...",
+                    Style::default()
+                        .fg(theme.header_bg)
+                        .add_modifier(Modifier::BOLD),
+                )));
+            }
+            let overlay = Paragraph::new(overlay_lines)
+                .style(Style::default().bg(details_bg))
+                .alignment(Alignment::Center);
+            frame.render_widget(overlay, overlay_area);
+        }
+    }
 
     let context_block = theme
         .block("Context")
@@ -1219,7 +1272,8 @@ fn draw(frame: &mut Frame<'_>, app: &App) {
     let scroll = app.log_scroll.min(max_scroll);
     let log_start = log_total.saturating_sub(log_view + scroll);
     if log_total > log_view && log_view > 0 {
-        let mut scroll_state = ScrollbarState::new(log_total)
+        let scroll_len = log_total.saturating_sub(log_view).saturating_add(1);
+        let mut scroll_state = ScrollbarState::new(scroll_len)
             .position(log_start)
             .viewport_content_length(log_view);
         let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
@@ -1636,7 +1690,9 @@ fn build_conflict_banner(app: &App, theme: &Theme, width: usize) -> Line<'static
             Modifier::empty()
         });
     let sep_style = Style::default().fg(theme.muted);
-    let hint_style = Style::default().fg(theme.accent);
+    let hint_style = Style::default()
+        .fg(theme.accent)
+        .add_modifier(Modifier::BOLD);
 
     if !focused {
         let mut short_auto = auto_text.clone();
@@ -1975,7 +2031,7 @@ fn draw_settings_menu(frame: &mut Frame<'_>, app: &App, theme: &Theme) {
         height = area.height.saturating_sub(2);
     }
     let max_width = area.width.saturating_sub(2).max(1);
-    let width = (max_line as u16 + 6).clamp(40, max_width.min(70));
+    let width = (max_line as u16 + 6).clamp(34, max_width.min(58));
     let x = area.x + (area.width.saturating_sub(width)) / 2;
     let y = area.y + (area.height.saturating_sub(height)) / 2;
     let menu_area = Rect::new(x, y, width, height);

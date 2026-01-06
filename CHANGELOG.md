@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.3.2
+
+- Adds a swap overlay in Override Actions during deploy.
+- Adjusts scrollbar positioning to align with viewport edges.
+- Tightens the settings menu layout for a more compact modal.
+
 ## 0.3.1
 
 - Syncs native BG3 mod.io entries from modsettings into the library.

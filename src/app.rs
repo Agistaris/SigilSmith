@@ -255,6 +255,7 @@ pub struct App {
     approved_imports: Vec<ModEntry>,
     pub conflicts: Vec<deploy::ConflictEntry>,
     pub conflict_selected: usize,
+    pub override_swap: Option<OverrideSwap>,
     explorer_game_expanded: HashSet<GameId>,
     explorer_profiles_expanded: HashSet<GameId>,
 }
@@ -262,6 +263,12 @@ pub struct App {
 #[derive(Debug, Clone)]
 pub struct SettingsMenu {
     pub selected: usize,
+}
+
+#[derive(Debug, Clone)]
+pub struct OverrideSwap {
+    pub from: String,
+    pub to: String,
 }
 
 impl App {
@@ -337,6 +344,7 @@ impl App {
             approved_imports: Vec::new(),
             conflicts: Vec::new(),
             conflict_selected: 0,
+            override_swap: None,
             explorer_game_expanded: {
                 let mut expanded = HashSet::new();
                 expanded.insert(game_id);
@@ -526,6 +534,28 @@ impl App {
             || self.deploy_pending
             || self.conflict_active
             || self.conflict_pending
+    }
+
+    pub fn override_swap_info(&self) -> Option<&OverrideSwap> {
+        if self.focus != Focus::Conflicts {
+            return None;
+        }
+        let Some(info) = self.override_swap.as_ref() else {
+            return None;
+        };
+        if !(self.deploy_active || self.deploy_pending) {
+            return None;
+        }
+        let is_override = self
+            .deploy_reason
+            .as_deref()
+            .map(|reason| reason.contains("conflict override"))
+            .unwrap_or(false);
+        if is_override {
+            Some(info)
+        } else {
+            None
+        }
     }
 
     pub fn explorer_items(&self) -> Vec<ExplorerItem> {
@@ -1228,17 +1258,26 @@ impl App {
         }
 
         self.library.save(&self.config.data_dir)?;
+        let previous_name = conflict.winner_name.clone();
         let mut updated = conflict.clone();
         updated.winner_id = winner_id.clone();
-        if let Some(candidate) = updated
+        let updated_name = updated
             .candidates
             .iter()
             .find(|candidate| candidate.mod_id == winner_id)
-        {
-            updated.winner_name = candidate.mod_name.clone();
-        }
+            .map(|candidate| candidate.mod_name.clone())
+            .unwrap_or_else(|| winner_id.clone());
+        updated.winner_name = updated_name.clone();
         updated.overridden = updated.winner_id != updated.default_winner_id;
         self.conflicts[index] = updated;
+        if previous_name != updated_name {
+            self.override_swap = Some(OverrideSwap {
+                from: previous_name,
+                to: updated_name,
+            });
+        } else {
+            self.override_swap = None;
+        }
 
         self.status = "Override updated".to_string();
         self.log_info("Override updated".to_string());
@@ -2313,18 +2352,18 @@ impl App {
                 return;
             }
         };
+        let deploy::ModSettingsSnapshot { modules, order } = snapshot;
 
         let mut existing_ids: HashSet<String> =
             self.library.mods.iter().map(|entry| entry.id.clone()).collect();
-        let order_set: HashSet<String> = snapshot.order.iter().cloned().collect();
-        let mut modules_by_uuid: HashMap<String, PakInfo> = snapshot
-            .modules
+        let order_set: HashSet<String> = order.iter().cloned().collect();
+        let mut modules_by_uuid: HashMap<String, PakInfo> = modules
             .into_iter()
             .map(|info| (info.uuid.clone(), info))
             .collect();
 
         let mut ordered = Vec::new();
-        for uuid in &snapshot.order {
+        for uuid in &order {
             if let Some(info) = modules_by_uuid.remove(uuid) {
                 ordered.push(info);
             }
@@ -2380,12 +2419,70 @@ impl App {
             }
         }
 
-        if added > 0 || updated_enabled {
+        let mod_has_pak: HashMap<String, bool> = self
+            .library
+            .mods
+            .iter()
+            .map(|mod_entry| (mod_entry.id.clone(), mod_entry.has_target_kind(TargetKind::Pak)))
+            .collect();
+        let mut reordered = false;
+        if let Some(profile) = self.library.active_profile_mut() {
+            if !order.is_empty() {
+                let entry_map: HashMap<String, ProfileEntry> = profile
+                    .order
+                    .iter()
+                    .cloned()
+                    .map(|entry| (entry.id.clone(), entry))
+                    .collect();
+                let mut loose_ids = Vec::new();
+                let mut pak_ids = Vec::new();
+                for entry in &profile.order {
+                    let has_pak = mod_has_pak.get(&entry.id).copied().unwrap_or(false);
+                    if has_pak {
+                        pak_ids.push(entry.id.clone());
+                    } else {
+                        loose_ids.push(entry.id.clone());
+                    }
+                }
+                let mut pak_set: HashSet<String> = pak_ids.iter().cloned().collect();
+                let mut pak_ordered = Vec::new();
+                for uuid in &order {
+                    if pak_set.remove(uuid) {
+                        pak_ordered.push(uuid.clone());
+                    }
+                }
+                for id in pak_ids {
+                    if pak_set.contains(&id) {
+                        pak_ordered.push(id);
+                    }
+                }
+                let mut new_order = Vec::new();
+                new_order.extend(loose_ids);
+                new_order.extend(pak_ordered);
+                let mut reordered_entries = Vec::new();
+                for id in new_order {
+                    if let Some(entry) = entry_map.get(&id) {
+                        reordered_entries.push(entry.clone());
+                    }
+                }
+                if reordered_entries.len() == profile.order.len()
+                    && reordered_entries != profile.order
+                {
+                    profile.order = reordered_entries;
+                    reordered = true;
+                }
+            }
+        }
+
+        if added > 0 || updated_enabled || reordered {
             if let Err(err) = self.library.save(&self.config.data_dir) {
                 self.log_warn(format!("Native mod sync save failed: {err}"));
             }
             if added > 0 {
                 self.log_info(format!("Native mods added: {added}"));
+            }
+            if reordered {
+                self.log_info("Native mod order synced".to_string());
             }
         }
     }
@@ -2928,6 +3025,7 @@ impl App {
                 self.set_toast("Deploy failed", ToastLevel::Error, Duration::from_secs(3));
             }
         }
+        self.override_swap = None;
 
         if self.deploy_pending {
             self.maybe_start_deploy();

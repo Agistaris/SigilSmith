@@ -124,7 +124,7 @@ impl Profile {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ProfileEntry {
     pub id: String,
     pub enabled: bool,
