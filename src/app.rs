@@ -5,13 +5,14 @@ use crate::{
     game::{self, GameId},
     importer,
     library::{
-        FileOverride, normalize_label, Library, ModEntry, ProfileEntry, TargetKind, TargetOverride,
+        FileOverride, normalize_label, Library, ModEntry, ModSource, PakInfo, ProfileEntry,
+        TargetKind, TargetOverride,
     },
 };
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::{HashSet, VecDeque},
+    collections::{HashMap, HashSet, VecDeque},
     fs,
     io::Write,
     path::PathBuf,
@@ -72,7 +73,7 @@ pub enum DialogKind {
     Similar,
     Unrecognized { path: PathBuf, label: String },
     DeleteProfile { name: String },
-    DeleteMod { id: String, name: String },
+    DeleteMod { id: String, name: String, native: bool },
 }
 
 #[derive(Debug, Clone)]
@@ -354,6 +355,7 @@ impl App {
             app.log_warn(format!("Path auto-detect failed: {error}"));
         }
         app.ensure_setup();
+        app.sync_native_mods();
         app.queue_conflict_scan("startup");
         Ok(app)
     }
@@ -770,6 +772,7 @@ impl App {
         self.status = format!("Active game: {}", game_id.display_name());
         self.log_info(format!("Active game: {}", game_id.display_name()));
         self.ensure_setup();
+        self.sync_native_mods();
         self.queue_conflict_scan("game changed");
         Ok(())
     }
@@ -1043,18 +1046,45 @@ impl App {
             return;
         }
 
+        let is_native = self
+            .library
+            .mods
+            .iter()
+            .find(|entry| entry.id == id)
+            .map(|entry| entry.is_native())
+            .unwrap_or(false);
         let message = String::new();
+        let (title, yes_label, toggle) = if is_native {
+            (
+                "Remove Native Mod".to_string(),
+                "Remove".to_string(),
+                Some(DialogToggle {
+                    label: "Also delete local mod file".to_string(),
+                    checked: false,
+                }),
+            )
+        } else {
+            (
+                "Remove Mod".to_string(),
+                "Remove".to_string(),
+                Some(DialogToggle {
+                    label: "Don't ask again for this action?".to_string(),
+                    checked: false,
+                }),
+            )
+        };
         self.open_dialog(Dialog {
-            title: "Remove Mod".to_string(),
+            title,
             message,
-            yes_label: "Remove".to_string(),
+            yes_label,
             no_label: "Cancel".to_string(),
             choice: DialogChoice::No,
-            kind: DialogKind::DeleteMod { id, name },
-            toggle: Some(DialogToggle {
-                label: "Don't ask again for this action?".to_string(),
-                checked: false,
-            }),
+            kind: DialogKind::DeleteMod {
+                id,
+                name,
+                native: is_native,
+            },
+            toggle,
         });
     }
 
@@ -2121,15 +2151,18 @@ impl App {
                     }
                 }
             }
-            DialogKind::DeleteMod { id, name } => {
+            DialogKind::DeleteMod { id, name, native } => {
                 if matches!(choice, DialogChoice::Yes) {
+                    let mut remove_native_files = false;
                     if let Some(toggle) = dialog.toggle {
-                        if toggle.checked {
+                        if native {
+                            remove_native_files = toggle.checked;
+                        } else if toggle.checked {
                             self.app_config.confirm_mod_delete = false;
                             let _ = self.app_config.save();
                         }
                     }
-                    if !self.remove_mod_by_id(&id) {
+                    if !self.remove_mod_by_id_with_options(&id, remove_native_files) {
                         self.status = "No mod removed".to_string();
                         return;
                     }
@@ -2192,6 +2225,18 @@ impl App {
     }
 
     fn remove_mod_by_id(&mut self, id: &str) -> bool {
+        self.remove_mod_by_id_with_options(id, false)
+    }
+
+    fn remove_mod_by_id_with_options(&mut self, id: &str, delete_native_files: bool) -> bool {
+        let mod_entry = match self.library.mods.iter().find(|entry| entry.id == id) {
+            Some(entry) => entry.clone(),
+            None => return false,
+        };
+        if delete_native_files && mod_entry.is_native() {
+            self.remove_native_mod_files(&mod_entry);
+        }
+
         let mod_root = self.config.data_dir.join("mods").join(id);
         let before = self.library.mods.len();
         self.library.mods.retain(|mod_entry| mod_entry.id != id);
@@ -2210,9 +2255,139 @@ impl App {
         true
     }
 
+    fn remove_native_mod_files(&mut self, mod_entry: &ModEntry) {
+        let paths = match game::detect_paths(
+            self.game_id,
+            Some(&self.config.game_root),
+            Some(&self.config.larian_dir),
+        ) {
+            Ok(paths) => paths,
+            Err(err) => {
+                self.log_warn(format!("Native mod file remove skipped: {err}"));
+                return;
+            }
+        };
+        let pak_info = mod_entry.targets.iter().find_map(|target| match target {
+            crate::library::InstallTarget::Pak { info, .. } => Some(info.clone()),
+            _ => None,
+        });
+        let Some(info) = pak_info else {
+            self.log_warn("Native mod file remove skipped: missing pak info".to_string());
+            return;
+        };
+        let file_name = format!("{}.pak", info.folder);
+        let pak_path = paths.larian_mods_dir.join(file_name);
+        if !pak_path.exists() {
+            self.log_warn("Native mod file not found in Mods folder".to_string());
+            return;
+        }
+        if let Err(err) = fs::remove_file(&pak_path) {
+            self.log_warn(format!("Native mod file remove failed: {err}"));
+        } else {
+            self.log_info(format!("Native mod file removed: {}", info.folder));
+        }
+    }
+
     fn remove_mod_root(&self, id: &str) {
         let mod_root = self.config.data_dir.join("mods").join(id);
         let _ = fs::remove_dir_all(&mod_root);
+    }
+
+    fn sync_native_mods(&mut self) {
+        let paths = match game::detect_paths(
+            self.game_id,
+            Some(&self.config.game_root),
+            Some(&self.config.larian_dir),
+        ) {
+            Ok(paths) => paths,
+            Err(err) => {
+                self.log_warn(format!("Native mod sync skipped: {err}"));
+                return;
+            }
+        };
+
+        let snapshot = match deploy::read_modsettings_snapshot(&paths.modsettings_path) {
+            Ok(snapshot) => snapshot,
+            Err(err) => {
+                self.log_warn(format!("Native mod sync failed: {err}"));
+                return;
+            }
+        };
+
+        let mut existing_ids: HashSet<String> =
+            self.library.mods.iter().map(|entry| entry.id.clone()).collect();
+        let order_set: HashSet<String> = snapshot.order.iter().cloned().collect();
+        let mut modules_by_uuid: HashMap<String, PakInfo> = snapshot
+            .modules
+            .into_iter()
+            .map(|info| (info.uuid.clone(), info))
+            .collect();
+
+        let mut ordered = Vec::new();
+        for uuid in &snapshot.order {
+            if let Some(info) = modules_by_uuid.remove(uuid) {
+                ordered.push(info);
+            }
+        }
+        ordered.extend(modules_by_uuid.into_values());
+
+        let mut added = 0usize;
+        for info in ordered {
+            let uuid = info.uuid.clone();
+            if existing_ids.contains(&uuid) {
+                continue;
+            }
+            let mod_entry = ModEntry {
+                id: uuid.clone(),
+                name: info.name.clone(),
+                added_at: now_timestamp(),
+                targets: vec![crate::library::InstallTarget::Pak {
+                    file: format!("{}.pak", info.folder),
+                    info,
+                }],
+                target_overrides: Vec::new(),
+                source_label: None,
+                source: ModSource::Native,
+            };
+            self.library.mods.push(mod_entry);
+            existing_ids.insert(uuid);
+            added += 1;
+        }
+
+        if added > 0 {
+            self.library.ensure_mods_in_profiles();
+        }
+
+        let mut updated_enabled = false;
+        let native_ids: HashSet<String> = self
+            .library
+            .mods
+            .iter()
+            .filter(|mod_entry| mod_entry.is_native())
+            .map(|mod_entry| mod_entry.id.clone())
+            .collect();
+        if let Some(profile) = self.library.active_profile_mut() {
+            for entry in &mut profile.order {
+                let is_native = native_ids.contains(&entry.id);
+                if !is_native {
+                    continue;
+                }
+                let desired = order_set.contains(&entry.id);
+                if entry.enabled != desired {
+                    entry.enabled = desired;
+                    updated_enabled = true;
+                }
+            }
+        }
+
+        if added > 0 || updated_enabled {
+            if let Err(err) = self.library.save(&self.config.data_dir) {
+                self.log_warn(format!("Native mod sync save failed: {err}"));
+            }
+            if added > 0 {
+                self.log_info(format!("Native mods added: {added}"));
+            }
+        }
     }
 
     pub fn deploy(&mut self) -> Result<()> {
@@ -2328,7 +2503,9 @@ impl App {
             return;
         };
 
-        if self.app_config.confirm_mod_delete {
+        if entry.is_native() {
+            self.prompt_delete_mod(entry.id.clone(), entry.display_name());
+        } else if self.app_config.confirm_mod_delete {
             self.prompt_delete_mod(entry.id.clone(), entry.display_name());
         } else {
             self.remove_selected();
@@ -2794,6 +2971,10 @@ fn mod_matches_filter(mod_entry: &ModEntry, filter: &str) -> bool {
     if let Some(source) = mod_entry.source_label() {
         haystacks.push(source.to_string());
     }
+    if mod_entry.is_native() {
+        haystacks.push("native".to_string());
+        haystacks.push("mod.io".to_string());
+    }
     haystacks
         .into_iter()
         .any(|value| value.to_lowercase().contains(&filter))
@@ -3010,6 +3191,7 @@ fn build_unknown_entry(path: &PathBuf, label: &str) -> ModEntry {
         targets: Vec::new(),
         target_overrides: Vec::new(),
         source_label: Some(label.to_string()),
+        source: ModSource::Managed,
     }
 }
 

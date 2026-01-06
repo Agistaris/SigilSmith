@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.3.1
+
+- Syncs native BG3 mod.io entries from modsettings into the library.
+- Adds a Native column in the mod stack and source info in Details.
+- Native mod removal can optionally delete the local .pak file.
+
 ## 0.3.0
 
 - Overrides focus no longer tints the details/log panels; focus is shown via border + banner.

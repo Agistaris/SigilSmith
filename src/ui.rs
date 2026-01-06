@@ -944,7 +944,7 @@ fn draw(frame: &mut Frame<'_>, app: &App) {
         let table_width = table_chunks[0].width;
         let spacing = 1u16;
         let min_mod = 16u16;
-        let fixed_without_target = 3 + 5 + 6 + min_mod + spacing * 4;
+        let fixed_without_target = 3 + 2 + 5 + 6 + min_mod + spacing * 5;
         let max_target = table_width.saturating_sub(fixed_without_target);
         let mut target_col = target_width as u16;
         if max_target > 0 {
@@ -960,6 +960,7 @@ fn draw(frame: &mut Frame<'_>, app: &App) {
             rows,
             [
                 Constraint::Length(3),
+                Constraint::Length(2),
                 Constraint::Length(5),
                 Constraint::Length(6),
                 Constraint::Length(target_col),
@@ -969,6 +970,7 @@ fn draw(frame: &mut Frame<'_>, app: &App) {
         .style(Style::default().bg(theme.mod_bg).fg(theme.text))
         .header(Row::new(vec![
             Cell::from("On"),
+            Cell::from("N"),
             Cell::from("Order"),
             Cell::from("Kind"),
             Cell::from("Target"),
@@ -1906,26 +1908,41 @@ fn build_dialog_message_lines(dialog: &crate::app::Dialog, theme: &Theme) -> Vec
             ));
             vec![line1, line2]
         }
-        DialogKind::DeleteMod { name, .. } => {
-            let line1 = Line::from(vec![
-                Span::styled("Remove mod \"", Style::default().fg(theme.text)),
-                Span::styled(name.clone(), Style::default().fg(theme.text)),
-                Span::styled("\"?", Style::default().fg(theme.text)),
-            ]);
-            let line2 = Line::from(vec![
-                Span::styled(
-                    "This will remove it from the ",
-                    Style::default().fg(theme.text),
-                ),
-                Span::styled(
-                    "SigilSmith Library",
-                    Style::default()
-                        .fg(theme.success)
-                        .add_modifier(Modifier::BOLD),
-                ),
-                Span::styled(".", Style::default().fg(theme.text)),
-            ]);
-            vec![line1, line2]
+        DialogKind::DeleteMod { name, native, .. } => {
+            if *native {
+                let line1 = Line::from(vec![
+                    Span::styled("Remove native mod \"", Style::default().fg(theme.text)),
+                    Span::styled(name.clone(), Style::default().fg(theme.text)),
+                    Span::styled("\"?", Style::default().fg(theme.text)),
+                ]);
+                let line2 = Line::from(vec![
+                    Span::styled(
+                        "Unsubscribe in-game to stop updates.",
+                        Style::default().fg(theme.muted),
+                    ),
+                ]);
+                vec![line1, line2]
+            } else {
+                let line1 = Line::from(vec![
+                    Span::styled("Remove mod \"", Style::default().fg(theme.text)),
+                    Span::styled(name.clone(), Style::default().fg(theme.text)),
+                    Span::styled("\"?", Style::default().fg(theme.text)),
+                ]);
+                let line2 = Line::from(vec![
+                    Span::styled(
+                        "This will remove it from the ",
+                        Style::default().fg(theme.text),
+                    ),
+                    Span::styled(
+                        "SigilSmith Library",
+                        Style::default()
+                            .fg(theme.success)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled(".", Style::default().fg(theme.text)),
+                ]);
+                vec![line1, line2]
+            }
         }
         _ => dialog
             .message
@@ -2373,8 +2390,15 @@ fn row_for_entry(
     };
     let (state_label, state_style) = mod_path_label(app, mod_entry, theme, true);
     let target_len = state_label.chars().count();
+    let native_marker = if mod_entry.is_native() { "✓" } else { " " };
+    let native_style = if mod_entry.is_native() {
+        Style::default().fg(theme.success)
+    } else {
+        Style::default().fg(theme.muted)
+    };
     let mut row = Row::new(vec![
         Cell::from(enabled_text.to_string()).style(enabled_style),
+        Cell::from(native_marker.to_string()).style(native_style),
         Cell::from((order_index + 1).to_string()),
         Cell::from(kind.to_string()).style(kind_style),
         Cell::from(state_label).style(state_style),
@@ -2481,6 +2505,14 @@ fn build_details(app: &App, theme: &Theme, width: usize) -> Vec<Line<'static>> {
         label_style,
         value_style,
     });
+    if mod_entry.is_native() {
+        rows.push(KvRow {
+            label: "Source".to_string(),
+            value: "Native (mod.io)".to_string(),
+            label_style,
+            value_style: Style::default().fg(theme.accent),
+        });
+    }
     if display_name != mod_entry.name {
         rows.push(KvRow {
             label: "Internal".to_string(),
@@ -3058,6 +3090,10 @@ fn legend_rows(app: &App) -> Vec<LegendRow> {
                 LegendRow {
                     key: "Space".to_string(),
                     action: "Toggle enable".to_string(),
+                },
+                LegendRow {
+                    key: "N".to_string(),
+                    action: "Native mod (mod.io)".to_string(),
                 },
                 LegendRow {
                     key: "m".to_string(),

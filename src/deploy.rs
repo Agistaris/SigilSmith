@@ -96,6 +96,12 @@ struct LooseFileCandidate {
     relative_path: PathBuf,
 }
 
+#[derive(Debug, Clone)]
+pub struct ModSettingsSnapshot {
+    pub modules: Vec<PakInfo>,
+    pub order: Vec<String>,
+}
+
 pub fn deploy_with_options(
     config: &GameConfig,
     library: &mut Library,
@@ -145,7 +151,7 @@ pub fn deploy_with_options(
                 | InstallTarget::Bin { .. } => has_loose = true,
             }
         }
-        if has_loose {
+        if has_loose && !mod_entry.is_native() {
             loose_targets.push(mod_entry.clone());
         }
     }
@@ -171,6 +177,9 @@ pub fn deploy_with_options(
 
     let mut pak_files = Vec::new();
     for mod_entry in &all_mods {
+        if mod_entry.is_native() {
+            continue;
+        }
         for target in &mod_entry.targets {
             let kind = target.kind();
             if !mod_entry.is_target_enabled(kind) {
@@ -232,6 +241,70 @@ pub fn scan_conflicts(config: &GameConfig, library: &Library) -> Result<Vec<Conf
     let (_plans, conflicts, _overridden_files) =
         build_loose_plan(&paths, &ordered_mods, &config.data_dir, &file_overrides)?;
     Ok(conflicts)
+}
+
+pub fn read_modsettings_snapshot(path: &Path) -> Result<ModSettingsSnapshot> {
+    let save = read_modsettings(path)?;
+    let nodes: VecDeque<ModulesShortDescriptionNode> = save
+        .find_node_by_id("Mods")
+        .ok()
+        .and_then(|node| node.children.get(0))
+        .map(|child| child.node.clone())
+        .unwrap_or_default();
+
+    let mut base_uuids = HashSet::new();
+    let mut modules = Vec::new();
+    for node in nodes {
+        let uuid = match module_attr(&node, "UUID") {
+            Some(uuid) => uuid,
+            None => continue,
+        };
+        let name = module_attr(&node, "Name").unwrap_or_else(|| "Unknown".to_string());
+        let folder = module_attr(&node, "Folder").unwrap_or_else(|| uuid.clone());
+        if is_base_module(&name, &folder) {
+            base_uuids.insert(uuid);
+            continue;
+        }
+        let version = module_attr(&node, "Version64")
+            .and_then(|value| value.parse::<u64>().ok())
+            .unwrap_or(0);
+        let publish_handle = module_attr(&node, "PublishHandle")
+            .and_then(|value| value.parse::<u64>().ok());
+        let md5 = module_attr(&node, "MD5");
+
+        modules.push(PakInfo {
+            uuid,
+            name,
+            folder,
+            version,
+            md5,
+            publish_handle,
+            author: None,
+            description: None,
+            module_type: None,
+        });
+    }
+
+    let order = save
+        .find_node_by_id("ModOrder")
+        .ok()
+        .and_then(|node| node.children.get(0))
+        .map(|child| {
+            child
+                .node
+                .iter()
+                .filter_map(|node| {
+                    node.attribute
+                        .iter()
+                        .find(|attr| attr.id == "UUID")
+                        .map(|attr| attr.value.clone())
+                })
+                .filter(|uuid| !base_uuids.contains(uuid))
+                .collect::<Vec<String>>()
+        })
+        .unwrap_or_default();
+
+    Ok(ModSettingsSnapshot { modules, order })
 }
 
 fn update_modsettings(
@@ -363,6 +436,23 @@ fn update_modsettings(
     mod_order_node.children = vec![ModulesChildren { node: order_list }];
 
     write_modsettings(&paths.modsettings_path, &save)
+}
+
+fn module_attr(node: &ModulesShortDescriptionNode, key: &str) -> Option<String> {
+    node.attribute
+        .iter()
+        .find(|attr| attr.id == key)
+        .map(|attr| attr.value.clone())
+}
+
+fn is_base_module(name: &str, folder: &str) -> bool {
+    matches!(
+        name,
+        "Gustav" | "GustavX" | "GustavDev" | "Honour" | "HonourX"
+    ) || matches!(
+        folder,
+        "Gustav" | "GustavX" | "GustavDev" | "Honour" | "HonourX"
+    )
 }
 
 fn module_short_desc_from_info(info: &PakInfo) -> ModulesShortDescriptionNode {

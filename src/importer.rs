@@ -1,4 +1,4 @@
-use crate::library::{library_mod_root, InstallTarget, ModEntry, PakInfo};
+use crate::library::{library_mod_root, InstallTarget, ModEntry, ModSource, PakInfo};
 use anyhow::{anyhow, Context, Result};
 use blake3::Hasher;
 use larian_formats::lspk;
@@ -163,6 +163,7 @@ fn import_single_pak(path: &Path, data_dir: &Path, source_label: Option<&str>) -
         }],
         target_overrides: Vec::new(),
         source_label: source_label.map(|label| label.to_string()),
+        source: ModSource::Managed,
     })
 }
 
@@ -241,6 +242,7 @@ fn import_loose(
         targets,
         target_overrides: Vec::new(),
         source_label: source_label.map(|label| label.to_string()),
+        source: ModSource::Managed,
     })
 }
 

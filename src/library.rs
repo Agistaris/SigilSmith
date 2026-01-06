@@ -147,6 +147,8 @@ pub struct ModEntry {
     pub target_overrides: Vec<TargetOverride>,
     #[serde(default)]
     pub source_label: Option<String>,
+    #[serde(default)]
+    pub source: ModSource,
 }
 
 impl ModEntry {
@@ -162,6 +164,10 @@ impl ModEntry {
 
     pub fn source_label(&self) -> Option<&str> {
         self.source_label.as_deref()
+    }
+
+    pub fn is_native(&self) -> bool {
+        matches!(self.source, ModSource::Native)
     }
 
     pub fn display_type(&self) -> String {
@@ -216,6 +222,19 @@ impl ModEntry {
             .unwrap_or(true)
     }
 
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ModSource {
+    Managed,
+    Native,
+}
+
+impl Default for ModSource {
+    fn default() -> Self {
+        Self::Managed
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
