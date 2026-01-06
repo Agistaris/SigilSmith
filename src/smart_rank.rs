@@ -7,6 +7,7 @@ use anyhow::{Context, Result};
 use lz4_flex::block::decompress;
 use std::{
     collections::{HashMap, HashSet},
+    fs,
     fs::File,
     io::{Read, Seek, SeekFrom},
     path::Path,
@@ -54,6 +55,12 @@ struct RankItem {
     has_data: bool,
 }
 
+#[derive(Debug, Clone)]
+struct NativePakEntry {
+    path: std::path::PathBuf,
+    normalized: String,
+}
+
 pub fn smart_rank_profile(config: &GameConfig, library: &Library) -> Result<SmartRankResult> {
     let paths = game::detect_paths(
         config.game_id,
@@ -65,6 +72,7 @@ pub fn smart_rank_profile(config: &GameConfig, library: &Library) -> Result<Smar
         .context("active profile not set")?;
     let mod_map = library.index_by_id();
     let mut warnings = Vec::new();
+    let native_pak_index = build_native_pak_index(&paths.larian_mods_dir);
     let mut items = Vec::new();
     let mut missing = 0usize;
 
@@ -88,6 +96,7 @@ pub fn smart_rank_profile(config: &GameConfig, library: &Library) -> Result<Smar
                 config,
                 &paths.larian_mods_dir,
                 group,
+                &native_pak_index,
             ) {
                 Ok(files) => {
                     for file in files {
@@ -260,10 +269,11 @@ fn scan_mod_files(
     config: &GameConfig,
     larian_mods_dir: &Path,
     group: RankGroup,
+    native_pak_index: &[NativePakEntry],
 ) -> Result<Vec<FileEntry>> {
     let data_dir = &config.data_dir;
     match group {
-        RankGroup::Pak => scan_pak_files(mod_entry, data_dir, larian_mods_dir),
+        RankGroup::Pak => scan_pak_files(mod_entry, data_dir, larian_mods_dir, native_pak_index),
         RankGroup::Loose => scan_loose_files(mod_entry, data_dir),
     }
 }
@@ -304,16 +314,34 @@ fn scan_pak_files(
     mod_entry: &ModEntry,
     data_dir: &Path,
     larian_mods_dir: &Path,
+    native_pak_index: &[NativePakEntry],
 ) -> Result<Vec<FileEntry>> {
     let mut pak_paths = Vec::new();
 
     for target in &mod_entry.targets {
         if let InstallTarget::Pak { file, info } = target {
             if mod_entry.is_native() {
-                let filename = format!("{}.pak", info.folder);
-                pak_paths.push(larian_mods_dir.join(filename));
+                let by_folder = larian_mods_dir.join(format!("{}.pak", info.folder));
+                if by_folder.exists() {
+                    pak_paths.push(by_folder);
+                }
+                let by_file = larian_mods_dir.join(file);
+                if by_file.exists() && !pak_paths.iter().any(|p| p == &by_file) {
+                    pak_paths.push(by_file);
+                }
             } else {
                 pak_paths.push(data_dir.join("mods").join(&mod_entry.id).join(file));
+            }
+        }
+    }
+
+    if pak_paths.is_empty() && mod_entry.is_native() {
+        if let Some(info) = mod_entry.targets.iter().find_map(|target| match target {
+            InstallTarget::Pak { info, .. } => Some(info),
+            _ => None,
+        }) {
+            if let Some(path) = resolve_native_pak_path(info, native_pak_index) {
+                pak_paths.push(path);
             }
         }
     }
@@ -333,6 +361,83 @@ fn scan_pak_files(
     }
 
     Ok(files)
+}
+
+fn build_native_pak_index(larian_mods_dir: &Path) -> Vec<NativePakEntry> {
+    let mut entries = Vec::new();
+    let Ok(dir_entries) = fs::read_dir(larian_mods_dir) else {
+        return entries;
+    };
+    for entry in dir_entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|ext| ext.to_str()).map(|ext| ext.eq_ignore_ascii_case("pak")) != Some(true) {
+            continue;
+        }
+        let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
+        let normalized = normalize_pak_key(stem);
+        entries.push(NativePakEntry { path, normalized });
+    }
+    entries
+}
+
+fn resolve_native_pak_path(info: &crate::library::PakInfo, native_pak_index: &[NativePakEntry]) -> Option<std::path::PathBuf> {
+    if native_pak_index.is_empty() {
+        return None;
+    }
+
+    let folder_key = normalize_pak_key(&info.folder);
+    if let Some(entry) = find_single_match(native_pak_index, &folder_key) {
+        return Some(entry.path.clone());
+    }
+
+    let uuid_key = normalize_pak_key(&info.uuid);
+    if let Some(entry) = find_single_match(native_pak_index, &uuid_key) {
+        return Some(entry.path.clone());
+    }
+
+    for prefix_len in [16usize, 12, 8] {
+        if uuid_key.len() >= prefix_len {
+            if let Some(entry) = find_single_match(native_pak_index, &uuid_key[..prefix_len]) {
+                return Some(entry.path.clone());
+            }
+        }
+    }
+
+    for prefix_len in [32usize, 24, 16] {
+        if folder_key.len() >= prefix_len {
+            if let Some(entry) = find_single_match(native_pak_index, &folder_key[..prefix_len]) {
+                return Some(entry.path.clone());
+            }
+        }
+    }
+
+    None
+}
+
+fn find_single_match<'a>(
+    native_pak_index: &'a [NativePakEntry],
+    needle: &str,
+) -> Option<&'a NativePakEntry> {
+    if needle.is_empty() {
+        return None;
+    }
+    let mut matches = native_pak_index
+        .iter()
+        .filter(|entry| entry.normalized.contains(needle));
+    let first = matches.next()?;
+    if matches.next().is_some() {
+        None
+    } else {
+        Some(first)
+    }
+}
+
+fn normalize_pak_key(value: &str) -> String {
+    value
+        .chars()
+        .filter(|ch| ch.is_ascii_alphanumeric())
+        .map(|ch| ch.to_ascii_lowercase())
+        .collect()
 }
 
 fn scan_pak_index(path: &Path) -> Result<Vec<FileEntry>> {
