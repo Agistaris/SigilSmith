@@ -954,6 +954,55 @@ impl App {
         Ok(())
     }
 
+    pub fn delete_profile(&mut self, name: String) -> Result<()> {
+        if self.library.profiles.len() <= 1 {
+            self.status = "Cannot delete the last profile".to_string();
+            self.set_toast(
+                "At least one profile is required",
+                ToastLevel::Warn,
+                Duration::from_secs(3),
+            );
+            return Ok(());
+        }
+        if !self.library.profiles.iter().any(|profile| profile.name == name) {
+            self.status = "Profile not found".to_string();
+            self.set_toast(
+                "Profile not found",
+                ToastLevel::Warn,
+                Duration::from_secs(3),
+            );
+            return Ok(());
+        }
+
+        let was_active = self.library.active_profile == name;
+        self.library.profiles.retain(|profile| profile.name != name);
+
+        if self.library.profiles.is_empty() {
+            self.library
+                .profiles
+                .push(crate::library::Profile::new("Default"));
+        }
+
+        if was_active {
+            self.library.active_profile = self.library.profiles[0].name.clone();
+            self.config.active_profile = self.library.active_profile.clone();
+            self.selected = 0;
+            self.move_mode = false;
+            self.queue_auto_deploy("profile deleted");
+        }
+
+        self.library.save(&self.config.data_dir)?;
+        self.config.save()?;
+        self.status = format!("Profile deleted: {name}");
+        self.log_info(format!("Profile deleted: {name}"));
+        self.set_toast(
+            &format!("Profile deleted: {name}"),
+            ToastLevel::Info,
+            Duration::from_secs(3),
+        );
+        Ok(())
+    }
+
     pub fn set_active_profile(&mut self, name: &str) -> Result<()> {
         if !self.library.profiles.iter().any(|p| p.name == name) {
             self.status = "Profile not found".to_string();

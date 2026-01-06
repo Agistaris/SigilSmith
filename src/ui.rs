@@ -29,8 +29,8 @@ const SIDE_PANEL_WIDTH: u16 = 40;
 const STATUS_WIDTH: u16 = SIDE_PANEL_WIDTH;
 const STATUS_HEIGHT: u16 = 3;
 const HEADER_HEIGHT: u16 = 3;
-const DETAILS_HEIGHT: u16 = 9;
-const CONTEXT_HEIGHT: u16 = 18;
+const DETAILS_HEIGHT: u16 = 10;
+const CONTEXT_HEIGHT: u16 = 19;
 const LOG_MIN_HEIGHT: u16 = 5;
 const CONFLICTS_BAR_HEIGHT: u16 = STATUS_HEIGHT;
 const FOOTER_HEIGHT: u16 = 8;
@@ -296,6 +296,19 @@ fn handle_explorer_mode(app: &mut App, key: KeyEvent) -> Result<()> {
             } else {
                 let active = app.library.active_profile.clone();
                 app.enter_export_profile(&active);
+            }
+        }
+        KeyCode::Delete | KeyCode::Backspace => {
+            if let Some(ExplorerItem {
+                kind: ExplorerItemKind::Profile { name, .. },
+                disabled: false,
+                ..
+            }) = app.explorer_selected_item()
+            {
+                if let Err(err) = app.delete_profile(name) {
+                    app.status = format!("Profile delete failed: {err}");
+                    app.log_error(format!("Profile delete failed: {err}"));
+                }
             }
         }
         KeyCode::Char('p') | KeyCode::Char('P') => app.enter_import_profile(),
@@ -1622,16 +1635,22 @@ fn render_toast(
     level: ToastLevel,
 ) {
     let mut message = message.to_string();
+    let padding_x = 2u16;
+    let padding_y = 1u16;
     let max_width = body_area.width.saturating_sub(4).max(24);
-    let max_text = max_width.saturating_sub(4) as usize;
+    let max_text = max_width
+        .saturating_sub(2 + padding_x.saturating_mul(2)) as usize;
     if message.len() > max_text {
         message.truncate(max_text.saturating_sub(3));
         message.push_str("...");
     }
-    let width = (message.len() as u16 + 4).clamp(24, max_width);
-    let height = 3u16;
+    let width = (message.len() as u16 + 2 + padding_x.saturating_mul(2)).clamp(24, max_width);
+    let height = 2 + padding_y.saturating_mul(2) + 1;
     let x = body_area.x + (body_area.width.saturating_sub(width)) / 2;
-    let y = body_area.y + 1;
+    let mut y = body_area.y + 2;
+    if y + height > body_area.y + body_area.height {
+        y = body_area.y + body_area.height.saturating_sub(height);
+    }
     let toast_area = Rect::new(x, y, width, height);
 
     let (border, text) = match level {
@@ -1645,7 +1664,13 @@ fn render_toast(
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
         .border_style(Style::default().fg(border))
-        .style(Style::default().bg(theme.header_bg));
+        .style(Style::default().bg(theme.header_bg))
+        .padding(Padding {
+            left: padding_x,
+            right: padding_x,
+            top: padding_y,
+            bottom: padding_y,
+        });
     let content = Paragraph::new(message)
         .block(block)
         .style(Style::default().fg(text))
@@ -2427,6 +2452,10 @@ fn build_legend_lines(
                 LegendRow {
                     key: "c".to_string(),
                     action: "Duplicate profile".to_string(),
+                },
+                LegendRow {
+                    key: "Del".to_string(),
+                    action: "Delete profile".to_string(),
                 },
                 LegendRow {
                     key: "e".to_string(),
