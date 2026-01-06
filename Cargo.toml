@@ -11,6 +11,7 @@ anyhow = "1.0.86"
 blake3 = "1.5.3"
 crossterm = "0.28.1"
 directories = "5.0.1"
+flate2 = "1.0.30"
 larian-formats = "0.3.0"
 lz4_flex = "0.11.1"
 quick-xml = { version = "0.31.0", features = ["serialize"] }

@@ -1177,6 +1177,7 @@ dependencies = [
  "blake3",
  "crossterm 0.28.1",
  "directories",
+ "flate2",
  "larian-formats",
  "lz4_flex",
  "quick-xml 0.31.0",

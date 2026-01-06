@@ -239,6 +239,12 @@ pub struct App {
     pub settings_menu: Option<SettingsMenu>,
     pub smart_rank_preview: Option<SmartRankPreview>,
     pub smart_rank_scroll: usize,
+    pub smart_rank_view: SmartRankView,
+    pub smart_rank_progress: Option<smart_rank::SmartRankProgress>,
+    smart_rank_active: bool,
+    smart_rank_mode: Option<SmartRankMode>,
+    smart_rank_tx: Sender<SmartRankMessage>,
+    smart_rank_rx: Receiver<SmartRankMessage>,
     import_queue: VecDeque<PathBuf>,
     import_active: Option<PathBuf>,
     import_tx: Sender<ImportMessage>,
@@ -282,12 +288,32 @@ pub struct SmartRankMove {
     pub to: usize,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SmartRankView {
+    Changes,
+    Explain,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SmartRankMode {
+    Preview,
+    Warmup,
+}
+
 #[derive(Debug, Clone)]
 pub struct SmartRankPreview {
     pub proposed: Vec<ProfileEntry>,
     pub report: smart_rank::SmartRankReport,
     pub moves: Vec<SmartRankMove>,
     pub warnings: Vec<String>,
+    pub explain: smart_rank::SmartRankExplain,
+}
+
+#[derive(Debug, Clone)]
+pub enum SmartRankMessage {
+    Progress(smart_rank::SmartRankProgress),
+    Finished(smart_rank::SmartRankResult),
+    Failed(String),
 }
 
 impl App {
@@ -322,6 +348,7 @@ impl App {
         let (import_tx, import_rx) = mpsc::channel();
         let (deploy_tx, deploy_rx) = mpsc::channel();
         let (conflict_tx, conflict_rx) = mpsc::channel();
+        let (smart_rank_tx, smart_rank_rx) = mpsc::channel();
         let log_path = config.data_dir.join("sigilsmith.log");
 
         let mut app = Self {
@@ -345,6 +372,12 @@ impl App {
             settings_menu: None,
             smart_rank_preview: None,
             smart_rank_scroll: 0,
+            smart_rank_view: SmartRankView::Changes,
+            smart_rank_progress: None,
+            smart_rank_active: false,
+            smart_rank_mode: None,
+            smart_rank_tx,
+            smart_rank_rx,
             import_queue: VecDeque::new(),
             import_active: None,
             import_tx,
@@ -386,6 +419,9 @@ impl App {
         app.ensure_setup();
         app.sync_native_mods();
         app.queue_conflict_scan("startup");
+        if app.paths_ready() {
+            app.start_smart_rank_scan(SmartRankMode::Warmup);
+        }
         Ok(app)
     }
 
@@ -542,6 +578,10 @@ impl App {
     }
 
     pub fn open_smart_rank_preview(&mut self) {
+        if self.smart_rank_active {
+            self.status = "Smart ranking already running".to_string();
+            return;
+        }
         if self.is_busy() {
             self.status = "Smart ranking blocked: busy".to_string();
             self.log_warn("Smart ranking blocked: busy".to_string());
@@ -553,17 +593,48 @@ impl App {
             return;
         }
 
-        self.status = "Smart ranking: scanning...".to_string();
-        self.log_info("Smart ranking scan started".to_string());
-        let result = smart_rank::smart_rank_profile(&self.config, &self.library);
-        let result = match result {
-            Ok(result) => result,
-            Err(err) => {
-                self.status = format!("Smart ranking failed: {err}");
-                self.log_error(format!("Smart ranking failed: {err}"));
-                return;
-            }
+        self.start_smart_rank_scan(SmartRankMode::Preview);
+    }
+
+    fn start_smart_rank_scan(&mut self, mode: SmartRankMode) {
+        if self.smart_rank_active {
+            return;
+        }
+        self.smart_rank_mode = Some(mode);
+        self.smart_rank_active = true;
+        self.smart_rank_progress = None;
+        self.smart_rank_view = SmartRankView::Changes;
+        self.smart_rank_scroll = 0;
+        self.status = match mode {
+            SmartRankMode::Preview => "Smart ranking: scanning...".to_string(),
+            SmartRankMode::Warmup => "Smart ranking: warmup scan...".to_string(),
         };
+        self.log_info("Smart ranking scan started".to_string());
+
+        let config = self.config.clone();
+        let library = self.library.clone();
+        let tx = self.smart_rank_tx.clone();
+        thread::spawn(move || {
+            let result =
+                smart_rank::smart_rank_profile_with_progress(&config, &library, |progress| {
+                    let _ = tx.send(SmartRankMessage::Progress(progress));
+                });
+            match result {
+                Ok(result) => {
+                    let _ = tx.send(SmartRankMessage::Finished(result));
+                }
+                Err(err) => {
+                    let _ = tx.send(SmartRankMessage::Failed(err.to_string()));
+                }
+            }
+        });
+    }
+
+    fn finalize_smart_rank_preview(&mut self, result: smart_rank::SmartRankResult) {
+        self.smart_rank_active = false;
+        self.smart_rank_progress = None;
+        self.smart_rank_mode = None;
+
         self.log_info(format!(
             "Smart rank scan: loose {}/{} pak {}/{} in {}ms (missing loose {}, pak {})",
             result.report.scanned_loose,
@@ -621,8 +692,10 @@ impl App {
             report: result.report,
             moves,
             warnings: result.warnings,
+            explain: result.explain,
         });
         self.smart_rank_scroll = 0;
+        self.smart_rank_view = SmartRankView::Changes;
         self.status = "Smart ranking preview ready".to_string();
     }
 
@@ -631,6 +704,7 @@ impl App {
             return;
         };
         self.smart_rank_scroll = 0;
+        self.smart_rank_view = SmartRankView::Changes;
         let Some(profile) = self.library.active_profile_mut() else {
             self.status = "Smart ranking skipped: no profile".to_string();
             return;
@@ -670,6 +744,7 @@ impl App {
             self.status = "Smart ranking canceled".to_string();
         }
         self.smart_rank_scroll = 0;
+        self.smart_rank_view = SmartRankView::Changes;
     }
 
     pub fn conflicts_scanning(&self) -> bool {
@@ -686,6 +761,7 @@ impl App {
             || self.deploy_pending
             || self.conflict_active
             || self.conflict_pending
+            || self.smart_rank_active
     }
 
     pub fn override_swap_info(&self) -> Option<&OverrideSwap> {
@@ -1921,6 +1997,63 @@ impl App {
         self.maybe_start_deploy();
         self.poll_conflicts();
         self.maybe_start_conflict_scan();
+    }
+
+    pub fn poll_smart_rank(&mut self) {
+        loop {
+            match self.smart_rank_rx.try_recv() {
+                Ok(message) => match message {
+                    SmartRankMessage::Progress(progress) => {
+                        self.smart_rank_progress = Some(progress.clone());
+                        let label = progress.group.label();
+                        if progress.total > 0 {
+                            self.status = format!(
+                                "Smart ranking: {label} {}/{} ({})",
+                                progress.scanned,
+                                progress.total,
+                                progress.name
+                            );
+                        } else {
+                            self.status =
+                                format!("Smart ranking: {label} ({})", progress.name);
+                        }
+                    }
+                    SmartRankMessage::Finished(result) => {
+                        match self.smart_rank_mode.unwrap_or(SmartRankMode::Preview) {
+                            SmartRankMode::Preview => {
+                                self.finalize_smart_rank_preview(result);
+                            }
+                            SmartRankMode::Warmup => {
+                                self.smart_rank_active = false;
+                                self.smart_rank_progress = None;
+                                self.smart_rank_mode = None;
+                                self.log_info(format!(
+                                    "Smart rank warmup: loose {}/{} pak {}/{} in {}ms",
+                                    result.report.scanned_loose,
+                                    result.report.enabled_loose,
+                                    result.report.scanned_pak,
+                                    result.report.enabled_pak,
+                                    result.report.elapsed_ms,
+                                ));
+                                self.status = "Smart ranking warmup complete".to_string();
+                            }
+                        }
+                    }
+                    SmartRankMessage::Failed(err) => {
+                        self.smart_rank_active = false;
+                        self.smart_rank_mode = None;
+                        self.smart_rank_progress = None;
+                        self.status = format!("Smart ranking failed: {err}");
+                        self.log_error(format!("Smart ranking failed: {err}"));
+                    }
+                },
+                Err(TryRecvError::Empty) => break,
+                Err(TryRecvError::Disconnected) => {
+                    self.smart_rank_active = false;
+                    break;
+                }
+            }
+        }
     }
 
     pub fn maybe_auto_submit(&mut self) -> Option<(InputPurpose, String)> {

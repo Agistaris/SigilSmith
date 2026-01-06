@@ -136,6 +136,7 @@ fn run_loop(terminal: &mut Terminal<impl Backend>, app: &mut App) -> Result<()> 
             }
         }
         app.poll_imports();
+        app.poll_smart_rank();
         app.clamp_selection();
         terminal.draw(|frame| draw(frame, app))?;
 
@@ -239,6 +240,13 @@ fn handle_smart_rank_preview(app: &mut App, key: KeyEvent) -> Result<()> {
         }
         KeyCode::Esc | KeyCode::Char('n') | KeyCode::Char('N') => {
             app.cancel_smart_rank_preview();
+        }
+        KeyCode::Tab => {
+            app.smart_rank_view = match app.smart_rank_view {
+                crate::app::SmartRankView::Changes => crate::app::SmartRankView::Explain,
+                crate::app::SmartRankView::Explain => crate::app::SmartRankView::Changes,
+            };
+            app.smart_rank_scroll = 0;
         }
         KeyCode::Up | KeyCode::Char('k') | KeyCode::Char('K') => {
             app.smart_rank_scroll = app.smart_rank_scroll.saturating_sub(1);
@@ -2162,6 +2170,7 @@ fn draw_smart_rank_preview(frame: &mut Frame<'_>, app: &App, theme: &Theme) {
         inner_width,
         inner_height,
         app.smart_rank_scroll,
+        app.smart_rank_view,
     );
 
     frame.render_widget(Clear, preview_area);
@@ -2189,6 +2198,7 @@ fn build_smart_rank_preview_lines(
     width: usize,
     height: usize,
     scroll: usize,
+    view: crate::app::SmartRankView,
 ) -> Vec<Line<'static>> {
     if width == 0 || height == 0 {
         return Vec::new();
@@ -2253,56 +2263,81 @@ fn build_smart_rank_preview_lines(
 
     let col_width = width.saturating_sub(3) / 2;
     let col_width = col_width.max(10);
-    let header_pad = " ".repeat(col_width.saturating_sub("Current".len()));
-    let header_right_pad = " ".repeat(col_width.saturating_sub("Proposed".len()));
-    lines.push(Line::from(vec![
-        Span::styled(
-            format!("Current{header_pad}"),
-            Style::default()
-                .fg(theme.accent)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(" | ", Style::default().fg(theme.muted)),
-        Span::styled(
-            format!("Proposed{header_right_pad}"),
-            Style::default()
-                .fg(theme.accent)
-                .add_modifier(Modifier::BOLD),
-        ),
-    ]));
-
-    let mut diff_lines = Vec::new();
-    if preview.moves.is_empty() {
-        diff_lines.push(Line::from(Span::styled(
-            "No ordering changes detected.",
-            Style::default().fg(theme.muted),
-        )));
+    if matches!(view, crate::app::SmartRankView::Changes) {
+        let header_pad = " ".repeat(col_width.saturating_sub("Current".len()));
+        let header_right_pad = " ".repeat(col_width.saturating_sub("Proposed".len()));
+        lines.push(Line::from(vec![
+            Span::styled(
+                format!("Current{header_pad}"),
+                Style::default()
+                    .fg(theme.accent)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(" | ", Style::default().fg(theme.muted)),
+            Span::styled(
+                format!("Proposed{header_right_pad}"),
+                Style::default()
+                    .fg(theme.accent)
+                    .add_modifier(Modifier::BOLD),
+            ),
+        ]));
     } else {
-        for entry in &preview.moves {
-            let left = format!("{:>2}. {}", entry.from + 1, entry.name);
-            let right = format!("{:>2}. {}", entry.to + 1, entry.name);
-            let left_text = truncate_text(&left, col_width);
-            let right_text = truncate_text(&right, col_width);
-            let left_len = left_text.chars().count();
-            let pad = " ".repeat(col_width.saturating_sub(left_len));
-            let row_bg = theme.accent_soft;
-            diff_lines.push(Line::from(vec![
-                Span::styled(
-                    left_text,
-                    Style::default().fg(theme.muted).bg(row_bg),
-                ),
-                Span::styled(
-                    format!("{pad} | "),
-                    Style::default().fg(theme.muted).bg(row_bg),
-                ),
-                Span::styled(
-                    right_text,
-                    Style::default()
-                        .fg(theme.text)
-                        .bg(row_bg)
-                        .add_modifier(Modifier::BOLD),
-                ),
-            ]));
+        lines.push(Line::from(Span::styled(
+            "Explain",
+            Style::default()
+                .fg(theme.accent)
+                .add_modifier(Modifier::BOLD),
+        )));
+    }
+
+    let mut body_lines = Vec::new();
+    if matches!(view, crate::app::SmartRankView::Changes) {
+        if preview.moves.is_empty() {
+            body_lines.push(Line::from(Span::styled(
+                "No ordering changes detected.",
+                Style::default().fg(theme.muted),
+            )));
+        } else {
+            for entry in &preview.moves {
+                let left = format!("{:>2}. {}", entry.from + 1, entry.name);
+                let right = format!("{:>2}. {}", entry.to + 1, entry.name);
+                let left_text = truncate_text(&left, col_width);
+                let right_text = truncate_text(&right, col_width);
+                let left_len = left_text.chars().count();
+                let pad = " ".repeat(col_width.saturating_sub(left_len));
+                let row_bg = theme.accent_soft;
+                body_lines.push(Line::from(vec![
+                    Span::styled(
+                        left_text,
+                        Style::default().fg(theme.muted).bg(row_bg),
+                    ),
+                    Span::styled(
+                        format!("{pad} | "),
+                        Style::default().fg(theme.muted).bg(row_bg),
+                    ),
+                    Span::styled(
+                        right_text,
+                        Style::default()
+                            .fg(theme.text)
+                            .bg(row_bg)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                ]));
+            }
+        }
+    } else {
+        for line in &preview.explain.lines {
+            let style = match line.kind {
+                crate::smart_rank::ExplainLineKind::Header => Style::default()
+                    .fg(theme.accent)
+                    .add_modifier(Modifier::BOLD),
+                crate::smart_rank::ExplainLineKind::Muted => Style::default().fg(theme.muted),
+                crate::smart_rank::ExplainLineKind::Item => Style::default().fg(theme.text),
+            };
+            body_lines.push(Line::from(Span::styled(
+                truncate_text(&line.text, width),
+                style,
+            )));
         }
     }
 
@@ -2315,22 +2350,22 @@ fn build_smart_rank_preview_lines(
         return lines;
     }
 
-    let total = diff_lines.len();
+    let total = body_lines.len();
     let max_scroll = total.saturating_sub(available);
     let scroll = scroll.min(max_scroll);
     let end = (scroll + available).min(total);
     if total > 0 {
-        lines.extend(diff_lines[scroll..end].iter().cloned());
+        lines.extend(body_lines[scroll..end].iter().cloned());
     }
 
     let footer = if total > available {
         format!(
-            "Enter: apply | Esc: cancel | ↑/↓ scroll {}/{}",
+            "Enter: apply | Esc: cancel | Tab: view | ↑/↓ scroll {}/{}",
             scroll + 1,
             max_scroll + 1
         )
     } else {
-        "Enter: apply | Esc: cancel".to_string()
+        "Enter: apply | Esc: cancel | Tab: view".to_string()
     };
     lines.push(Line::from(Span::styled(
         footer,

@@ -6,6 +6,7 @@ use crate::{
 };
 use anyhow::{Context, Result};
 use lz4_flex::block::decompress;
+use quick_xml::{events::Event, Reader};
 use std::{
     collections::{HashMap, HashSet},
     fs::File,
@@ -32,11 +33,35 @@ pub struct SmartRankReport {
     pub elapsed_ms: u64,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SmartRankGroup {
+    Loose,
+    Pak,
+}
+
+impl SmartRankGroup {
+    pub fn label(self) -> &'static str {
+        match self {
+            SmartRankGroup::Loose => "Loose",
+            SmartRankGroup::Pak => "Pak",
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct SmartRankProgress {
+    pub group: SmartRankGroup,
+    pub scanned: usize,
+    pub total: usize,
+    pub name: String,
+}
+
 #[derive(Debug, Clone)]
 pub struct SmartRankResult {
     pub order: Vec<ProfileEntry>,
     pub report: SmartRankReport,
     pub warnings: Vec<String>,
+    pub explain: SmartRankExplain,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -63,9 +88,42 @@ struct RankItem {
     conflict_partners: usize,
     original_index: usize,
     has_data: bool,
+    patch_score: u8,
+    patch_reasons: Vec<String>,
+    dependencies: Vec<String>,
 }
 
+#[derive(Debug, Clone)]
+pub struct SmartRankExplain {
+    pub lines: Vec<SmartRankExplainLine>,
+}
+
+#[derive(Debug, Clone)]
+pub struct SmartRankExplainLine {
+    pub kind: ExplainLineKind,
+    pub text: String,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum ExplainLineKind {
+    Header,
+    Item,
+    Muted,
+}
+
+#[allow(dead_code)]
 pub fn smart_rank_profile(config: &GameConfig, library: &Library) -> Result<SmartRankResult> {
+    smart_rank_profile_with_progress(config, library, |_| {})
+}
+
+pub fn smart_rank_profile_with_progress<F>(
+    config: &GameConfig,
+    library: &Library,
+    mut progress: F,
+) -> Result<SmartRankResult>
+where
+    F: FnMut(SmartRankProgress),
+{
     let started = Instant::now();
     let paths = game::detect_paths(
         config.game_id,
@@ -84,10 +142,13 @@ pub fn smart_rank_profile(config: &GameConfig, library: &Library) -> Result<Smar
     let mut missing_pak = 0usize;
     let mut scanned_loose = 0usize;
     let mut scanned_pak = 0usize;
+    let mut progress_loose = 0usize;
+    let mut progress_pak = 0usize;
     let mut enabled_loose = 0usize;
     let mut enabled_pak = 0usize;
 
-    for (index, entry) in profile.order.iter().enumerate() {
+    let mut group_by_id: HashMap<String, RankGroup> = HashMap::new();
+    for entry in &profile.order {
         let Some(mod_entry) = mod_map.get(&entry.id) else {
             continue;
         };
@@ -96,15 +157,31 @@ pub fn smart_rank_profile(config: &GameConfig, library: &Library) -> Result<Smar
             .iter()
             .any(|target| !matches!(target, InstallTarget::Pak { .. }));
         let group = if has_loose { RankGroup::Loose } else { RankGroup::Pak };
-
-        let mut file_paths = HashSet::new();
-        let mut total_bytes = 0u64;
-        let mut has_data = false;
-
+        group_by_id.insert(entry.id.clone(), group);
         if entry.enabled {
             match group {
                 RankGroup::Loose => enabled_loose += 1,
                 RankGroup::Pak => enabled_pak += 1,
+            }
+        }
+    }
+
+    for (index, entry) in profile.order.iter().enumerate() {
+        let Some(mod_entry) = mod_map.get(&entry.id) else {
+            continue;
+        };
+        let group = *group_by_id.get(&entry.id).unwrap_or(&RankGroup::Pak);
+
+        let mut file_paths = HashSet::new();
+        let mut total_bytes = 0u64;
+        let mut has_data = false;
+        let mut dependencies = Vec::new();
+        let mut tags = Vec::new();
+
+        if entry.enabled {
+            match group {
+                RankGroup::Loose => {}
+                RankGroup::Pak => {}
             }
             match scan_mod_files(
                 mod_entry,
@@ -148,6 +225,43 @@ pub fn smart_rank_profile(config: &GameConfig, library: &Library) -> Result<Smar
                     ));
                 }
             }
+
+            if matches!(group, RankGroup::Pak) {
+                if let Ok(meta) = read_mod_metadata(
+                    mod_entry,
+                    config,
+                    &paths.larian_mods_dir,
+                    &native_pak_index,
+                ) {
+                    dependencies = meta.dependencies;
+                    tags = meta.tags;
+                }
+            }
+        }
+
+        let (patch_score, patch_notes) = patch_score(mod_entry, &tags);
+
+        if entry.enabled {
+            let (progress_scanned, total) = match group {
+                RankGroup::Loose => {
+                    progress_loose = progress_loose.saturating_add(1);
+                    (progress_loose, enabled_loose)
+                }
+                RankGroup::Pak => {
+                    progress_pak = progress_pak.saturating_add(1);
+                    (progress_pak, enabled_pak)
+                }
+            };
+            progress(SmartRankProgress {
+                group: if matches!(group, RankGroup::Loose) {
+                    SmartRankGroup::Loose
+                } else {
+                    SmartRankGroup::Pak
+                },
+                scanned: progress_scanned,
+                total,
+                name: mod_entry.display_name(),
+            });
         }
 
         let file_count = file_paths.len();
@@ -162,12 +276,16 @@ pub fn smart_rank_profile(config: &GameConfig, library: &Library) -> Result<Smar
             conflict_partners: 0,
             original_index: index,
             has_data,
+            patch_score,
+            patch_reasons: patch_notes,
+            dependencies,
         });
     }
 
     let mut conflicts = 0usize;
     let mut conflicts_loose = 0usize;
     let mut conflicts_pak = 0usize;
+    let mut top_paths: Vec<ConflictPathInfo> = Vec::new();
     for group in [RankGroup::Loose, RankGroup::Pak] {
         let mut path_counts: HashMap<String, usize> = HashMap::new();
         let mut path_mods: HashMap<String, Vec<String>> = HashMap::new();
@@ -187,6 +305,20 @@ pub fn smart_rank_profile(config: &GameConfig, library: &Library) -> Result<Smar
         match group {
             RankGroup::Loose => conflicts_loose = group_conflicts,
             RankGroup::Pak => conflicts_pak = group_conflicts,
+        }
+
+        let mut path_entries: Vec<(String, Vec<String>)> = path_mods
+            .iter()
+            .filter(|(_, mods)| mods.len() > 1)
+            .map(|(path, mods)| (path.clone(), mods.clone()))
+            .collect();
+        path_entries.sort_by(|a, b| b.1.len().cmp(&a.1.len()));
+        for (path, mods) in path_entries.into_iter().take(4) {
+            top_paths.push(ConflictPathInfo {
+                group,
+                path,
+                mods,
+            });
         }
 
         for item in items.iter_mut().filter(|item| item.group == group) {
@@ -214,8 +346,8 @@ pub fn smart_rank_profile(config: &GameConfig, library: &Library) -> Result<Smar
         }
     }
 
-    let loose_order = rank_group_order(&items, RankGroup::Loose);
-    let pak_order = rank_group_order(&items, RankGroup::Pak);
+    let loose_order = rank_group_order(&items, RankGroup::Loose, &mod_map, &mut warnings);
+    let pak_order = rank_group_order(&items, RankGroup::Pak, &mod_map, &mut warnings);
     let mut new_ids = Vec::new();
     new_ids.extend(loose_order);
     new_ids.extend(pak_order);
@@ -240,6 +372,13 @@ pub fn smart_rank_profile(config: &GameConfig, library: &Library) -> Result<Smar
         .filter(|(a, b)| a.id != b.id)
         .count();
 
+    let explain = build_explain_lines(
+        &items,
+        &top_paths,
+        &mod_map,
+        profile,
+    );
+
     Ok(SmartRankResult {
         order: new_order,
         report: SmartRankReport {
@@ -258,42 +397,40 @@ pub fn smart_rank_profile(config: &GameConfig, library: &Library) -> Result<Smar
             elapsed_ms: started.elapsed().as_millis() as u64,
         },
         warnings,
+        explain,
     })
 }
 
-fn rank_group_order(items: &[RankItem], group: RankGroup) -> Vec<String> {
+fn rank_group_order(
+    items: &[RankItem],
+    group: RankGroup,
+    mod_map: &HashMap<String, ModEntry>,
+    warnings: &mut Vec<String>,
+) -> Vec<String> {
     let mut group_items: Vec<&RankItem> = items.iter().filter(|item| item.group == group).collect();
     group_items.sort_by_key(|item| item.original_index);
 
-    let mut ranked: Vec<&RankItem> = group_items
+    let group_ids: HashSet<String> = group_items.iter().map(|item| item.id.clone()).collect();
+    let mut reorder_set: HashSet<String> = group_items
         .iter()
-        .copied()
-        .filter(|item| item.enabled && item.has_data && item.conflict_files > 0)
+        .filter(|item| {
+            (item.enabled && item.has_data && item.conflict_files > 0)
+                || !item.dependencies.is_empty()
+        })
+        .map(|item| item.id.clone())
         .collect();
-    ranked.sort_by(|a, b| {
-        let partners = b.conflict_partners.cmp(&a.conflict_partners);
-        if partners != std::cmp::Ordering::Equal {
-            return partners;
+    for item in &group_items {
+        for dep in &item.dependencies {
+            if group_ids.contains(dep) {
+                reorder_set.insert(dep.clone());
+            }
         }
-        let conflicts = b.conflict_files.cmp(&a.conflict_files);
-        if conflicts != std::cmp::Ordering::Equal {
-            return conflicts;
-        }
-        let size = b.total_bytes.cmp(&a.total_bytes);
-        if size != std::cmp::Ordering::Equal {
-            return size;
-        }
-        let count = b.file_count.cmp(&a.file_count);
-        if count != std::cmp::Ordering::Equal {
-            return count;
-        }
-        a.original_index.cmp(&b.original_index)
-    });
+    }
 
-    let reorder_set: HashSet<String> = ranked.iter().map(|item| item.id.clone()).collect();
-    let mut ranked_iter = ranked.into_iter();
+    let mut ranked = topological_rank(group_items.as_slice(), &reorder_set, mod_map, warnings);
+    let mut ranked_iter = ranked.drain(..);
     let mut out = Vec::new();
-    for item in group_items {
+    for item in &group_items {
         if reorder_set.contains(&item.id) {
             if let Some(next) = ranked_iter.next() {
                 out.push(next.id.clone());
@@ -305,6 +442,107 @@ fn rank_group_order(items: &[RankItem], group: RankGroup) -> Vec<String> {
         }
     }
     out
+}
+
+fn topological_rank<'a>(
+    items: &'a [&'a RankItem],
+    reorder_set: &HashSet<String>,
+    mod_map: &HashMap<String, ModEntry>,
+    warnings: &mut Vec<String>,
+) -> Vec<&'a RankItem> {
+    let mut indegree: HashMap<String, usize> = HashMap::new();
+    let mut edges: HashMap<String, Vec<String>> = HashMap::new();
+
+    for item in items {
+        if !reorder_set.contains(&item.id) {
+            continue;
+        }
+        indegree.entry(item.id.clone()).or_insert(0);
+    }
+
+    for item in items.iter().filter(|item| reorder_set.contains(&item.id)) {
+        for dep in &item.dependencies {
+            if !reorder_set.contains(dep) {
+                if mod_map.contains_key(dep) {
+                    warnings.push(format!(
+                        "Smart rank dependency skipped for {}: {} in different group",
+                        display_mod_name(&item.id, mod_map),
+                        display_mod_name(dep, mod_map)
+                    ));
+                }
+                continue;
+            }
+            edges.entry(dep.clone()).or_default().push(item.id.clone());
+            *indegree.entry(item.id.clone()).or_insert(0) += 1;
+        }
+    }
+
+    let mut available: Vec<&RankItem> = items
+        .iter()
+        .filter(|item| reorder_set.contains(&item.id))
+        .filter(|item| indegree.get(&item.id).copied().unwrap_or(0) == 0)
+        .copied()
+        .collect();
+
+    let mut result = Vec::new();
+    let mut remaining = reorder_set.len();
+    while !available.is_empty() {
+        available.sort_by(|a, b| compare_rank_items(a, b));
+        let next = available.remove(0);
+        result.push(next);
+        remaining = remaining.saturating_sub(1);
+
+        if let Some(children) = edges.get(&next.id) {
+            for child in children {
+                let entry = indegree.entry(child.clone()).or_insert(0);
+                if *entry > 0 {
+                    *entry -= 1;
+                }
+                if *entry == 0 {
+                    if let Some(item) = items.iter().find(|item| item.id == *child) {
+                        available.push(*item);
+                    }
+                }
+            }
+        }
+    }
+
+    if remaining > 0 {
+        warnings.push("Smart rank dependency cycle detected; falling back to score order".to_string());
+        let mut fallback: Vec<&RankItem> = items
+            .iter()
+            .filter(|item| reorder_set.contains(&item.id))
+            .copied()
+            .collect();
+        fallback.sort_by(|a, b| compare_rank_items(a, b));
+        return fallback;
+    }
+
+    result
+}
+
+fn compare_rank_items(a: &RankItem, b: &RankItem) -> std::cmp::Ordering {
+    let partners = b.conflict_partners.cmp(&a.conflict_partners);
+    if partners != std::cmp::Ordering::Equal {
+        return partners;
+    }
+    let conflicts = b.conflict_files.cmp(&a.conflict_files);
+    if conflicts != std::cmp::Ordering::Equal {
+        return conflicts;
+    }
+    let patch = a.patch_score.cmp(&b.patch_score);
+    if patch != std::cmp::Ordering::Equal {
+        return patch;
+    }
+    let size = b.total_bytes.cmp(&a.total_bytes);
+    if size != std::cmp::Ordering::Equal {
+        return size;
+    }
+    let count = b.file_count.cmp(&a.file_count);
+    if count != std::cmp::Ordering::Equal {
+        return count;
+    }
+    a.original_index.cmp(&b.original_index)
 }
 
 fn scan_mod_files(
@@ -319,6 +557,27 @@ fn scan_mod_files(
         RankGroup::Pak => scan_pak_files(mod_entry, data_dir, larian_mods_dir, native_pak_index),
         RankGroup::Loose => scan_loose_files(mod_entry, data_dir),
     }
+}
+
+fn read_mod_metadata(
+    mod_entry: &ModEntry,
+    config: &GameConfig,
+    larian_mods_dir: &Path,
+    native_pak_index: &[native_pak::NativePakEntry],
+) -> Result<PakMeta> {
+    let data_dir = &config.data_dir;
+    let pak_paths = collect_pak_paths(mod_entry, data_dir, larian_mods_dir, native_pak_index);
+    let mut merged = PakMeta::default();
+    for pak_path in pak_paths {
+        if !pak_path.exists() {
+            continue;
+        }
+        if let Ok(meta) = read_pak_metadata(&pak_path) {
+            merged.dependencies.extend(meta.dependencies);
+            merged.tags.extend(meta.tags);
+        }
+    }
+    Ok(merged)
 }
 
 fn scan_loose_files(mod_entry: &ModEntry, data_dir: &Path) -> Result<Vec<FileEntry>> {
@@ -359,6 +618,31 @@ fn scan_pak_files(
     larian_mods_dir: &Path,
     native_pak_index: &[native_pak::NativePakEntry],
 ) -> Result<Vec<FileEntry>> {
+    let pak_paths = collect_pak_paths(mod_entry, data_dir, larian_mods_dir, native_pak_index);
+
+    let mut files = Vec::new();
+    let mut found = false;
+    for pak_path in pak_paths {
+        if !pak_path.exists() {
+            continue;
+        }
+        found = true;
+        let mut pak_files = scan_pak_index(&pak_path)?;
+        files.append(&mut pak_files);
+    }
+    if !found {
+        anyhow::bail!("pak file missing");
+    }
+
+    Ok(files)
+}
+
+fn collect_pak_paths(
+    mod_entry: &ModEntry,
+    data_dir: &Path,
+    larian_mods_dir: &Path,
+    native_pak_index: &[native_pak::NativePakEntry],
+) -> Vec<std::path::PathBuf> {
     let mut pak_paths = Vec::new();
 
     for target in &mod_entry.targets {
@@ -389,21 +673,7 @@ fn scan_pak_files(
         }
     }
 
-    let mut files = Vec::new();
-    let mut found = false;
-    for pak_path in pak_paths {
-        if !pak_path.exists() {
-            continue;
-        }
-        found = true;
-        let mut pak_files = scan_pak_index(&pak_path)?;
-        files.append(&mut pak_files);
-    }
-    if !found {
-        anyhow::bail!("pak file missing");
-    }
-
-    Ok(files)
+    pak_paths
 }
 
 fn scan_pak_index(path: &Path) -> Result<Vec<FileEntry>> {
@@ -453,6 +723,405 @@ fn scan_pak_index(path: &Path) -> Result<Vec<FileEntry>> {
     }
 
     Ok(out)
+}
+
+#[derive(Debug)]
+struct PakIndexEntry {
+    path: String,
+    offset: u64,
+    compressed_size: u32,
+    decompressed_size: u32,
+    compression: CompressionType,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum CompressionType {
+    None,
+    Zlib,
+    Lz4,
+    Zstd,
+}
+
+#[derive(Default)]
+struct PakMeta {
+    dependencies: Vec<String>,
+    tags: Vec<String>,
+}
+
+fn read_pak_metadata(path: &Path) -> Result<PakMeta> {
+    let entries = read_pak_index_entries(path)?;
+    let meta_entry = entries.iter().find(|entry| {
+        let lower = entry.path.to_ascii_lowercase();
+        lower.ends_with("/meta.lsx") && lower.contains("/mods/")
+    });
+
+    let Some(entry) = meta_entry else {
+        return Ok(PakMeta::default());
+    };
+
+    let mut file = File::open(path)?;
+    file.seek(SeekFrom::Start(entry.offset))?;
+    let mut compressed = vec![0u8; entry.compressed_size as usize];
+    file.read_exact(&mut compressed)?;
+    let bytes = match entry.compression {
+        CompressionType::None => compressed,
+        CompressionType::Lz4 => decompress(&compressed, entry.decompressed_size as usize)?,
+        CompressionType::Zlib => {
+            let mut decoder = flate2::read::ZlibDecoder::new(compressed.as_slice());
+            let mut out = vec![0u8; entry.decompressed_size as usize];
+            decoder.read_exact(&mut out)?;
+            out
+        }
+        CompressionType::Zstd => {
+            return Ok(PakMeta::default());
+        }
+    };
+
+    parse_meta_lsx(&bytes)
+}
+
+fn read_pak_index_entries(path: &Path) -> Result<Vec<PakIndexEntry>> {
+    const ENTRY_LEN: usize = 272;
+    const PATH_LEN: usize = 256;
+    const MIN_VERSION: u32 = 18;
+
+    let mut file = File::open(path).with_context(|| format!("open pak {:?}", path))?;
+    let mut id = [0u8; 4];
+    file.read_exact(&mut id)?;
+    if &id != b"LSPK" {
+        anyhow::bail!("invalid pak header");
+    }
+    let version = read_u32(&mut file)?;
+    if version < MIN_VERSION {
+        anyhow::bail!("unsupported pak version {version}");
+    }
+    let footer_offset = read_u64(&mut file)?;
+    let footer_offset = i64::try_from(footer_offset)?;
+    file.seek(SeekFrom::Start(0))?;
+    file.seek(SeekFrom::Current(footer_offset))?;
+
+    let file_count = read_u32(&mut file)? as usize;
+    let compressed_len = read_u32(&mut file)? as usize;
+    let decompressed_len = file_count.saturating_mul(ENTRY_LEN);
+
+    let mut compressed = vec![0u8; compressed_len];
+    file.read_exact(&mut compressed)?;
+    let table = decompress(&compressed, decompressed_len)?;
+
+    let mut out = Vec::new();
+    for index in 0..file_count {
+        let start = index * ENTRY_LEN;
+        let end = start + ENTRY_LEN;
+        if end > table.len() {
+            break;
+        }
+        let entry = &table[start..end];
+        let path_end = entry[..PATH_LEN]
+            .iter()
+            .position(|byte| *byte == 0)
+            .unwrap_or(PATH_LEN);
+        let raw_path = String::from_utf8_lossy(&entry[..path_end]);
+        let path = normalize_path(&raw_path);
+
+        let offset_upper = u32::from_le_bytes(entry[256..260].try_into().unwrap_or([0; 4]));
+        let offset_lower = u16::from_le_bytes(entry[260..262].try_into().unwrap_or([0; 2]));
+        let offset = u64::from(offset_upper) | (u64::from(offset_lower) << 32);
+        let offset = offset & 0x000f_ffff_ffff_ffff;
+
+        let compression = match entry[263] & 0x0F {
+            0 => CompressionType::None,
+            1 => CompressionType::Zlib,
+            2 => CompressionType::Lz4,
+            _ => CompressionType::Zstd,
+        };
+        let compressed_size = u32::from_le_bytes(entry[264..268].try_into().unwrap_or([0; 4]));
+        let decompressed_size = u32::from_le_bytes(entry[268..272].try_into().unwrap_or([0; 4]));
+
+        out.push(PakIndexEntry {
+            path,
+            offset,
+            compressed_size,
+            decompressed_size,
+            compression,
+        });
+    }
+
+    Ok(out)
+}
+
+fn parse_meta_lsx(bytes: &[u8]) -> Result<PakMeta> {
+    let mut reader = Reader::from_reader(bytes);
+    reader.trim_text(true);
+    let mut buf = Vec::new();
+    let mut node_stack: Vec<String> = Vec::new();
+    let mut deps = Vec::new();
+    let mut tags = Vec::new();
+    let mut in_dependencies = false;
+    let mut in_dependency = false;
+    let mut in_module_info = false;
+
+    loop {
+        match reader.read_event_into(&mut buf) {
+            Ok(Event::Start(e)) => {
+                if e.name().as_ref() == b"node" {
+                    if let Some(id) = attr_value(&e, b"id") {
+                        node_stack.push(id.clone());
+                        in_dependencies = node_stack.iter().any(|node| node == "Dependencies");
+                        in_dependency = node_stack.iter().any(|node| node == "Dependency");
+                        in_module_info = node_stack.iter().any(|node| node == "ModuleInfo");
+                    }
+                }
+            }
+            Ok(Event::Empty(e)) => {
+                if e.name().as_ref() == b"attribute" {
+                    if in_dependencies && in_dependency {
+                        if let (Some(id), Some(value)) =
+                            (attr_value(&e, b"id"), attr_value(&e, b"value"))
+                        {
+                            if id == "UUID" {
+                                deps.push(value);
+                            }
+                        }
+                    }
+                    if in_module_info {
+                        if let (Some(id), Some(value)) =
+                            (attr_value(&e, b"id"), attr_value(&e, b"value"))
+                        {
+                            if id == "Tags" && !value.trim().is_empty() {
+                                tags.extend(split_tags(&value));
+                            }
+                        }
+                    }
+                }
+            }
+            Ok(Event::End(e)) => {
+                if e.name().as_ref() == b"node" {
+                    node_stack.pop();
+                    in_dependencies = node_stack.iter().any(|node| node == "Dependencies");
+                    in_dependency = node_stack.iter().any(|node| node == "Dependency");
+                    in_module_info = node_stack.iter().any(|node| node == "ModuleInfo");
+                }
+            }
+            Ok(Event::Eof) => break,
+            Err(_) => break,
+            _ => {}
+        }
+        buf.clear();
+    }
+
+    Ok(PakMeta {
+        dependencies: deps,
+        tags,
+    })
+}
+
+fn attr_value(e: &quick_xml::events::BytesStart<'_>, key: &[u8]) -> Option<String> {
+    for attr in e.attributes().flatten() {
+        if attr.key.as_ref() == key {
+            if let Ok(value) = attr.unescape_value() {
+                return Some(value.to_string());
+            }
+        }
+    }
+    None
+}
+
+fn split_tags(value: &str) -> Vec<String> {
+    value
+        .split(|c| c == ';' || c == ',' || c == '|')
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect()
+}
+
+fn patch_score(mod_entry: &ModEntry, tags: &[String]) -> (u8, Vec<String>) {
+    let mut score = 0u8;
+    let mut reasons = Vec::new();
+    let label = mod_entry.display_name().to_ascii_lowercase();
+    for (keyword, weight) in patch_keywords() {
+        if label.contains(keyword) {
+            score = score.saturating_add(weight);
+            reasons.push(format!("name:{keyword}"));
+        }
+    }
+    for tag in tags {
+        let tag_lower = tag.to_ascii_lowercase();
+        for (keyword, weight) in patch_keywords() {
+            if tag_lower.contains(keyword) {
+                score = score.saturating_add(weight);
+                reasons.push(format!("tag:{tag}"));
+                break;
+            }
+        }
+    }
+    (score, reasons)
+}
+
+fn patch_keywords() -> Vec<(&'static str, u8)> {
+    vec![
+        ("patch", 2),
+        ("hotfix", 2),
+        ("fix", 1),
+        ("compat", 2),
+        ("compatibility", 2),
+        ("override", 1),
+        ("addon", 1),
+        ("add-on", 1),
+        ("addon", 1),
+    ]
+}
+
+struct ConflictPathInfo {
+    group: RankGroup,
+    path: String,
+    mods: Vec<String>,
+}
+
+fn build_explain_lines(
+    items: &[RankItem],
+    paths: &[ConflictPathInfo],
+    mod_map: &HashMap<String, ModEntry>,
+    profile: &crate::library::Profile,
+) -> SmartRankExplain {
+    let mut lines = Vec::new();
+    let mut ordered_ids = HashMap::new();
+    for (index, entry) in profile.order.iter().enumerate() {
+        ordered_ids.insert(entry.id.clone(), index);
+    }
+
+    lines.push(SmartRankExplainLine {
+        kind: ExplainLineKind::Header,
+        text: "Top conflicts".to_string(),
+    });
+    let mut conflict_items: Vec<&RankItem> = items
+        .iter()
+        .filter(|item| item.conflict_files > 0)
+        .collect();
+    conflict_items.sort_by(|a, b| b.conflict_files.cmp(&a.conflict_files));
+    if conflict_items.is_empty() {
+        lines.push(SmartRankExplainLine {
+            kind: ExplainLineKind::Muted,
+            text: "No overlapping files detected.".to_string(),
+        });
+    } else {
+        for item in conflict_items.into_iter().take(6) {
+            lines.push(SmartRankExplainLine {
+                kind: ExplainLineKind::Item,
+                text: format!(
+                    "{} — {} files, {} mods",
+                    display_mod_name(&item.id, mod_map),
+                    item.conflict_files,
+                    item.conflict_partners
+                ),
+            });
+        }
+    }
+
+    lines.push(SmartRankExplainLine {
+        kind: ExplainLineKind::Header,
+        text: "Top conflict paths".to_string(),
+    });
+    if paths.is_empty() {
+        lines.push(SmartRankExplainLine {
+            kind: ExplainLineKind::Muted,
+            text: "No conflict paths recorded.".to_string(),
+        });
+    } else {
+        for info in paths.iter().take(6) {
+            let winner = info
+                .mods
+                .iter()
+                .max_by_key(|id| ordered_ids.get(*id).copied().unwrap_or(0))
+                .map(|id| display_mod_name(id, mod_map))
+                .unwrap_or_else(|| "Unknown".to_string());
+            let group_label = match info.group {
+                RankGroup::Loose => "Loose",
+                RankGroup::Pak => "Pak",
+            };
+            let mods_label = info
+                .mods
+                .iter()
+                .map(|id| display_mod_name(id, mod_map))
+                .collect::<Vec<_>>()
+                .join(", ");
+            lines.push(SmartRankExplainLine {
+                kind: ExplainLineKind::Item,
+                text: format!(
+                    "[{group_label}] {} — {} (winner: {winner})",
+                    info.path,
+                    mods_label
+                ),
+            });
+        }
+    }
+
+    lines.push(SmartRankExplainLine {
+        kind: ExplainLineKind::Header,
+        text: "Dependencies".to_string(),
+    });
+    let mut dep_lines = Vec::new();
+    for item in items.iter().filter(|item| !item.dependencies.is_empty()) {
+        for dep in &item.dependencies {
+            dep_lines.push(format!(
+                "{} → {}",
+                display_mod_name(&item.id, mod_map),
+                display_mod_name(dep, mod_map)
+            ));
+        }
+    }
+    if dep_lines.is_empty() {
+        lines.push(SmartRankExplainLine {
+            kind: ExplainLineKind::Muted,
+            text: "No dependencies detected.".to_string(),
+        });
+    } else {
+        for line in dep_lines.into_iter().take(6) {
+            lines.push(SmartRankExplainLine {
+                kind: ExplainLineKind::Item,
+                text: line,
+            });
+        }
+    }
+
+    lines.push(SmartRankExplainLine {
+        kind: ExplainLineKind::Header,
+        text: "Patch heuristic".to_string(),
+    });
+    let mut patch_items: Vec<&RankItem> =
+        items.iter().filter(|item| item.patch_score > 0).collect();
+    patch_items.sort_by(|a, b| b.patch_score.cmp(&a.patch_score));
+    if patch_items.is_empty() {
+        lines.push(SmartRankExplainLine {
+            kind: ExplainLineKind::Muted,
+            text: "No patch/compat hints found.".to_string(),
+        });
+    } else {
+        for item in patch_items.into_iter().take(6) {
+            let reasons = if item.patch_reasons.is_empty() {
+                String::new()
+            } else {
+                format!(" ({})", item.patch_reasons.join(", "))
+            };
+            lines.push(SmartRankExplainLine {
+                kind: ExplainLineKind::Item,
+                text: format!(
+                    "{} — score {}{}",
+                    display_mod_name(&item.id, mod_map),
+                    item.patch_score,
+                    reasons
+                ),
+            });
+        }
+    }
+
+    SmartRankExplain { lines }
+}
+
+fn display_mod_name(id: &str, mod_map: &HashMap<String, ModEntry>) -> String {
+    mod_map
+        .get(id)
+        .map(|entry| entry.display_name())
+        .unwrap_or_else(|| id.to_string())
 }
 
 fn read_u32(file: &mut File) -> Result<u32> {
