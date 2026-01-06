@@ -939,8 +939,8 @@ fn draw(frame: &mut Frame<'_>, app: &App) {
                 Constraint::Length(3),
                 Constraint::Length(5),
                 Constraint::Length(6),
-                Constraint::Min(18),
                 Constraint::Min(12),
+                Constraint::Min(18),
             ],
         )
         .header(Row::new(vec![
@@ -956,7 +956,7 @@ fn draw(frame: &mut Frame<'_>, app: &App) {
                 .bg(theme.header_bg)
                 .add_modifier(Modifier::BOLD),
         ))
-        .column_spacing(3)
+        .column_spacing(1)
         .highlight_style(if app.focus == Focus::Mods {
             Style::default()
                 .bg(theme.accent_soft)
@@ -1004,7 +1004,27 @@ fn draw(frame: &mut Frame<'_>, app: &App) {
         }
     }
 
-    let details_block = theme.subpanel("Details");
+    let details_focus = app.focus == Focus::Conflicts;
+    let details_title = if details_focus {
+        "Override Actions"
+    } else {
+        "Details"
+    };
+    let details_block = if details_focus {
+        Block::default()
+            .borders(Borders::ALL)
+            .border_type(BorderType::Plain)
+            .border_style(Style::default().fg(theme.accent))
+            .title(Span::styled(
+                details_title,
+                Style::default()
+                    .fg(theme.accent)
+                    .add_modifier(Modifier::BOLD),
+            ))
+            .style(Style::default().bg(theme.subpanel_bg))
+    } else {
+        theme.subpanel(details_title)
+    };
     let details_fill = Block::default().style(Style::default().bg(theme.subpanel_bg));
     frame.render_widget(details_fill, chunks[2]);
     let details_inner = details_block.inner(chunks[2]);
@@ -1176,7 +1196,8 @@ fn draw(frame: &mut Frame<'_>, app: &App) {
     let conflict_area = bottom_chunks[0];
     let status_area = bottom_chunks[1];
 
-    let conflict_bg = if app.focus == Focus::Conflicts {
+    let overrides_focused = app.focus == Focus::Conflicts;
+    let conflict_bg = if overrides_focused {
         theme.accent_soft
     } else {
         theme.log_bg
@@ -1207,7 +1228,11 @@ fn draw(frame: &mut Frame<'_>, app: &App) {
         frame.render_widget(conflicts, line_area);
     }
 
-    let status_bg = theme.log_bg;
+    let status_bg = if overrides_focused {
+        theme.accent_soft
+    } else {
+        theme.log_bg
+    };
     let status_block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
@@ -1248,8 +1273,13 @@ fn draw(frame: &mut Frame<'_>, app: &App) {
             width: bar_width.min(status_inner.width),
             height: status_inner.height,
         };
+        let bar_color = if overrides_focused {
+            theme.accent
+        } else {
+            theme.accent_soft
+        };
         frame.render_widget(
-            Block::default().style(Style::default().bg(theme.accent_soft)),
+            Block::default().style(Style::default().bg(bar_color)),
             bar_area,
         );
     }
@@ -1532,53 +1562,99 @@ fn build_conflict_banner(app: &App, theme: &Theme, width: usize) -> Line<'static
     let auto_count = total.saturating_sub(manual_count);
     let auto_text = format!("Auto ({auto_count})");
     let manual_text = format!("Manual ({manual_count})");
-    let mut short_auto = auto_text.clone();
-    let mut short_manual = manual_text.clone();
-    let mut sep = " | ";
-    let mut hint = " ←/→ cycle  ↑/↓ choose";
-
-    let index_text = format!("{}/{} ", selected_index + 1, total);
-    let mut total_len =
-        index_text.chars().count() + auto_text.len() + sep.len() + manual_text.len() + hint.len();
-    if total_len > available {
-        hint = "";
-        total_len =
-            index_text.chars().count() + auto_text.len() + sep.len() + manual_text.len();
-    }
-    if total_len > available {
-        short_auto = format!("A({auto_count})");
-        short_manual = format!("M({manual_count})");
-        sep = " ";
-        total_len =
-            index_text.chars().count() + short_auto.len() + sep.len() + short_manual.len();
-    }
-    if total_len > available {
-        let remaining = available.saturating_sub(index_text.chars().count() + short_auto.len() + sep.len());
-        short_manual = truncate_text(&short_manual, remaining);
-    }
 
     let auto_style = Style::default()
         .fg(theme.success)
-        .add_modifier(if !conflict.overridden {
+        .add_modifier(if focused && !conflict.overridden {
             Modifier::BOLD
         } else {
             Modifier::empty()
         });
     let manual_style = Style::default()
         .fg(if manual_count > 0 { theme.warning } else { theme.muted })
-        .add_modifier(if conflict.overridden {
+        .add_modifier(if focused && conflict.overridden {
             Modifier::BOLD
         } else {
             Modifier::empty()
         });
-    let hint_style = Style::default().fg(theme.muted);
+    let sep_style = Style::default().fg(if focused { Color::Black } else { theme.muted });
+    let hint_style = Style::default().fg(if focused { Color::Black } else { theme.accent });
+
+    if !focused {
+        let mut short_auto = auto_text.clone();
+        let mut short_manual = if manual_count > 0 {
+            manual_text.clone()
+        } else {
+            String::new()
+        };
+        let mut sep = if short_manual.is_empty() { "" } else { " | " };
+        let mut total_len = short_auto.len() + sep.len() + short_manual.len();
+        if total_len > available {
+            short_auto = format!("A({auto_count})");
+            if !short_manual.is_empty() {
+                short_manual = format!("M({manual_count})");
+                sep = " ";
+                total_len = short_auto.len() + sep.len() + short_manual.len();
+            } else {
+                total_len = short_auto.len();
+            }
+        }
+        if total_len > available && !short_manual.is_empty() {
+            short_manual.clear();
+            sep = "";
+            total_len = short_auto.len();
+        }
+        if total_len > available {
+            short_auto = truncate_text(&short_auto, available);
+        }
+        let mut spans = vec![Span::styled(label, label_style)];
+        spans.push(Span::styled(short_auto, auto_style));
+        if !short_manual.is_empty() {
+            spans.push(Span::styled(sep, sep_style));
+            spans.push(Span::styled(short_manual, manual_style));
+        }
+        return Line::from(spans);
+    }
+
+    let mut short_auto = auto_text.clone();
+    let mut short_manual = manual_text.clone();
+    let mut sep = " | ";
+    let mut hint = " ←/→ cycle  ↑/↓ choose";
+    let index_text = format!("{}/{} ", selected_index + 1, total);
+    let index_len = index_text.chars().count();
+    let mut remaining = available.saturating_sub(index_len);
+    if hint.chars().count() > remaining {
+        hint = "";
+    }
+    let hint_len = hint.chars().count();
+    remaining = remaining.saturating_sub(hint_len);
+    let mut total_len = short_auto.len() + sep.len() + short_manual.len();
+    if total_len > remaining {
+        short_auto = format!("A({auto_count})");
+        short_manual = format!("M({manual_count})");
+        sep = " ";
+        total_len = short_auto.len() + sep.len() + short_manual.len();
+    }
+    if total_len > remaining {
+        short_manual.clear();
+        sep = "";
+        total_len = short_auto.len();
+    }
+    if total_len > remaining {
+        short_auto = truncate_text(&short_auto, remaining);
+    }
 
     let mut spans = Vec::new();
     spans.push(Span::styled(label, label_style));
-    spans.push(Span::styled(index_text, Style::default().fg(theme.accent)));
+    spans.push(Span::styled(
+        index_text,
+        Style::default().fg(Color::Black),
+    ));
     spans.push(Span::styled(short_auto, auto_style));
-    spans.push(Span::styled(sep, Style::default().fg(theme.muted)));
-    spans.push(Span::styled(short_manual, manual_style));
+    if !short_manual.is_empty() {
+        spans.push(Span::styled(sep, sep_style));
+        spans.push(Span::styled(short_manual, manual_style));
+    }
     if !hint.is_empty() {
         spans.push(Span::styled(hint, hint_style));
     }

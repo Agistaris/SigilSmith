@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.2.2
+
+- Overrides focus highlighting and banner readability updates.
+- Details panel header now reflects override actions when focused.
+- Bottom status area shares overrides highlight for a cohesive focus band.
+- Mod stack column spacing tuned for shorter path labels.
+
 ## 0.2.1
 
 - Overrides UX refresh: summary banner, legends, and context counts.
