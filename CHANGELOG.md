@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.3.3
+
+- Adds AI Smart Ranking (pak + loose scan) from the settings menu.
+- Adds a release notes helper script for release-only publishing.
+
 ## 0.3.2
 
 - Adds a swap overlay in Override Actions during deploy.

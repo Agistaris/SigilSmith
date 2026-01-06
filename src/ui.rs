@@ -229,11 +229,49 @@ fn handle_dialog_mode(app: &mut App, key: KeyEvent) -> Result<()> {
     Ok(())
 }
 
+#[derive(Debug, Clone, Copy)]
+enum SettingsItemKind {
+    ToggleProfileDelete,
+    ToggleModDelete,
+    ActionSmartRank,
+}
+
+#[derive(Debug, Clone)]
+struct SettingsItem {
+    label: &'static str,
+    kind: SettingsItemKind,
+    checked: Option<bool>,
+}
+
+fn settings_items(app: &App) -> Vec<SettingsItem> {
+    vec![
+        SettingsItem {
+            label: "Confirm profile delete",
+            kind: SettingsItemKind::ToggleProfileDelete,
+            checked: Some(app.app_config.confirm_profile_delete),
+        },
+        SettingsItem {
+            label: "Confirm mod delete",
+            kind: SettingsItemKind::ToggleModDelete,
+            checked: Some(app.app_config.confirm_mod_delete),
+        },
+        SettingsItem {
+            label: "AI Smart Ranking",
+            kind: SettingsItemKind::ActionSmartRank,
+            checked: None,
+        },
+    ]
+}
+
 fn handle_settings_menu(app: &mut App, key: KeyEvent) -> Result<()> {
+    if app.settings_menu.is_none() {
+        return Ok(());
+    }
+    let items = settings_items(app);
     let Some(menu) = &mut app.settings_menu else {
         return Ok(());
     };
-    let items_len = 2usize;
+    let items_len = items.len();
     match key.code {
         KeyCode::Up | KeyCode::Char('k') | KeyCode::Char('K') => {
             menu.selected = menu.selected.saturating_sub(1);
@@ -242,14 +280,25 @@ fn handle_settings_menu(app: &mut App, key: KeyEvent) -> Result<()> {
             menu.selected = (menu.selected + 1).min(items_len.saturating_sub(1));
         }
         KeyCode::Enter | KeyCode::Char(' ') => {
-            let result = match menu.selected {
-                0 => app.toggle_confirm_profile_delete(),
-                1 => app.toggle_confirm_mod_delete(),
-                _ => Ok(()),
-            };
-            if let Err(err) = result {
-                app.status = format!("Settings update failed: {err}");
-                app.log_error(format!("Settings update failed: {err}"));
+            if let Some(item) = items.get(menu.selected) {
+                match item.kind {
+                    SettingsItemKind::ToggleProfileDelete => {
+                        if let Err(err) = app.toggle_confirm_profile_delete() {
+                            app.status = format!("Settings update failed: {err}");
+                            app.log_error(format!("Settings update failed: {err}"));
+                        }
+                    }
+                    SettingsItemKind::ToggleModDelete => {
+                        if let Err(err) = app.toggle_confirm_mod_delete() {
+                            app.status = format!("Settings update failed: {err}");
+                            app.log_error(format!("Settings update failed: {err}"));
+                        }
+                    }
+                    SettingsItemKind::ActionSmartRank => {
+                        app.close_settings_menu();
+                        app.run_smart_ranking();
+                    }
+                }
             }
         }
         KeyCode::Esc => app.close_settings_menu(),
@@ -2064,25 +2113,38 @@ fn build_settings_menu_lines(app: &App, theme: &Theme, selected: usize) -> Vec<L
     )));
     lines.push(Line::from(""));
 
-    let items = [
-        ("Confirm profile delete", app.app_config.confirm_profile_delete),
-        ("Confirm mod delete", app.app_config.confirm_mod_delete),
-    ];
-    for (index, (label, enabled)) in items.iter().enumerate() {
-        let marker = if *enabled { "[x]" } else { "[ ]" };
+    let items = settings_items(app);
+    for (index, item) in items.iter().enumerate() {
         let prefix = if index == selected { ">" } else { " " };
         let style = if index == selected {
             Style::default().fg(theme.accent).add_modifier(Modifier::BOLD)
         } else {
             Style::default().fg(theme.text)
         };
-        lines.push(Line::from(vec![
-            Span::styled(prefix.to_string(), style),
-            Span::raw(" "),
-            Span::styled(marker, Style::default().fg(theme.accent)),
-            Span::raw(" "),
-            Span::styled((*label).to_string(), style),
-        ]));
+        let row = match item.kind {
+            SettingsItemKind::ToggleProfileDelete | SettingsItemKind::ToggleModDelete => {
+                let marker = if item.checked.unwrap_or(false) {
+                    "[x]"
+                } else {
+                    "[ ]"
+                };
+                vec![
+                    Span::styled(prefix.to_string(), style),
+                    Span::raw(" "),
+                    Span::styled(marker, Style::default().fg(theme.accent)),
+                    Span::raw(" "),
+                    Span::styled(item.label.to_string(), style),
+                ]
+            }
+            SettingsItemKind::ActionSmartRank => vec![
+                Span::styled(prefix.to_string(), style),
+                Span::raw(" "),
+                Span::styled("▶", Style::default().fg(theme.accent)),
+                Span::raw(" "),
+                Span::styled(item.label.to_string(), style),
+            ],
+        };
+        lines.push(Line::from(row));
     }
 
     lines.push(Line::from(""));
@@ -2115,7 +2177,7 @@ fn build_settings_menu_lines(app: &App, theme: &Theme, selected: usize) -> Vec<L
 
     lines.push(Line::from(""));
     lines.push(Line::from(Span::styled(
-        "Enter: toggle | Esc: close",
+        "Enter: toggle/run | Esc: close",
         Style::default().fg(theme.muted),
     )));
 

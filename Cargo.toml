@@ -1,6 +1,6 @@
 [package]
 name = "sigilsmith"
-version = "0.3.2"
+version = "0.3.3"
 edition = "2021"
 description = "Native Linux TUI mod loader for Baldur's Gate 3."
 license = "MIT"
@@ -12,6 +12,7 @@ blake3 = "1.5.3"
 crossterm = "0.28.1"
 directories = "5.0.1"
 larian-formats = "0.3.0"
+lz4_flex = "0.11.1"
 quick-xml = { version = "0.31.0", features = ["serialize"] }
 ratatui = "0.27.0"
 serde = { version = "1.0.204", features = ["derive"] }

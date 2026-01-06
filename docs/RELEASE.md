@@ -50,6 +50,22 @@ git push -u origin main
 7) Upload all files from `dist/`.
 8) Publish.
 
+## 4a) Release-only Public Repo
+
+If your public repo is release-only, generate notes and upload artifacts without pushing source:
+
+```bash
+./packaging/build-packages.sh
+./scripts/release_notes.sh
+```
+
+Then in GitHub Releases:
+1) Tag: `vX.Y.Z` (create tag on publish).
+2) Title: `SigilSmith vX.Y.Z`.
+3) Paste `dist/RELEASE_NOTES.md` into the description.
+4) Upload all files from `dist/` (including `SHA256SUMS.txt`).
+5) Publish.
+
 ## 5) Funding Links
 
 When your handles are ready, update `.github/FUNDING.yml`:

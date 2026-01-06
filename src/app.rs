@@ -8,6 +8,7 @@ use crate::{
         FileOverride, normalize_label, Library, ModEntry, ModSource, PakInfo, ProfileEntry,
         TargetKind, TargetOverride,
     },
+    smart_rank,
 };
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
@@ -518,6 +519,81 @@ impl App {
         };
         self.status = format!("Confirm mod delete {state}");
         Ok(())
+    }
+
+    pub fn run_smart_ranking(&mut self) {
+        if self.is_busy() {
+            self.status = "Smart ranking blocked: busy".to_string();
+            self.log_warn("Smart ranking blocked: busy".to_string());
+            return;
+        }
+        if !self.paths_ready() {
+            self.status = "Smart ranking blocked: paths not set".to_string();
+            self.log_warn("Smart ranking blocked: paths not set".to_string());
+            return;
+        }
+
+        let result = smart_rank::smart_rank_profile(&self.config, &self.library);
+        let result = match result {
+            Ok(result) => result,
+            Err(err) => {
+                self.status = format!("Smart ranking failed: {err}");
+                self.log_error(format!("Smart ranking failed: {err}"));
+                return;
+            }
+        };
+
+        let Some(profile) = self.library.active_profile_mut() else {
+            self.status = "Smart ranking skipped: no profile".to_string();
+            return;
+        };
+        if result.order.len() != profile.order.len() {
+            self.status = "Smart ranking skipped: incomplete order".to_string();
+            self.log_warn("Smart ranking skipped: incomplete order".to_string());
+            return;
+        }
+
+        let moved = result.report.moved;
+        let total = result.report.total;
+        let missing = result.report.missing;
+        if moved == 0 {
+            self.status = if missing > 0 {
+                format!("Smart ranking: no changes ({total} mods, {missing} missing)")
+            } else {
+                format!("Smart ranking: no changes ({total} mods)")
+            };
+        } else {
+            profile.order = result.order;
+            if let Err(err) = self.library.save(&self.config.data_dir) {
+                self.status = format!("Smart ranking save failed: {err}");
+                self.log_error(format!("Smart ranking save failed: {err}"));
+                return;
+            }
+            if missing > 0 {
+                self.status = format!(
+                    "Smart ranking: reordered {moved}/{total} (missing {missing})"
+                );
+            } else {
+                self.status = format!("Smart ranking: reordered {moved}/{total} mod(s)");
+            }
+            self.queue_auto_deploy("smart ranking");
+        }
+
+        if result.report.conflicts > 0 {
+            self.log_info(format!(
+                "Smart ranking analyzed {} conflict set(s)",
+                result.report.conflicts
+            ));
+        }
+        if result.report.missing > 0 {
+            self.log_warn(format!(
+                "Smart ranking partial: {} mod(s) missing data",
+                result.report.missing
+            ));
+        }
+        for warning in result.warnings {
+            self.log_warn(warning);
+        }
     }
 
     pub fn conflicts_scanning(&self) -> bool {

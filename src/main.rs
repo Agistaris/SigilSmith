@@ -6,6 +6,7 @@ mod deploy;
 mod game;
 mod importer;
 mod library;
+mod smart_rank;
 mod ui;
 
 use anyhow::Result;
