@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.2.8
+
+- Left panels now use a cohesive dark-blue background.
+- Mod stack background is darkened for stronger contrast.
+
 ## 0.2.7
 
 - Override focus now tints the details + log pair instead of the bottom bar.

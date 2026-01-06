@@ -869,11 +869,12 @@ fn draw(frame: &mut Frame<'_>, app: &App) {
             theme.accent
         } else {
             theme.border
-        }));
+        }))
+        .style(Style::default().bg(theme.subpanel_bg));
     let explorer_items = build_explorer_items(app, &theme);
     if explorer_items.is_empty() {
         let empty = Paragraph::new("No games available.")
-            .style(Style::default().fg(theme.muted))
+            .style(Style::default().fg(theme.muted).bg(theme.subpanel_bg))
             .block(explorer_block)
             .alignment(Alignment::Center);
         frame.render_widget(empty, left_chunks[0]);
@@ -888,6 +889,7 @@ fn draw(frame: &mut Frame<'_>, app: &App) {
         };
         let explorer = List::new(explorer_items)
             .block(explorer_block)
+            .style(Style::default().bg(theme.subpanel_bg))
             .highlight_style(highlight_style)
             .highlight_symbol("");
         let mut state = ListState::default();
@@ -901,7 +903,8 @@ fn draw(frame: &mut Frame<'_>, app: &App) {
             theme.accent
         } else {
             theme.border
-        }));
+        }))
+        .style(Style::default().bg(theme.log_bg));
     let mod_stack_inner = mod_stack_block.inner(body_chunks[1]);
     frame.render_widget(mod_stack_block, body_chunks[1]);
 
@@ -920,7 +923,7 @@ fn draw(frame: &mut Frame<'_>, app: &App) {
     let row_count = rows.len();
     if rows.is_empty() {
         let empty = Paragraph::new("Drop a mod archive or folder to import.")
-            .style(Style::default().fg(theme.muted))
+            .style(Style::default().fg(theme.muted).bg(theme.log_bg))
             .alignment(Alignment::Center);
         frame.render_widget(empty, table_chunks[0]);
     } else {
@@ -961,6 +964,7 @@ fn draw(frame: &mut Frame<'_>, app: &App) {
                 Constraint::Min(min_mod),
             ],
         )
+        .style(Style::default().bg(theme.log_bg).fg(theme.text))
         .header(Row::new(vec![
             Cell::from("On"),
             Cell::from("Order"),
@@ -1066,7 +1070,9 @@ fn draw(frame: &mut Frame<'_>, app: &App) {
         .block(details_block);
     frame.render_widget(details, details_area);
 
-    let context_block = theme.block("Context");
+    let context_block = theme
+        .block("Context")
+        .style(Style::default().bg(theme.subpanel_bg));
     let context_inner = context_block.inner(left_chunks[1]);
     frame.render_widget(context_block, left_chunks[1]);
 
@@ -1174,7 +1180,8 @@ fn draw(frame: &mut Frame<'_>, app: &App) {
         shared_label_width,
     ));
     context_lines.push(Line::from(""));
-    let context_widget = Paragraph::new(context_lines).style(Style::default().fg(theme.text));
+    let context_widget =
+        Paragraph::new(context_lines).style(Style::default().fg(theme.text).bg(theme.subpanel_bg));
     frame.render_widget(context_widget, context_chunks[0]);
 
     let legend_lines = build_legend_lines(
