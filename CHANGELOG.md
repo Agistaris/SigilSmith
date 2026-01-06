@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.2.7
+
+- Override focus now tints the details + log pair instead of the bottom bar.
+- Bottom overrides banner uses readable accent styling without the highlight band.
+
 ## 0.2.6
 
 - Details and log now split evenly for a balanced lower row.

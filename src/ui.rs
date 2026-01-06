@@ -1195,7 +1195,12 @@ fn draw(frame: &mut Frame<'_>, app: &App) {
     frame.render_widget(overrides, context_chunks[1]);
 
     let log_area = lower_chunks[1];
-    let log_block = theme.panel("Log").style(Style::default().bg(theme.log_bg));
+    let log_bg = if app.focus == Focus::Conflicts {
+        theme.accent_soft
+    } else {
+        theme.log_bg
+    };
+    let log_block = theme.panel("Log").style(Style::default().bg(log_bg));
     let log_inner = log_block.inner(log_area);
     frame.render_widget(log_block, log_area);
     let log_chunks = Layout::default()
@@ -1203,8 +1208,7 @@ fn draw(frame: &mut Frame<'_>, app: &App) {
         .constraints([Constraint::Min(10), Constraint::Length(1)])
         .split(log_inner);
     let log_lines = build_log_lines(app, &theme, log_chunks[0].height as usize);
-    let log = Paragraph::new(log_lines)
-        .style(Style::default().fg(theme.text).bg(theme.log_bg));
+    let log = Paragraph::new(log_lines).style(Style::default().fg(theme.text).bg(log_bg));
     frame.render_widget(log, log_chunks[0]);
     let log_total = app.logs.len();
     let log_view = log_chunks[0].height.max(1) as usize;
@@ -1235,11 +1239,7 @@ fn draw(frame: &mut Frame<'_>, app: &App) {
     let status_area = bottom_chunks[1];
 
     let overrides_focused = app.focus == Focus::Conflicts;
-    let conflict_bg = if overrides_focused {
-        theme.accent_soft
-    } else {
-        theme.log_bg
-    };
+    let conflict_bg = theme.log_bg;
     let conflict_block = Block::default()
         .borders(Borders::NONE)
         .style(Style::default().bg(conflict_bg))
@@ -1266,11 +1266,7 @@ fn draw(frame: &mut Frame<'_>, app: &App) {
         frame.render_widget(conflicts, line_area);
     }
 
-    let status_bg = if overrides_focused {
-        theme.accent_soft
-    } else {
-        theme.log_bg
-    };
+    let status_bg = theme.log_bg;
     let status_block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
@@ -1571,7 +1567,13 @@ fn build_conflict_banner(app: &App, theme: &Theme, width: usize) -> Line<'static
     }
 
     let focused = app.focus == Focus::Conflicts;
-    let label_style = Style::default().fg(if focused { Color::Black } else { theme.accent });
+    let label_style = if focused {
+        Style::default()
+            .fg(theme.accent)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(theme.accent)
+    };
     let available = width.saturating_sub(label.len());
 
     if app.conflicts_scanning() {
@@ -1615,8 +1617,8 @@ fn build_conflict_banner(app: &App, theme: &Theme, width: usize) -> Line<'static
         } else {
             Modifier::empty()
         });
-    let sep_style = Style::default().fg(if focused { Color::Black } else { theme.muted });
-    let hint_style = Style::default().fg(if focused { Color::Black } else { theme.accent });
+    let sep_style = Style::default().fg(theme.muted);
+    let hint_style = Style::default().fg(theme.accent);
 
     if !focused {
         let mut short_auto = auto_text.clone();
@@ -1684,10 +1686,7 @@ fn build_conflict_banner(app: &App, theme: &Theme, width: usize) -> Line<'static
 
     let mut spans = Vec::new();
     spans.push(Span::styled(label, label_style));
-    spans.push(Span::styled(
-        index_text,
-        Style::default().fg(Color::Black),
-    ));
+    spans.push(Span::styled(index_text, Style::default().fg(theme.accent)));
     spans.push(Span::styled(short_auto, auto_style));
     if !short_manual.is_empty() {
         spans.push(Span::styled(sep, sep_style));
