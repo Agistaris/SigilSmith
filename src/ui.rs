@@ -732,7 +732,7 @@ fn draw(frame: &mut Frame<'_>, app: &App) {
         ])
         .split(area);
 
-    let (rows, counts) = build_rows(app, &theme);
+    let (rows, counts, target_width) = build_rows(app, &theme);
     let profile_label = app.active_profile_label();
     let renaming_active = app.is_renaming_active_profile();
     let filter_active = app.mod_filter_active();
@@ -933,21 +933,36 @@ fn draw(frame: &mut Frame<'_>, app: &App) {
                 header_bg_area,
             );
         }
+        let table_width = table_chunks[0].width;
+        let spacing = 1u16;
+        let min_mod = 16u16;
+        let fixed_without_target = 3 + 5 + 6 + min_mod + spacing * 4;
+        let max_target = table_width.saturating_sub(fixed_without_target);
+        let mut target_col = target_width as u16;
+        if max_target > 0 {
+            target_col = target_col.min(max_target);
+            if max_target >= 8 {
+                target_col = target_col.max(8);
+            }
+        }
+        if target_col == 0 {
+            target_col = 1;
+        }
         let table = Table::new(
             rows,
             [
                 Constraint::Length(3),
                 Constraint::Length(5),
                 Constraint::Length(6),
-                Constraint::Min(12),
-                Constraint::Min(18),
+                Constraint::Length(target_col),
+                Constraint::Min(min_mod),
             ],
         )
         .header(Row::new(vec![
             Cell::from("On"),
             Cell::from("Order"),
             Cell::from("Kind"),
-            Cell::from("Path"),
+            Cell::from("Target"),
             Cell::from("Mod"),
         ])
         .style(
@@ -1010,21 +1025,17 @@ fn draw(frame: &mut Frame<'_>, app: &App) {
     } else {
         "Details"
     };
-    let details_block = if details_focus {
-        Block::default()
-            .borders(Borders::ALL)
-            .border_type(BorderType::Plain)
-            .border_style(Style::default().fg(theme.accent))
-            .title(Span::styled(
-                details_title,
-                Style::default()
-                    .fg(theme.accent)
-                    .add_modifier(Modifier::BOLD),
-            ))
-            .style(Style::default().bg(theme.subpanel_bg))
-    } else {
-        theme.subpanel(details_title)
-    };
+    let details_block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Plain)
+        .border_style(Style::default().fg(theme.border))
+        .title(Span::styled(
+            details_title,
+            Style::default()
+                .fg(theme.accent)
+                .add_modifier(Modifier::BOLD),
+        ))
+        .style(Style::default().bg(theme.subpanel_bg));
     let details_fill = Block::default().style(Style::default().bg(theme.subpanel_bg));
     frame.render_widget(details_fill, chunks[2]);
     let details_inner = details_block.inner(chunks[2]);
@@ -1064,11 +1075,6 @@ fn draw(frame: &mut Frame<'_>, app: &App) {
         .filter(|entry| entry.overridden)
         .count();
     let overrides_auto = overrides_total.saturating_sub(overrides_manual);
-    let mut context_lines = Vec::new();
-    context_lines.push(Line::from(Span::styled(
-        "Active",
-        Style::default().fg(theme.accent),
-    )));
     let label_style = Style::default().fg(theme.muted);
     let mut rows = Vec::new();
     rows.push(KvRow {
@@ -1121,10 +1127,6 @@ fn draw(frame: &mut Frame<'_>, app: &App) {
         label_style,
         value_style: Style::default().fg(theme.muted),
     });
-    context_lines.extend(format_kv_lines(&rows, context_chunks[0].width as usize));
-    let context_widget = Paragraph::new(context_lines).style(Style::default().fg(theme.text));
-    frame.render_widget(context_widget, context_chunks[0]);
-
     let legend_block = theme.subpanel("Legend");
     let legend_fill = Block::default().style(Style::default().bg(theme.subpanel_bg));
     frame.render_widget(legend_fill, context_chunks[1]);
@@ -1132,11 +1134,40 @@ fn draw(frame: &mut Frame<'_>, app: &App) {
     let legend_content_width =
         legend_inner.width.saturating_sub(SUBPANEL_PAD_X.saturating_mul(2)) as usize;
     let legend_content_height = legend_inner.height.saturating_sub(SUBPANEL_PAD_TOP) as usize;
+    let legend_rows = legend_rows(app);
+    let legend_key_width = legend_key_width(&legend_rows, legend_content_width);
+    let context_label_width = rows
+        .iter()
+        .map(|row| row.label.chars().count())
+        .max()
+        .unwrap_or(0);
+    let max_context_label = context_chunks[0]
+        .width
+        .saturating_sub(2) as usize;
+    let shared_label_width = legend_key_width
+        .max(context_label_width)
+        .min(legend_content_width)
+        .min(max_context_label);
+
+    let mut context_lines = Vec::new();
+    context_lines.push(Line::from(Span::styled(
+        "Active",
+        Style::default().fg(theme.accent),
+    )));
+    context_lines.extend(format_kv_lines_aligned(
+        &rows,
+        context_chunks[0].width as usize,
+        shared_label_width,
+    ));
+    let context_widget = Paragraph::new(context_lines).style(Style::default().fg(theme.text));
+    frame.render_widget(context_widget, context_chunks[0]);
+
     let legend_lines = build_legend_lines(
-        app,
+        &legend_rows,
         &theme,
         legend_content_width,
         legend_content_height,
+        shared_label_width,
     );
     let legend_lines = pad_lines(
         legend_lines,
@@ -2179,9 +2210,10 @@ struct ModCounts {
     visible_enabled: usize,
 }
 
-fn build_rows(app: &App, theme: &Theme) -> (Vec<Row<'static>>, ModCounts) {
+fn build_rows(app: &App, theme: &Theme) -> (Vec<Row<'static>>, ModCounts, usize) {
     let mut rows = Vec::new();
     let mut visible_enabled = 0;
+    let mut target_width = "Target".chars().count();
     let (total, enabled) = app.profile_counts();
     let profile_entries = app.visible_profile_entries();
     let mod_map = app.library.index_by_id();
@@ -2193,14 +2225,16 @@ fn build_rows(app: &App, theme: &Theme) -> (Vec<Row<'static>>, ModCounts) {
         if entry.enabled {
             visible_enabled += 1;
         }
-        rows.push(row_for_entry(
+        let (row, target_len) = row_for_entry(
             app,
             row_index,
             *order_index,
             entry.enabled,
             mod_entry,
             theme,
-        ));
+        );
+        target_width = target_width.max(target_len);
+        rows.push(row);
     }
 
     let visible_total = rows.len();
@@ -2212,6 +2246,7 @@ fn build_rows(app: &App, theme: &Theme) -> (Vec<Row<'static>>, ModCounts) {
             visible_total,
             visible_enabled,
         },
+        target_width,
     )
 }
 
@@ -2222,7 +2257,7 @@ fn row_for_entry(
     enabled: bool,
     mod_entry: &ModEntry,
     theme: &Theme,
-) -> Row<'static> {
+) -> (Row<'static>, usize) {
     let (enabled_text, enabled_style) = if enabled {
         ("[x]", Style::default().fg(theme.success))
     } else {
@@ -2235,6 +2270,7 @@ fn row_for_entry(
         _ => Style::default().fg(theme.text),
     };
     let (state_label, state_style) = mod_path_label(app, mod_entry, theme, true);
+    let target_len = state_label.chars().count();
     let mut row = Row::new(vec![
         Cell::from(enabled_text.to_string()).style(enabled_style),
         Cell::from((order_index + 1).to_string()),
@@ -2245,7 +2281,7 @@ fn row_for_entry(
     if row_index % 2 == 1 {
         row = row.style(Style::default().bg(theme.row_alt_bg));
     }
-    row
+    (row, target_len)
 }
 
 fn truncate_text(value: &str, max_width: usize) -> String {
@@ -2844,16 +2880,7 @@ struct KvRow {
     value_style: Style,
 }
 
-fn build_legend_lines(
-    app: &App,
-    theme: &Theme,
-    width: usize,
-    height: usize,
-) -> Vec<Line<'static>> {
-    if width == 0 || height == 0 {
-        return Vec::new();
-    }
-
+fn legend_rows(app: &App) -> Vec<LegendRow> {
     let mut rows = Vec::new();
     match app.focus {
         Focus::Explorer => {
@@ -2965,24 +2992,45 @@ fn build_legend_lines(
             ]);
         }
     }
+    rows
+}
 
-    let mut lines = format_legend_rows(&rows, width, theme);
+fn legend_key_width(rows: &[LegendRow], width: usize) -> usize {
+    rows.iter()
+        .map(|row| row.key.chars().count())
+        .max()
+        .unwrap_or(0)
+        .min(width)
+}
+
+fn build_legend_lines(
+    rows: &[LegendRow],
+    theme: &Theme,
+    width: usize,
+    height: usize,
+    key_width: usize,
+) -> Vec<Line<'static>> {
+    if width == 0 || height == 0 {
+        return Vec::new();
+    }
+
+    let mut lines = format_legend_rows(rows, width, key_width, theme);
     if lines.len() > height {
         lines.truncate(height);
     }
     lines
 }
 
-fn format_legend_rows(rows: &[LegendRow], width: usize, theme: &Theme) -> Vec<Line<'static>> {
+fn format_legend_rows(
+    rows: &[LegendRow],
+    width: usize,
+    key_width: usize,
+    theme: &Theme,
+) -> Vec<Line<'static>> {
     if width == 0 {
         return Vec::new();
     }
-    let key_width = rows
-        .iter()
-        .map(|row| row.key.chars().count())
-        .max()
-        .unwrap_or(0)
-        .min(width);
+    let key_width = key_width.min(width);
     let spacing = 2usize;
     let action_width = width.saturating_sub(key_width + spacing);
 
@@ -3058,4 +3106,56 @@ fn format_kv_lines(rows: &[KvRow], width: usize) -> Vec<Line<'static>> {
         ])
     })
     .collect()
+}
+
+fn format_kv_lines_aligned(
+    rows: &[KvRow],
+    width: usize,
+    label_width: usize,
+) -> Vec<Line<'static>> {
+    if width == 0 || rows.is_empty() {
+        return Vec::new();
+    }
+    if width <= 2 {
+        return rows
+            .iter()
+            .map(|row| {
+                Line::from(Span::styled(
+                    truncate_text(&row.label, width),
+                    row.label_style,
+                ))
+            })
+            .collect();
+    }
+
+    let label_width = label_width.min(width.saturating_sub(2));
+    let value_width = width.saturating_sub(label_width + 2);
+
+    rows.iter()
+        .map(|row| {
+            if value_width == 0 {
+                return Line::from(Span::styled(
+                    truncate_text(&row.label, width),
+                    row.label_style,
+                ));
+            }
+            let label_text = truncate_text(&row.label, label_width);
+            let label_len = label_text.chars().count();
+            let pad = " ".repeat(label_width.saturating_sub(label_len));
+            let value_text = truncate_text(&row.value, value_width);
+            if row.label.trim().is_empty() {
+                let indent = " ".repeat(label_width + 2);
+                return Line::from(vec![
+                    Span::raw(indent),
+                    Span::styled(value_text, row.value_style),
+                ]);
+            }
+            Line::from(vec![
+                Span::styled(label_text, row.label_style),
+                Span::raw(pad),
+                Span::styled(": ", row.label_style),
+                Span::styled(value_text, row.value_style),
+            ])
+        })
+        .collect()
 }

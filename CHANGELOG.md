@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.2.3
+
+- Details panel now uses the same border style as the log.
+- Target column width is computed from content and the header is renamed.
+- Context values align with legend key widths for cleaner scanning.
+
 ## 0.2.2
 
 - Overrides focus highlighting and banner readability updates.
