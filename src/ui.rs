@@ -2170,11 +2170,28 @@ fn build_smart_rank_preview_lines(
     }
 
     let mut lines = Vec::new();
-    let moved = preview.report.moved;
-    let conflicts = preview.report.conflicts;
-    let missing = preview.report.missing;
+    let report = &preview.report;
     lines.push(Line::from(Span::styled(
-        format!("Moved: {moved} | Conflicts: {conflicts} | Missing: {missing}"),
+        format!("Moved: {} | Scan: {}ms", report.moved, report.elapsed_ms),
+        Style::default().fg(theme.text),
+    )));
+    lines.push(Line::from(Span::styled(
+        format!(
+            "Conflicts: Loose {} | Pak {}",
+            report.conflicts_loose, report.conflicts_pak
+        ),
+        Style::default().fg(theme.text),
+    )));
+    lines.push(Line::from(Span::styled(
+        format!(
+            "Scanned: Loose {}/{} | Pak {}/{} | Missing: Loose {} | Pak {}",
+            report.scanned_loose,
+            report.enabled_loose,
+            report.scanned_pak,
+            report.enabled_pak,
+            report.missing_loose,
+            report.missing_pak
+        ),
         Style::default().fg(theme.text),
     )));
     lines.push(Line::from(Span::styled(
@@ -2188,8 +2205,13 @@ fn build_smart_rank_preview_lines(
 
     if !preview.warnings.is_empty() {
         lines.push(Line::from(""));
+        let warning_label = if preview.warnings.len() > 2 {
+            format!("Warnings (showing 2 of {}):", preview.warnings.len())
+        } else {
+            "Warnings:".to_string()
+        };
         lines.push(Line::from(Span::styled(
-            "Warnings:",
+            warning_label,
             Style::default()
                 .fg(theme.warning)
                 .add_modifier(Modifier::BOLD),

@@ -2,15 +2,16 @@ use crate::{
     config::GameConfig,
     game,
     library::{InstallTarget, Library, ModEntry, ProfileEntry, TargetKind},
+    native_pak,
 };
 use anyhow::{Context, Result};
 use lz4_flex::block::decompress;
 use std::{
     collections::{HashMap, HashSet},
-    fs,
     fs::File,
     io::{Read, Seek, SeekFrom},
     path::Path,
+    time::Instant,
 };
 use walkdir::WalkDir;
 
@@ -20,6 +21,15 @@ pub struct SmartRankReport {
     pub missing: usize,
     pub conflicts: usize,
     pub total: usize,
+    pub missing_loose: usize,
+    pub missing_pak: usize,
+    pub scanned_loose: usize,
+    pub scanned_pak: usize,
+    pub enabled_loose: usize,
+    pub enabled_pak: usize,
+    pub conflicts_loose: usize,
+    pub conflicts_pak: usize,
+    pub elapsed_ms: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -55,13 +65,8 @@ struct RankItem {
     has_data: bool,
 }
 
-#[derive(Debug, Clone)]
-struct NativePakEntry {
-    path: std::path::PathBuf,
-    normalized: String,
-}
-
 pub fn smart_rank_profile(config: &GameConfig, library: &Library) -> Result<SmartRankResult> {
+    let started = Instant::now();
     let paths = game::detect_paths(
         config.game_id,
         Some(&config.game_root),
@@ -72,9 +77,15 @@ pub fn smart_rank_profile(config: &GameConfig, library: &Library) -> Result<Smar
         .context("active profile not set")?;
     let mod_map = library.index_by_id();
     let mut warnings = Vec::new();
-    let native_pak_index = build_native_pak_index(&paths.larian_mods_dir);
+    let native_pak_index = native_pak::build_native_pak_index(&paths.larian_mods_dir);
     let mut items = Vec::new();
     let mut missing = 0usize;
+    let mut missing_loose = 0usize;
+    let mut missing_pak = 0usize;
+    let mut scanned_loose = 0usize;
+    let mut scanned_pak = 0usize;
+    let mut enabled_loose = 0usize;
+    let mut enabled_pak = 0usize;
 
     for (index, entry) in profile.order.iter().enumerate() {
         let Some(mod_entry) = mod_map.get(&entry.id) else {
@@ -91,6 +102,10 @@ pub fn smart_rank_profile(config: &GameConfig, library: &Library) -> Result<Smar
         let mut has_data = false;
 
         if entry.enabled {
+            match group {
+                RankGroup::Loose => enabled_loose += 1,
+                RankGroup::Pak => enabled_pak += 1,
+            }
             match scan_mod_files(
                 mod_entry,
                 config,
@@ -105,16 +120,28 @@ pub fn smart_rank_profile(config: &GameConfig, library: &Library) -> Result<Smar
                     }
                     if file_paths.is_empty() {
                         missing += 1;
+                        match group {
+                            RankGroup::Loose => missing_loose += 1,
+                            RankGroup::Pak => missing_pak += 1,
+                        }
                         warnings.push(format!(
                             "Smart rank scan empty for {}",
                             mod_entry.display_name()
                         ));
                     } else {
                         has_data = true;
+                        match group {
+                            RankGroup::Loose => scanned_loose += 1,
+                            RankGroup::Pak => scanned_pak += 1,
+                        }
                     }
                 }
                 Err(err) => {
                     missing += 1;
+                    match group {
+                        RankGroup::Loose => missing_loose += 1,
+                        RankGroup::Pak => missing_pak += 1,
+                    }
                     warnings.push(format!(
                         "Smart rank scan failed for {}: {err}",
                         mod_entry.display_name()
@@ -139,6 +166,8 @@ pub fn smart_rank_profile(config: &GameConfig, library: &Library) -> Result<Smar
     }
 
     let mut conflicts = 0usize;
+    let mut conflicts_loose = 0usize;
+    let mut conflicts_pak = 0usize;
     for group in [RankGroup::Loose, RankGroup::Pak] {
         let mut path_counts: HashMap<String, usize> = HashMap::new();
         let mut path_mods: HashMap<String, Vec<String>> = HashMap::new();
@@ -153,7 +182,12 @@ pub fn smart_rank_profile(config: &GameConfig, library: &Library) -> Result<Smar
                     .push(item.id.clone());
             }
         }
-        conflicts += path_counts.values().filter(|count| **count > 1).count();
+        let group_conflicts = path_counts.values().filter(|count| **count > 1).count();
+        conflicts += group_conflicts;
+        match group {
+            RankGroup::Loose => conflicts_loose = group_conflicts,
+            RankGroup::Pak => conflicts_pak = group_conflicts,
+        }
 
         for item in items.iter_mut().filter(|item| item.group == group) {
             if !item.enabled || !item.has_data {
@@ -213,6 +247,15 @@ pub fn smart_rank_profile(config: &GameConfig, library: &Library) -> Result<Smar
             missing,
             conflicts,
             total: profile.order.len(),
+            missing_loose,
+            missing_pak,
+            scanned_loose,
+            scanned_pak,
+            enabled_loose,
+            enabled_pak,
+            conflicts_loose,
+            conflicts_pak,
+            elapsed_ms: started.elapsed().as_millis() as u64,
         },
         warnings,
     })
@@ -269,7 +312,7 @@ fn scan_mod_files(
     config: &GameConfig,
     larian_mods_dir: &Path,
     group: RankGroup,
-    native_pak_index: &[NativePakEntry],
+    native_pak_index: &[native_pak::NativePakEntry],
 ) -> Result<Vec<FileEntry>> {
     let data_dir = &config.data_dir;
     match group {
@@ -314,7 +357,7 @@ fn scan_pak_files(
     mod_entry: &ModEntry,
     data_dir: &Path,
     larian_mods_dir: &Path,
-    native_pak_index: &[NativePakEntry],
+    native_pak_index: &[native_pak::NativePakEntry],
 ) -> Result<Vec<FileEntry>> {
     let mut pak_paths = Vec::new();
 
@@ -340,7 +383,7 @@ fn scan_pak_files(
             InstallTarget::Pak { info, .. } => Some(info),
             _ => None,
         }) {
-            if let Some(path) = resolve_native_pak_path(info, native_pak_index) {
+            if let Some(path) = native_pak::resolve_native_pak_path(info, native_pak_index) {
                 pak_paths.push(path);
             }
         }
@@ -361,83 +404,6 @@ fn scan_pak_files(
     }
 
     Ok(files)
-}
-
-fn build_native_pak_index(larian_mods_dir: &Path) -> Vec<NativePakEntry> {
-    let mut entries = Vec::new();
-    let Ok(dir_entries) = fs::read_dir(larian_mods_dir) else {
-        return entries;
-    };
-    for entry in dir_entries.flatten() {
-        let path = entry.path();
-        if path.extension().and_then(|ext| ext.to_str()).map(|ext| ext.eq_ignore_ascii_case("pak")) != Some(true) {
-            continue;
-        }
-        let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
-        let normalized = normalize_pak_key(stem);
-        entries.push(NativePakEntry { path, normalized });
-    }
-    entries
-}
-
-fn resolve_native_pak_path(info: &crate::library::PakInfo, native_pak_index: &[NativePakEntry]) -> Option<std::path::PathBuf> {
-    if native_pak_index.is_empty() {
-        return None;
-    }
-
-    let folder_key = normalize_pak_key(&info.folder);
-    if let Some(entry) = find_single_match(native_pak_index, &folder_key) {
-        return Some(entry.path.clone());
-    }
-
-    let uuid_key = normalize_pak_key(&info.uuid);
-    if let Some(entry) = find_single_match(native_pak_index, &uuid_key) {
-        return Some(entry.path.clone());
-    }
-
-    for prefix_len in [16usize, 12, 8] {
-        if uuid_key.len() >= prefix_len {
-            if let Some(entry) = find_single_match(native_pak_index, &uuid_key[..prefix_len]) {
-                return Some(entry.path.clone());
-            }
-        }
-    }
-
-    for prefix_len in [32usize, 24, 16] {
-        if folder_key.len() >= prefix_len {
-            if let Some(entry) = find_single_match(native_pak_index, &folder_key[..prefix_len]) {
-                return Some(entry.path.clone());
-            }
-        }
-    }
-
-    None
-}
-
-fn find_single_match<'a>(
-    native_pak_index: &'a [NativePakEntry],
-    needle: &str,
-) -> Option<&'a NativePakEntry> {
-    if needle.is_empty() {
-        return None;
-    }
-    let mut matches = native_pak_index
-        .iter()
-        .filter(|entry| entry.normalized.contains(needle));
-    let first = matches.next()?;
-    if matches.next().is_some() {
-        None
-    } else {
-        Some(first)
-    }
-}
-
-fn normalize_pak_key(value: &str) -> String {
-    value
-        .chars()
-        .filter(|ch| ch.is_ascii_alphanumeric())
-        .map(|ch| ch.to_ascii_lowercase())
-        .collect()
 }
 
 fn scan_pak_index(path: &Path) -> Result<Vec<FileEntry>> {

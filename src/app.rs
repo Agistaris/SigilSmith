@@ -8,6 +8,7 @@ use crate::{
         FileOverride, normalize_label, Library, ModEntry, ModSource, PakInfo, ProfileEntry,
         TargetKind, TargetOverride,
     },
+    native_pak,
     smart_rank,
 };
 use anyhow::{Context, Result};
@@ -559,6 +560,16 @@ impl App {
                 return;
             }
         };
+        self.log_info(format!(
+            "Smart rank scan: loose {}/{} pak {}/{} in {}ms (missing loose {}, pak {})",
+            result.report.scanned_loose,
+            result.report.enabled_loose,
+            result.report.scanned_pak,
+            result.report.enabled_pak,
+            result.report.elapsed_ms,
+            result.report.missing_loose,
+            result.report.missing_pak,
+        ));
 
         let Some(profile) = self.library.active_profile() else {
             self.status = "Smart ranking skipped: no profile".to_string();
@@ -2478,6 +2489,7 @@ impl App {
                 return;
             }
         };
+        let native_pak_index = native_pak::build_native_pak_index(&paths.larian_mods_dir);
 
         let snapshot = match deploy::read_modsettings_snapshot(&paths.modsettings_path) {
             Ok(snapshot) => snapshot,
@@ -2496,6 +2508,33 @@ impl App {
             .map(|info| (info.uuid.clone(), info))
             .collect();
 
+        let mut updated_native_files = 0usize;
+        for mod_entry in self.library.mods.iter_mut().filter(|entry| entry.is_native()) {
+            let Some(info) = mod_entry.targets.iter().find_map(|target| match target {
+                crate::library::InstallTarget::Pak { info, .. } => Some(info.clone()),
+                _ => None,
+            }) else {
+                continue;
+            };
+            let Some(filename) =
+                native_pak::resolve_native_pak_filename(&info, &native_pak_index)
+            else {
+                continue;
+            };
+            let mut changed = false;
+            for target in &mut mod_entry.targets {
+                if let crate::library::InstallTarget::Pak { file, .. } = target {
+                    if *file != filename {
+                        *file = filename.clone();
+                        changed = true;
+                    }
+                }
+            }
+            if changed {
+                updated_native_files += 1;
+            }
+        }
+
         let mut ordered = Vec::new();
         for uuid in &order {
             if let Some(info) = modules_by_uuid.remove(uuid) {
@@ -2510,12 +2549,14 @@ impl App {
             if existing_ids.contains(&uuid) {
                 continue;
             }
+            let filename = native_pak::resolve_native_pak_filename(&info, &native_pak_index)
+                .unwrap_or_else(|| format!("{}.pak", info.folder));
             let mod_entry = ModEntry {
                 id: uuid.clone(),
                 name: info.name.clone(),
                 added_at: now_timestamp(),
                 targets: vec![crate::library::InstallTarget::Pak {
-                    file: format!("{}.pak", info.folder),
+                    file: filename,
                     info,
                 }],
                 target_overrides: Vec::new(),
@@ -2608,12 +2649,17 @@ impl App {
             }
         }
 
-        if added > 0 || updated_enabled || reordered {
+        if added > 0 || updated_enabled || reordered || updated_native_files > 0 {
             if let Err(err) = self.library.save(&self.config.data_dir) {
                 self.log_warn(format!("Native mod sync save failed: {err}"));
             }
             if added > 0 {
                 self.log_info(format!("Native mods added: {added}"));
+            }
+            if updated_native_files > 0 {
+                self.log_info(format!(
+                    "Native mod filenames updated: {updated_native_files}"
+                ));
             }
             if reordered {
                 self.log_info("Native mod order synced".to_string());
