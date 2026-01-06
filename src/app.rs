@@ -238,6 +238,7 @@ pub struct App {
     pub mod_filter: String,
     pub settings_menu: Option<SettingsMenu>,
     pub smart_rank_preview: Option<SmartRankPreview>,
+    pub smart_rank_scroll: usize,
     import_queue: VecDeque<PathBuf>,
     import_active: Option<PathBuf>,
     import_tx: Sender<ImportMessage>,
@@ -343,6 +344,7 @@ impl App {
             mod_filter: String::new(),
             settings_menu: None,
             smart_rank_preview: None,
+            smart_rank_scroll: 0,
             import_queue: VecDeque::new(),
             import_active: None,
             import_tx,
@@ -551,6 +553,8 @@ impl App {
             return;
         }
 
+        self.status = "Smart ranking: scanning...".to_string();
+        self.log_info("Smart ranking scan started".to_string());
         let result = smart_rank::smart_rank_profile(&self.config, &self.library);
         let result = match result {
             Ok(result) => result,
@@ -618,6 +622,7 @@ impl App {
             moves,
             warnings: result.warnings,
         });
+        self.smart_rank_scroll = 0;
         self.status = "Smart ranking preview ready".to_string();
     }
 
@@ -625,6 +630,7 @@ impl App {
         let Some(preview) = self.smart_rank_preview.take() else {
             return;
         };
+        self.smart_rank_scroll = 0;
         let Some(profile) = self.library.active_profile_mut() else {
             self.status = "Smart ranking skipped: no profile".to_string();
             return;
@@ -663,6 +669,7 @@ impl App {
         if self.smart_rank_preview.take().is_some() {
             self.status = "Smart ranking canceled".to_string();
         }
+        self.smart_rank_scroll = 0;
     }
 
     pub fn conflicts_scanning(&self) -> bool {

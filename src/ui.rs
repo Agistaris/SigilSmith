@@ -240,6 +240,24 @@ fn handle_smart_rank_preview(app: &mut App, key: KeyEvent) -> Result<()> {
         KeyCode::Esc | KeyCode::Char('n') | KeyCode::Char('N') => {
             app.cancel_smart_rank_preview();
         }
+        KeyCode::Up | KeyCode::Char('k') | KeyCode::Char('K') => {
+            app.smart_rank_scroll = app.smart_rank_scroll.saturating_sub(1);
+        }
+        KeyCode::Down | KeyCode::Char('j') | KeyCode::Char('J') => {
+            app.smart_rank_scroll = app.smart_rank_scroll.saturating_add(1);
+        }
+        KeyCode::PageUp => {
+            app.smart_rank_scroll = app.smart_rank_scroll.saturating_sub(6);
+        }
+        KeyCode::PageDown => {
+            app.smart_rank_scroll = app.smart_rank_scroll.saturating_add(6);
+        }
+        KeyCode::Home => {
+            app.smart_rank_scroll = 0;
+        }
+        KeyCode::End => {
+            app.smart_rank_scroll = usize::MAX;
+        }
         _ => {}
     }
     Ok(())
@@ -2138,7 +2156,13 @@ fn draw_smart_rank_preview(frame: &mut Frame<'_>, app: &App, theme: &Theme) {
 
     let inner_width = preview_area.width.saturating_sub(2) as usize;
     let inner_height = preview_area.height.saturating_sub(2) as usize;
-    let lines = build_smart_rank_preview_lines(preview, theme, inner_width, inner_height);
+    let lines = build_smart_rank_preview_lines(
+        preview,
+        theme,
+        inner_width,
+        inner_height,
+        app.smart_rank_scroll,
+    );
 
     frame.render_widget(Clear, preview_area);
     let block = Block::default()
@@ -2164,6 +2188,7 @@ fn build_smart_rank_preview_lines(
     theme: &Theme,
     width: usize,
     height: usize,
+    scroll: usize,
 ) -> Vec<Line<'static>> {
     if width == 0 || height == 0 {
         return Vec::new();
@@ -2260,36 +2285,57 @@ fn build_smart_rank_preview_lines(
             let right_text = truncate_text(&right, col_width);
             let left_len = left_text.chars().count();
             let pad = " ".repeat(col_width.saturating_sub(left_len));
+            let row_bg = theme.accent_soft;
             diff_lines.push(Line::from(vec![
-                Span::styled(left_text, Style::default().fg(theme.muted)),
-                Span::styled(format!("{pad} | "), Style::default().fg(theme.muted)),
-                Span::styled(right_text, Style::default().fg(theme.text)),
+                Span::styled(
+                    left_text,
+                    Style::default().fg(theme.muted).bg(row_bg),
+                ),
+                Span::styled(
+                    format!("{pad} | "),
+                    Style::default().fg(theme.muted).bg(row_bg),
+                ),
+                Span::styled(
+                    right_text,
+                    Style::default()
+                        .fg(theme.text)
+                        .bg(row_bg)
+                        .add_modifier(Modifier::BOLD),
+                ),
             ]));
         }
     }
 
-    let footer = Line::from(Span::styled(
-        "Enter: apply | Esc: cancel",
-        Style::default().fg(theme.muted),
-    ));
-
-    let remaining = height.saturating_sub(lines.len() + 1);
-    if remaining == 0 {
-        lines.push(footer);
+    let available = height.saturating_sub(lines.len() + 1);
+    if available == 0 {
+        lines.push(Line::from(Span::styled(
+            "Enter: apply | Esc: cancel",
+            Style::default().fg(theme.muted),
+        )));
         return lines;
     }
 
-    if diff_lines.len() > remaining {
-        let keep = remaining.saturating_sub(1);
-        let extra = diff_lines.len().saturating_sub(keep);
-        diff_lines.truncate(keep);
-        diff_lines.push(Line::from(Span::styled(
-            format!("... {extra} more"),
-            Style::default().fg(theme.muted),
-        )));
+    let total = diff_lines.len();
+    let max_scroll = total.saturating_sub(available);
+    let scroll = scroll.min(max_scroll);
+    let end = (scroll + available).min(total);
+    if total > 0 {
+        lines.extend(diff_lines[scroll..end].iter().cloned());
     }
-    lines.extend(diff_lines);
-    lines.push(footer);
+
+    let footer = if total > available {
+        format!(
+            "Enter: apply | Esc: cancel | ↑/↓ scroll {}/{}",
+            scroll + 1,
+            max_scroll + 1
+        )
+    } else {
+        "Enter: apply | Esc: cancel".to_string()
+    };
+    lines.push(Line::from(Span::styled(
+        footer,
+        Style::default().fg(theme.muted),
+    )));
 
     lines
 }
