@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.2.4
+
+- Override actions border now uses the light-blue highlight when focused.
+- Context panel includes a spacer line before the legend block.
+- Explorer tree uses unicode branch/expand glyphs for a cleaner look.
+
 ## 0.2.3
 
 - Details panel now uses the same border style as the log.

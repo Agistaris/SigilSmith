@@ -1025,10 +1025,15 @@ fn draw(frame: &mut Frame<'_>, app: &App) {
     } else {
         "Details"
     };
+    let details_border = if details_focus {
+        theme.accent_soft
+    } else {
+        theme.border
+    };
     let details_block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Plain)
-        .border_style(Style::default().fg(theme.border))
+        .border_style(Style::default().fg(details_border))
         .title(Span::styled(
             details_title,
             Style::default()
@@ -1159,6 +1164,7 @@ fn draw(frame: &mut Frame<'_>, app: &App) {
         context_chunks[0].width as usize,
         shared_label_width,
     ));
+    context_lines.push(Line::from(""));
     let context_widget = Paragraph::new(context_lines).style(Style::default().fg(theme.text));
     frame.render_widget(context_widget, context_chunks[0]);
 
@@ -2121,16 +2127,16 @@ fn explorer_prefix(items: &[ExplorerItem], index: usize) -> String {
     let mut out = String::new();
     for level in 1..depth {
         if has_next_at_depth(items, index, level) {
-            out.push_str("|   ");
+            out.push_str("│  ");
         } else {
-            out.push_str("    ");
+            out.push_str("   ");
         }
     }
 
     let branch = if has_next_at_depth(items, index, depth) {
-        "|-- "
+        "├─ "
     } else {
-        "\\-- "
+        "└─ "
     };
     out.push_str(branch);
     out
@@ -2160,7 +2166,7 @@ fn explorer_line(
 
     match &item.kind {
         ExplorerItemKind::Game(_) => {
-            let expander = if item.expanded { "v" } else { ">" };
+            let expander = if item.expanded { "▾" } else { "▸" };
             spans.push(Span::styled(expander, muted));
             spans.push(Span::raw(" "));
             let marker_style = if item.active {
@@ -2174,7 +2180,7 @@ fn explorer_line(
             spans.push(Span::styled(item.label.clone(), label_style));
         }
         ExplorerItemKind::ProfilesHeader(_) => {
-            let expander = if item.expanded { "v" } else { ">" };
+            let expander = if item.expanded { "▾" } else { "▸" };
             spans.push(Span::styled(expander, muted));
             spans.push(Span::raw(" "));
             spans.push(Span::styled(item.label.clone(), label_style.fg(theme.accent)));
