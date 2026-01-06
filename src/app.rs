@@ -518,6 +518,14 @@ impl App {
         self.conflict_pending
     }
 
+    pub fn is_busy(&self) -> bool {
+        self.import_active.is_some()
+            || self.deploy_active
+            || self.deploy_pending
+            || self.conflict_active
+            || self.conflict_pending
+    }
+
     pub fn explorer_items(&self) -> Vec<ExplorerItem> {
         let mut items = Vec::new();
 
@@ -1015,7 +1023,7 @@ impl App {
             return;
         }
 
-        let message = format!("Delete profile \"{name}\"?\nThis cannot be undone.");
+        let message = String::new();
         self.open_dialog(Dialog {
             title: "Delete Profile".to_string(),
             message,
@@ -1024,7 +1032,7 @@ impl App {
             choice: DialogChoice::No,
             kind: DialogKind::DeleteProfile { name },
             toggle: Some(DialogToggle {
-                label: "Don't ask again for this action".to_string(),
+                label: "Don't ask again for this action?".to_string(),
                 checked: false,
             }),
         });
@@ -1035,7 +1043,7 @@ impl App {
             return;
         }
 
-        let message = format!("Remove mod \"{name}\"?\nThis will delete it from the library.");
+        let message = String::new();
         self.open_dialog(Dialog {
             title: "Remove Mod".to_string(),
             message,
@@ -1044,7 +1052,7 @@ impl App {
             choice: DialogChoice::No,
             kind: DialogKind::DeleteMod { id, name },
             toggle: Some(DialogToggle {
-                label: "Don't ask again for this action".to_string(),
+                label: "Don't ask again for this action?".to_string(),
                 checked: false,
             }),
         });

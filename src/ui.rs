@@ -1,7 +1,7 @@
 use crate::{
     app::{
-        App, DialogChoice, ExplorerItem, ExplorerItemKind, Focus, InputMode, InputPurpose,
-        LogLevel, ToastLevel,
+        App, DialogChoice, DialogKind, ExplorerItem, ExplorerItemKind, Focus, InputMode,
+        InputPurpose, LogLevel, ToastLevel,
     },
     library::{InstallTarget, ModEntry, TargetKind},
 };
@@ -36,7 +36,6 @@ const CONFLICTS_BAR_HEIGHT: u16 = STATUS_HEIGHT;
 const FOOTER_HEIGHT: u16 = 8;
 const FILTER_HEIGHT: u16 = 1;
 const TABLE_MIN_HEIGHT: u16 = 6;
-const MARQUEE_STEP_MS: u128 = 180;
 const SUBPANEL_PAD_X: u16 = 0;
 const SUBPANEL_PAD_TOP: u16 = 0;
 
@@ -716,12 +715,20 @@ fn should_start_import(c: char) -> bool {
 fn draw(frame: &mut Frame<'_>, app: &App) {
     let area = frame.size();
     let theme = Theme::new();
+    let footer_height = FOOTER_HEIGHT.min(area.height.saturating_sub(4));
+    let available = area
+        .height
+        .saturating_sub(HEADER_HEIGHT)
+        .saturating_sub(footer_height);
+    let details_height = DETAILS_HEIGHT.min(available.saturating_sub(10).max(3));
+    let main_height = available.saturating_sub(details_height).max(6);
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(HEADER_HEIGHT),
-            Constraint::Min(10),
-            Constraint::Length(FOOTER_HEIGHT),
+            Constraint::Length(main_height),
+            Constraint::Length(details_height),
+            Constraint::Length(footer_height),
         ])
         .split(area);
 
@@ -895,15 +902,9 @@ fn draw(frame: &mut Frame<'_>, app: &App) {
     let mod_stack_inner = mod_stack_block.inner(body_chunks[1]);
     frame.render_widget(mod_stack_block, body_chunks[1]);
 
-    let details_height = DETAILS_HEIGHT
-        .min(mod_stack_inner.height.saturating_sub(TABLE_MIN_HEIGHT + FILTER_HEIGHT).max(3));
     let mod_chunks = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(FILTER_HEIGHT),
-            Constraint::Min(TABLE_MIN_HEIGHT),
-            Constraint::Length(details_height),
-        ])
+        .constraints([Constraint::Length(FILTER_HEIGHT), Constraint::Min(TABLE_MIN_HEIGHT)])
         .split(mod_stack_inner);
 
     render_filter_bar(frame, app, &theme, mod_chunks[0], &counts);
@@ -1005,8 +1006,8 @@ fn draw(frame: &mut Frame<'_>, app: &App) {
 
     let details_block = theme.subpanel("Details");
     let details_fill = Block::default().style(Style::default().bg(theme.subpanel_bg));
-    frame.render_widget(details_fill, mod_chunks[2]);
-    let details_inner = details_block.inner(mod_chunks[2]);
+    frame.render_widget(details_fill, chunks[2]);
+    let details_inner = details_block.inner(chunks[2]);
     let details_content_width =
         details_inner.width.saturating_sub(SUBPANEL_PAD_X.saturating_mul(2)) as usize;
     let details_lines = build_details(app, &theme, details_content_width);
@@ -1018,14 +1019,14 @@ fn draw(frame: &mut Frame<'_>, app: &App) {
     let details = Paragraph::new(details_lines)
         .style(Style::default().fg(theme.text).bg(theme.subpanel_bg))
         .block(details_block);
-    frame.render_widget(details, mod_chunks[2]);
+    frame.render_widget(details, chunks[2]);
 
     let context_block = theme.block("Context");
     let context_inner = context_block.inner(left_chunks[1]);
     frame.render_widget(context_block, left_chunks[1]);
 
-    let min_context_lines = 7u16;
-    let legend_height = details_height.min(
+    let min_context_lines = 8u16;
+    let legend_height = chunks[2].height.min(
         context_inner
             .height
             .saturating_sub(min_context_lines)
@@ -1078,16 +1079,20 @@ fn draw(frame: &mut Frame<'_>, app: &App) {
         label_style,
         value_style: Style::default().fg(theme.text),
     });
-    let override_value =
-        format!("Auto resolved {overrides_auto} | Manual resolved {overrides_manual}");
     rows.push(KvRow {
         label: "Overrides".to_string(),
-        value: override_value,
+        value: format!("Auto ({overrides_auto})"),
+        label_style,
+        value_style: Style::default().fg(theme.success),
+    });
+    rows.push(KvRow {
+        label: "".to_string(),
+        value: format!("Manual ({overrides_manual})"),
         label_style,
         value_style: Style::default().fg(if overrides_manual > 0 {
             theme.warning
         } else {
-            theme.text
+            theme.muted
         }),
     });
     rows.push(KvRow {
@@ -1129,7 +1134,7 @@ fn draw(frame: &mut Frame<'_>, app: &App) {
             Constraint::Min(LOG_MIN_HEIGHT),
             Constraint::Length(CONFLICTS_BAR_HEIGHT),
         ])
-        .split(chunks[2]);
+        .split(chunks[3]);
 
     let log_area = footer_chunks[0];
     let log_block = theme.panel("Log").style(Style::default().bg(theme.log_bg));
@@ -1202,7 +1207,7 @@ fn draw(frame: &mut Frame<'_>, app: &App) {
         frame.render_widget(conflicts, line_area);
     }
 
-    let status_bg = conflict_bg;
+    let status_bg = theme.log_bg;
     let status_block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
@@ -1214,13 +1219,45 @@ fn draw(frame: &mut Frame<'_>, app: &App) {
             top: 0,
             bottom: 0,
         });
+    frame.render_widget(status_block.clone(), status_area);
     let status_inner = status_block.inner(status_area);
+    if app.is_busy() && status_inner.width > 0 && status_inner.height > 0 {
+        let mut bar_width = status_inner.width / 3;
+        if bar_width < 6 {
+            bar_width = status_inner.width.min(6);
+        }
+        if bar_width == 0 {
+            bar_width = status_inner.width;
+        }
+        let travel = status_inner.width.saturating_sub(bar_width);
+        let tick = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis()
+            / 120;
+        let cycle = travel.saturating_mul(2).max(1) as u128;
+        let step = (tick % cycle) as u16;
+        let offset = if step > travel {
+            travel.saturating_mul(2).saturating_sub(step)
+        } else {
+            step
+        };
+        let bar_area = Rect {
+            x: status_inner.x + offset,
+            y: status_inner.y,
+            width: bar_width.min(status_inner.width),
+            height: status_inner.height,
+        };
+        frame.render_widget(
+            Block::default().style(Style::default().bg(theme.accent_soft)),
+            bar_area,
+        );
+    }
     let status_text = truncate_text(&app.status, status_inner.width as usize);
     let status_widget = Paragraph::new(status_text)
-        .style(Style::default().fg(status_color).bg(status_bg))
-        .alignment(Alignment::Left)
-        .block(status_block);
-    frame.render_widget(status_widget, status_area);
+        .style(Style::default().fg(status_color))
+        .alignment(Alignment::Center);
+    frame.render_widget(status_widget, status_inner);
 
     if app.dialog.is_some() {
         draw_dialog(frame, app, &theme);
@@ -1466,81 +1503,87 @@ fn build_conflict_banner(app: &App, theme: &Theme, width: usize) -> Line<'static
     }
 
     let focused = app.focus == Focus::Conflicts;
-    let hint = if focused {
-        " | L/R select | U/D choose"
-    } else {
-        ""
-    };
-    let (mut message, color, use_marquee) = if app.conflicts_scanning() {
-        ("scanning...".to_string(), theme.muted, false)
-    } else if app.conflicts_pending() {
-        ("scan queued...".to_string(), theme.muted, false)
-    } else if app.conflicts.is_empty() {
-        ("none".to_string(), theme.muted, false)
-    } else {
-        let total = app.conflicts.len();
-        let selected = app.conflict_selected.min(total.saturating_sub(1));
-        let conflict = &app.conflicts[selected];
-        let kind = conflict_short_label(conflict.target);
-        let mode = if conflict.overridden { "manual" } else { "auto" };
-        let mut message = format!(
-            "{}/{} ({mode}) [{}] {} -> {}",
-            selected + 1,
-            total,
-            kind,
-            conflict.relative_path.to_string_lossy(),
-            conflict.winner_name
-        );
-        let others = conflict.candidates.len().saturating_sub(1);
-        if others > 0 {
-            message.push_str(&format!(" (+{others})"));
-        }
-        (message, theme.warning, true)
-    };
-    if !hint.is_empty() {
-        message.push_str(hint);
-    }
-
-    let available = width.saturating_sub(label.len());
-    let fitted = if available == 0 {
-        String::new()
-    } else if use_marquee && message.chars().count() > available {
-        marquee_text(&message, available)
-    } else {
-        truncate_text(&message, available)
-    };
-
     let label_style = Style::default().fg(if focused { Color::Black } else { theme.accent });
-    let value_style = Style::default().fg(if focused { Color::Black } else { color });
+    let available = width.saturating_sub(label.len());
 
-    Line::from(vec![
-        Span::styled(label, label_style),
-        Span::styled(fitted, value_style),
-    ])
-}
+    if app.conflicts_scanning() {
+        return Line::from(vec![
+            Span::styled(label, label_style),
+            Span::styled("scanning...", Style::default().fg(theme.muted)),
+        ]);
+    }
+    if app.conflicts_pending() {
+        return Line::from(vec![
+            Span::styled(label, label_style),
+            Span::styled("scan queued...", Style::default().fg(theme.muted)),
+        ]);
+    }
+    if app.conflicts.is_empty() {
+        return Line::from(vec![
+            Span::styled(label, label_style),
+            Span::styled("none", Style::default().fg(theme.muted)),
+        ]);
+    }
 
-fn marquee_text(value: &str, width: usize) -> String {
-    if width == 0 {
-        return String::new();
+    let total = app.conflicts.len();
+    let selected_index = app.conflict_selected.min(total.saturating_sub(1));
+    let conflict = &app.conflicts[selected_index];
+    let manual_count = app.conflicts.iter().filter(|entry| entry.overridden).count();
+    let auto_count = total.saturating_sub(manual_count);
+    let auto_text = format!("Auto ({auto_count})");
+    let manual_text = format!("Manual ({manual_count})");
+    let mut short_auto = auto_text.clone();
+    let mut short_manual = manual_text.clone();
+    let mut sep = " | ";
+    let mut hint = " ←/→ cycle  ↑/↓ choose";
+
+    let index_text = format!("{}/{} ", selected_index + 1, total);
+    let mut total_len =
+        index_text.chars().count() + auto_text.len() + sep.len() + manual_text.len() + hint.len();
+    if total_len > available {
+        hint = "";
+        total_len =
+            index_text.chars().count() + auto_text.len() + sep.len() + manual_text.len();
     }
-    let chars: Vec<char> = value.chars().collect();
-    if chars.len() <= width {
-        return value.to_string();
+    if total_len > available {
+        short_auto = format!("A({auto_count})");
+        short_manual = format!("M({manual_count})");
+        sep = " ";
+        total_len =
+            index_text.chars().count() + short_auto.len() + sep.len() + short_manual.len();
     }
-    let mut scroll = chars.clone();
-    scroll.extend("   ".chars());
-    let len = scroll.len().max(1);
-    let tick = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis()
-        / MARQUEE_STEP_MS;
-    let offset = (tick as usize) % len;
-    let mut out = String::new();
-    for i in 0..width {
-        out.push(scroll[(offset + i) % len]);
+    if total_len > available {
+        let remaining = available.saturating_sub(index_text.chars().count() + short_auto.len() + sep.len());
+        short_manual = truncate_text(&short_manual, remaining);
     }
-    out
+
+    let auto_style = Style::default()
+        .fg(theme.success)
+        .add_modifier(if !conflict.overridden {
+            Modifier::BOLD
+        } else {
+            Modifier::empty()
+        });
+    let manual_style = Style::default()
+        .fg(if manual_count > 0 { theme.warning } else { theme.muted })
+        .add_modifier(if conflict.overridden {
+            Modifier::BOLD
+        } else {
+            Modifier::empty()
+        });
+    let hint_style = Style::default().fg(theme.muted);
+
+    let mut spans = Vec::new();
+    spans.push(Span::styled(label, label_style));
+    spans.push(Span::styled(index_text, Style::default().fg(theme.accent)));
+    spans.push(Span::styled(short_auto, auto_style));
+    spans.push(Span::styled(sep, Style::default().fg(theme.muted)));
+    spans.push(Span::styled(short_manual, manual_style));
+    if !hint.is_empty() {
+        spans.push(Span::styled(hint, hint_style));
+    }
+
+    Line::from(spans)
 }
 
 fn draw_dialog(frame: &mut Frame<'_>, app: &App, theme: &Theme) {
@@ -1549,24 +1592,7 @@ fn draw_dialog(frame: &mut Frame<'_>, app: &App, theme: &Theme) {
     };
 
     let area = frame.size();
-    let message_lines: Vec<Line> = dialog
-        .message
-        .lines()
-        .map(|line| Line::from(line.to_string()))
-        .collect();
-    let content_height = message_lines.len().max(1) as u16;
-    let mut height = content_height + 6;
-    if height < 7 {
-        height = 7;
-    }
-    if height > area.height.saturating_sub(2) {
-        height = area.height.saturating_sub(2);
-    }
-    let width = area.width.saturating_mul(2) / 3;
-    let width = width.clamp(34, area.width.saturating_sub(2).max(34));
-    let x = area.x + (area.width.saturating_sub(width)) / 2;
-    let y = area.y + (area.height.saturating_sub(height)) / 2;
-    let dialog_area = Rect::new(x, y, width, height);
+    let message_lines = build_dialog_message_lines(dialog, theme);
 
     let yes_selected = matches!(dialog.choice, DialogChoice::Yes);
     let yes_style = if yes_selected {
@@ -1616,6 +1642,27 @@ fn draw_dialog(frame: &mut Frame<'_>, app: &App, theme: &Theme) {
     lines.push(Line::from(""));
     lines.push(buttons);
 
+    let mut max_line = 0usize;
+    for line in &lines {
+        let width = line.to_string().chars().count();
+        if width > max_line {
+            max_line = width;
+        }
+    }
+    let max_width = area.width.saturating_sub(2).max(1);
+    let width = (max_line as u16 + 6).clamp(38, max_width.min(72));
+    let content_height = lines.len().max(1) as u16;
+    let mut height = content_height + 2;
+    if height < 8 {
+        height = 8;
+    }
+    if height > area.height.saturating_sub(2) {
+        height = area.height.saturating_sub(2);
+    }
+    let x = area.x + (area.width.saturating_sub(width)) / 2;
+    let y = area.y + (area.height.saturating_sub(height)) / 2;
+    let dialog_area = Rect::new(x, y, width, height);
+
     frame.render_widget(Clear, dialog_area);
     let dialog_block = Block::default()
         .borders(Borders::ALL)
@@ -1629,6 +1676,56 @@ fn draw_dialog(frame: &mut Frame<'_>, app: &App, theme: &Theme) {
     frame.render_widget(dialog_widget, dialog_area);
 }
 
+fn build_dialog_message_lines(dialog: &crate::app::Dialog, theme: &Theme) -> Vec<Line<'static>> {
+    match &dialog.kind {
+        DialogKind::DeleteProfile { name } => {
+            let line1 = Line::from(vec![
+                Span::styled("Delete Profile \"", Style::default().fg(theme.text)),
+                Span::styled(name.clone(), Style::default().fg(theme.text)),
+                Span::styled("\" from ", Style::default().fg(theme.text)),
+                Span::styled(
+                    "SigilSmith",
+                    Style::default()
+                        .fg(theme.success)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled("?", Style::default().fg(theme.text)),
+            ]);
+            let line2 = Line::from(Span::styled(
+                "This action cannot be undone.",
+                Style::default().fg(theme.warning),
+            ));
+            vec![line1, line2]
+        }
+        DialogKind::DeleteMod { name, .. } => {
+            let line1 = Line::from(vec![
+                Span::styled("Remove mod \"", Style::default().fg(theme.text)),
+                Span::styled(name.clone(), Style::default().fg(theme.text)),
+                Span::styled("\"?", Style::default().fg(theme.text)),
+            ]);
+            let line2 = Line::from(vec![
+                Span::styled(
+                    "This will remove it from the ",
+                    Style::default().fg(theme.text),
+                ),
+                Span::styled(
+                    "SigilSmith Library",
+                    Style::default()
+                        .fg(theme.success)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(".", Style::default().fg(theme.text)),
+            ]);
+            vec![line1, line2]
+        }
+        _ => dialog
+            .message
+            .lines()
+            .map(|line| Line::from(line.to_string()))
+            .collect(),
+    }
+}
+
 fn draw_settings_menu(frame: &mut Frame<'_>, app: &App, theme: &Theme) {
     let Some(menu) = &app.settings_menu else {
         return;
@@ -1636,15 +1733,23 @@ fn draw_settings_menu(frame: &mut Frame<'_>, app: &App, theme: &Theme) {
 
     let area = frame.size();
     let lines = build_settings_menu_lines(app, theme, menu.selected);
+    let mut max_line = 0usize;
+    for line in &lines {
+        let width = line.to_string().chars().count();
+        if width > max_line {
+            max_line = width;
+        }
+    }
     let content_height = lines.len().max(1) as u16;
-    let mut height = content_height + 4;
-    if height < 8 {
-        height = 8;
+    let mut height = content_height + 3;
+    if height < 10 {
+        height = 10;
     }
     if height > area.height.saturating_sub(2) {
         height = area.height.saturating_sub(2);
     }
-    let width = (area.width.saturating_mul(2) / 3).clamp(40, area.width.saturating_sub(2));
+    let max_width = area.width.saturating_sub(2).max(1);
+    let width = (max_line as u16 + 6).clamp(40, max_width.min(70));
     let x = area.x + (area.width.saturating_sub(width)) / 2;
     let y = area.y + (area.height.saturating_sub(height)) / 2;
     let menu_area = Rect::new(x, y, width, height);
@@ -1706,19 +1811,23 @@ fn build_settings_menu_lines(app: &App, theme: &Theme, selected: usize) -> Vec<L
             .add_modifier(Modifier::BOLD),
     )));
     lines.push(Line::from(Span::styled(
-        "Tab: cycle focus | Esc: close menu",
+        "Tab: cycle focus  Esc: close",
         Style::default().fg(theme.muted),
     )));
     lines.push(Line::from(Span::styled(
-        "Ctrl+F: filter | Ctrl+L: clear filter",
+        "Ctrl+F: filter    Ctrl+L: clear",
         Style::default().fg(theme.muted),
     )));
     lines.push(Line::from(Span::styled(
-        "Del: remove mod | r/F2: rename profile",
+        "Del: remove mod   r/F2: rename profile",
         Style::default().fg(theme.muted),
     )));
     lines.push(Line::from(Span::styled(
         "1-5: set target override",
+        Style::default().fg(theme.muted),
+    )));
+    lines.push(Line::from(Span::styled(
+        "←/→: select override  ↑/↓: choose",
         Style::default().fg(theme.muted),
     )));
 
@@ -2472,34 +2581,16 @@ fn mod_kind_label(mod_entry: &ModEntry) -> &'static str {
 fn target_root_label(app: &App, kind: TargetKind) -> String {
     let game_root = &app.config.game_root;
     let larian_dir = &app.config.larian_dir;
-    let path = match kind {
-        TargetKind::Pak => {
-            if larian_dir.as_os_str().is_empty() {
-                return "<unset>".to_string();
-            }
-            larian_dir.join("Mods")
-        }
-        TargetKind::Generated => {
-            if game_root.as_os_str().is_empty() {
-                return "<unset>".to_string();
-            }
-            game_root.join("Data").join("Generated")
-        }
-        TargetKind::Data => {
-            if game_root.as_os_str().is_empty() {
-                return "<unset>".to_string();
-            }
-            game_root.join("Data")
-        }
-        TargetKind::Bin => {
-            if game_root.as_os_str().is_empty() {
-                return "<unset>".to_string();
-            }
-            game_root.join("bin")
-        }
-    };
+    if game_root.as_os_str().is_empty() && larian_dir.as_os_str().is_empty() {
+        return "<unset>".to_string();
+    }
 
-    path.display().to_string()
+    match kind {
+        TargetKind::Pak => "../Mods".to_string(),
+        TargetKind::Generated => "../Data/Generated".to_string(),
+        TargetKind::Data => "../Data".to_string(),
+        TargetKind::Bin => "../bin".to_string(),
+    }
 }
 
 fn target_kind_path_label(kind: TargetKind) -> &'static str {
@@ -2665,15 +2756,6 @@ fn override_key_label(kind: Option<TargetKind>) -> &'static str {
     }
 }
 
-fn conflict_short_label(target: TargetKind) -> &'static str {
-    match target {
-        TargetKind::Pak => "P",
-        TargetKind::Generated => "G",
-        TargetKind::Data => "D",
-        TargetKind::Bin => "B",
-    }
-}
-
 struct LegendRow {
     key: String,
     action: String,
@@ -2745,11 +2827,11 @@ fn build_legend_lines(
         Focus::Conflicts => {
             rows.extend([
                 LegendRow {
-                    key: "Left/Right".to_string(),
+                    key: "←/→".to_string(),
                     action: "Select override".to_string(),
                 },
                 LegendRow {
-                    key: "Up/Down".to_string(),
+                    key: "↑/↓".to_string(),
                     action: "Choose winner".to_string(),
                 },
                 LegendRow {
@@ -2881,16 +2963,23 @@ fn format_kv_lines(rows: &[KvRow], width: usize) -> Vec<Line<'static>> {
                     row.label_style,
                 ));
             }
-            let label_text = truncate_text(&row.label, label_width);
-            let label_len = label_text.chars().count();
-            let pad = " ".repeat(label_width.saturating_sub(label_len));
-            let value_text = truncate_text(&row.value, value_width);
-            Line::from(vec![
-                Span::styled(label_text, row.label_style),
-                Span::raw(pad),
-                Span::styled(": ", row.label_style),
+        let label_text = truncate_text(&row.label, label_width);
+        let label_len = label_text.chars().count();
+        let pad = " ".repeat(label_width.saturating_sub(label_len));
+        let value_text = truncate_text(&row.value, value_width);
+        if row.label.trim().is_empty() {
+            let indent = " ".repeat(label_width + 2);
+            return Line::from(vec![
+                Span::raw(indent),
                 Span::styled(value_text, row.value_style),
-            ])
-        })
-        .collect()
+            ]);
+        }
+        Line::from(vec![
+            Span::styled(label_text, row.label_style),
+            Span::raw(pad),
+            Span::styled(": ", row.label_style),
+            Span::styled(value_text, row.value_style),
+        ])
+    })
+    .collect()
 }

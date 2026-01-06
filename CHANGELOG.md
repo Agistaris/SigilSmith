@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.2.1
+
+- Overrides UX refresh: summary banner, legends, and context counts.
+- Details panel repositioned under main panels with unified styling.
+- Confirmation dialogs and settings menu refinements.
+- Mod stack path labels shortened for clarity.
+- Status bar progress indicator and centered text.
+
 ## 0.2.0
 
 - UI refresh with cleaner header/footer layout and full-width row striping.
