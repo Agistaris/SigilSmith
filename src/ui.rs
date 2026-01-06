@@ -732,7 +732,7 @@ fn draw(frame: &mut Frame<'_>, app: &App) {
         .split(area);
     let lower_chunks = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(65), Constraint::Percentage(35)])
+        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
         .split(chunks[2]);
 
     let (rows, counts, target_width) = build_rows(app, &theme);
@@ -1033,6 +1033,11 @@ fn draw(frame: &mut Frame<'_>, app: &App) {
     } else {
         theme.border
     };
+    let details_bg = if details_focus {
+        theme.accent_soft
+    } else {
+        theme.log_bg
+    };
     let details_block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Plain)
@@ -1043,8 +1048,8 @@ fn draw(frame: &mut Frame<'_>, app: &App) {
                 .fg(theme.accent)
                 .add_modifier(Modifier::BOLD),
         ))
-        .style(Style::default().bg(theme.subpanel_bg));
-    let details_fill = Block::default().style(Style::default().bg(theme.subpanel_bg));
+        .style(Style::default().bg(details_bg));
+    let details_fill = Block::default().style(Style::default().bg(details_bg));
     let details_area = lower_chunks[0];
     frame.render_widget(details_fill, details_area);
     let details_inner = details_block.inner(details_area);
@@ -1057,7 +1062,7 @@ fn draw(frame: &mut Frame<'_>, app: &App) {
         SUBPANEL_PAD_TOP as usize,
     );
     let details = Paragraph::new(details_lines)
-        .style(Style::default().fg(theme.text).bg(theme.subpanel_bg))
+        .style(Style::default().fg(theme.text).bg(details_bg))
         .block(details_block);
     frame.render_widget(details, details_area);
 

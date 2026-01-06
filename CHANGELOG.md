@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.2.6
+
+- Details and log now split evenly for a balanced lower row.
+- Details panel background matches log, with override focus highlight.
+
 ## 0.2.5
 
 - Details/log row now splits horizontally to reclaim vertical space.
