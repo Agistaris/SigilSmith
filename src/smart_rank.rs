@@ -350,9 +350,9 @@ fn scan_pak_index(path: &Path) -> Result<Vec<FileEntry>> {
     if version < MIN_VERSION {
         anyhow::bail!("unsupported pak version {version}");
     }
-    file.seek(SeekFrom::Current(8))?;
     let footer_offset = read_u64(&mut file)?;
     let footer_offset = i64::try_from(footer_offset)?;
+    file.seek(SeekFrom::Start(0))?;
     file.seek(SeekFrom::Current(footer_offset))?;
 
     let file_count = read_u32(&mut file)? as usize;
