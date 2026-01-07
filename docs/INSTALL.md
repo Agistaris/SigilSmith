@@ -1,6 +1,7 @@
 # Install SigilSmith
 
 SigilSmith ships Linux builds as AppImage, .deb, .rpm, and .tar.gz on GitHub Releases.
+All release artifacts are built from source by GitHub Actions and published with checksums.
 
 On first launch, SigilSmith auto-detects your BG3 paths. If detection fails,
 open the menu with `Esc` and choose "Configure game paths". A path browser will

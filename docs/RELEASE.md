@@ -33,41 +33,21 @@ git push
 git push --tags
 ```
 
-## 4) GitHub Release (Exact Steps)
+## 4) GitHub Release (Source + CI)
 
-1) Create the repo on GitHub (if not already created).
-2) Add the remote and push:
+The public repo includes the full source and a GitHub Actions workflow that builds
+release artifacts and publishes them when you push a version tag.
 
-```bash
-git remote add origin git@github.com:<user>/sigilsmith.git
-git branch -M main
-git push -u origin main
-```
-
-3) In GitHub, go to Releases → “Draft a new release”.
-4) Tag: `vX.Y.Z` (create tag on publish).
-5) Title: `SigilSmith vX.Y.Z`.
-6) Paste the `CHANGELOG.md` entry into the release notes.
-7) Optionally start from `docs/release_body.md` for a full release description.
-8) Add screenshots + quick install steps to the release body (keep concise).
-9) Upload all files from `dist/`.
-10) Publish.
-
-## 4a) Release-only Public Repo
-
-If your public repo is release-only, generate notes and upload artifacts without pushing source:
+1) Push your commits and tag:
 
 ```bash
-./packaging/build-packages.sh
-./scripts/release_notes.sh
+git push
+git tag vX.Y.Z
+git push --tags
 ```
 
-Then in GitHub Releases:
-1) Tag: `vX.Y.Z` (create tag on publish).
-2) Title: `SigilSmith vX.Y.Z`.
-3) Paste `dist/RELEASE_NOTES.md` into the description.
-4) Upload all files from `dist/` (including `SHA256SUMS.txt`).
-5) Publish.
+2) The `release` workflow builds and uploads artifacts in `dist/`.
+3) Edit the GitHub Release notes if needed (optional).
 
 ## 5) Funding Links
 

@@ -36,12 +36,19 @@ Multi-game support is coming next via an open adapter template (BG3-first today,
 Prebuilt Linux packages are published on GitHub Releases (AppImage, `.deb`, `.rpm`, and `.tar.gz`).
 See `docs/INSTALL.md` for the full install guide.
 
+## Source & Releases
+
+The public repository includes the full source and CI release workflow. Release artifacts
+are built by GitHub Actions from signed tags, and every release includes checksums.
+
 ### From Source
 
 ```bash
 cargo build --release
 ./target/release/sigilsmith
 ```
+
+To build AppImage/.deb/.rpm/.tar.gz packages, use `./packaging/build-packages.sh`.
 
 ## Run (Dev)
 
@@ -89,6 +96,11 @@ cargo run
 ## Support
 
 Support links (Ko-fi + GitHub Sponsors) are coming next update.
+
+## License & Trademarks
+
+SigilSmith is licensed under Apache-2.0. The SigilSmith name and logo are trademarks of
+Agistaris; see `TRADEMARKS.md` for details.
 
 ## Library Location
 
