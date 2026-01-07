@@ -1,7 +1,7 @@
 use crate::{
     app::{
         App, DialogChoice, DialogKind, ExplorerItem, ExplorerItemKind, Focus, InputMode,
-        InputPurpose, LogLevel, ToastLevel,
+        InputPurpose, LogLevel, ToastLevel, PathBrowser, PathBrowserEntryKind, SetupStep,
     },
     library::{InstallTarget, ModEntry, TargetKind},
 };
@@ -181,6 +181,14 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Result<()> {
             app.input_mode = InputMode::Normal;
             handle_normal_mode(app, key)
         }
+        InputMode::Browsing(mut browser) => {
+            handle_browser_mode(app, key, &mut browser)?;
+            if matches!(app.input_mode, InputMode::Normal) {
+                return Ok(());
+            }
+            app.input_mode = InputMode::Browsing(browser);
+            Ok(())
+        }
         InputMode::Editing {
             prompt,
             mut buffer,
@@ -290,11 +298,6 @@ struct SettingsItem {
 fn settings_items(app: &App) -> Vec<SettingsItem> {
     vec![
         SettingsItem {
-            label: "Configure game paths",
-            kind: SettingsItemKind::ActionSetupPaths,
-            checked: None,
-        },
-        SettingsItem {
             label: "Confirm profile delete",
             kind: SettingsItemKind::ToggleProfileDelete,
             checked: Some(app.app_config.confirm_profile_delete),
@@ -303,6 +306,11 @@ fn settings_items(app: &App) -> Vec<SettingsItem> {
             label: "Confirm mod delete",
             kind: SettingsItemKind::ToggleModDelete,
             checked: Some(app.app_config.confirm_mod_delete),
+        },
+        SettingsItem {
+            label: "Configure game paths",
+            kind: SettingsItemKind::ActionSetupPaths,
+            checked: None,
         },
         SettingsItem {
             label: "AI Smart Ranking",
@@ -365,7 +373,6 @@ fn handle_normal_mode(app: &mut App, key: KeyEvent) -> Result<()> {
     match (key.code, key.modifiers) {
         (KeyCode::Char('q'), _) | (KeyCode::Char('Q'), _) => app.should_quit = true,
         (KeyCode::Char('i'), _) | (KeyCode::Char('I'), _) => app.enter_import_mode(),
-        (KeyCode::Char('g'), _) | (KeyCode::Char('G'), _) => app.enter_setup_game_root(),
         (KeyCode::Char('d'), _) | (KeyCode::Char('D'), _) => {
             if let Err(err) = app.deploy() {
                 app.status = format!("Deploy failed: {err}");
@@ -545,6 +552,78 @@ fn handle_log_mode(app: &mut App, key: KeyEvent) -> Result<()> {
     Ok(())
 }
 
+fn handle_browser_mode(app: &mut App, key: KeyEvent, browser: &mut PathBrowser) -> Result<()> {
+    let len = browser.entries.len();
+    match key.code {
+        KeyCode::Up | KeyCode::Char('k') | KeyCode::Char('K') => {
+            browser.selected = browser.selected.saturating_sub(1);
+        }
+        KeyCode::Down | KeyCode::Char('j') | KeyCode::Char('J') => {
+            if len > 0 {
+                browser.selected = (browser.selected + 1).min(len.saturating_sub(1));
+            }
+        }
+        KeyCode::PageUp => {
+            browser.selected = browser.selected.saturating_sub(10);
+        }
+        KeyCode::PageDown => {
+            if len > 0 {
+                browser.selected = (browser.selected + 10).min(len.saturating_sub(1));
+            }
+        }
+        KeyCode::Home => {
+            browser.selected = 0;
+        }
+        KeyCode::End => {
+            if len > 0 {
+                browser.selected = len.saturating_sub(1);
+            }
+        }
+        KeyCode::Left | KeyCode::Backspace => {
+            if let Some(parent) = browser.current.parent() {
+                browser.current = parent.to_path_buf();
+                browser.entries = app.build_path_browser_entries(browser.step, &browser.current);
+                browser.selected = 0;
+            }
+        }
+        KeyCode::Char('s') | KeyCode::Char('S') => {
+            if let Some(select) = browser
+                .entries
+                .iter()
+                .find(|entry| entry.kind == PathBrowserEntryKind::Select)
+            {
+                app.apply_path_browser_selection(browser.step, select.path.clone())?;
+                return Ok(());
+            }
+        }
+        KeyCode::Enter => {
+            if let Some(entry) = browser.entries.get(browser.selected) {
+                match entry.kind {
+                    PathBrowserEntryKind::Select => {
+                        app.apply_path_browser_selection(browser.step, entry.path.clone())?;
+                        return Ok(());
+                    }
+                    PathBrowserEntryKind::Parent | PathBrowserEntryKind::Dir => {
+                        browser.current = entry.path.clone();
+                        browser.entries =
+                            app.build_path_browser_entries(browser.step, &browser.current);
+                        browser.selected = 0;
+                    }
+                }
+            }
+        }
+        KeyCode::Esc => {
+            app.input_mode = InputMode::Normal;
+            if !app.paths_ready() {
+                app.status = "Setup required: open Menu (Esc) to configure paths".to_string();
+            }
+            return Ok(());
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
 fn handle_input_mode(
     app: &mut App,
     key: KeyEvent,
@@ -571,16 +650,11 @@ fn handle_input_mode(
                 InputPurpose::ImportProfile | InputPurpose::ImportPath => {
                     "Import cancelled".to_string()
                 }
-                InputPurpose::SetupGameRoot => "Game root setup cancelled".to_string(),
-                InputPurpose::SetupLarianDir => "User dir setup cancelled".to_string(),
                 InputPurpose::FilterMods => "Filter cancelled".to_string(),
             };
             app.set_toast(&cancel_message, ToastLevel::Warn, Duration::from_secs(2));
-            if matches!(
-                purpose,
-                InputPurpose::SetupGameRoot | InputPurpose::SetupLarianDir
-            ) {
-                app.status = "Setup required: press g to set game paths".to_string();
+            if matches!(purpose, InputPurpose::FilterMods) {
+                app.status = "Filter cancelled".to_string();
             }
         }
         KeyCode::Enter => {
@@ -1326,7 +1400,7 @@ fn draw(frame: &mut Frame<'_>, app: &mut App) {
     if !app.paths_ready() {
         rows.push(KvRow {
             label: "Setup".to_string(),
-            value: "Press g to configure".to_string(),
+            value: "Open Menu (Esc) to configure".to_string(),
             label_style,
             value_style: Style::default().fg(theme.warning),
         });
@@ -1540,6 +1614,9 @@ fn draw(frame: &mut Frame<'_>, app: &mut App) {
         draw_dialog(frame, app, &theme);
     }
     draw_toast(frame, app, &theme, chunks[1]);
+    if let InputMode::Browsing(browser) = &app.input_mode {
+        draw_path_browser(frame, app, &theme, browser);
+    }
     if app.smart_rank_preview.is_some() {
         draw_smart_rank_preview(frame, app, &theme);
     }
@@ -2199,6 +2276,121 @@ fn draw_settings_menu(frame: &mut Frame<'_>, app: &App, theme: &Theme) {
     frame.render_widget(menu_widget, menu_area);
 }
 
+fn draw_path_browser(frame: &mut Frame<'_>, _app: &App, theme: &Theme, browser: &PathBrowser) {
+    let area = frame.size();
+    let width = (area.width.saturating_sub(4)).clamp(46, 86);
+    let height = (area.height.saturating_sub(4)).clamp(12, 22);
+    let x = area.x + (area.width.saturating_sub(width)) / 2;
+    let y = area.y + (area.height.saturating_sub(height)) / 2;
+    let modal = Rect::new(x, y, width, height);
+
+    frame.render_widget(Clear, modal);
+
+    let title = match browser.step {
+        SetupStep::GameRoot => "Select BG3 install root",
+        SetupStep::LarianDir => "Select Larian data dir",
+    };
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(theme.accent_soft))
+        .style(Style::default().bg(theme.header_bg))
+        .title(Span::styled(
+            title,
+            Style::default()
+                .fg(theme.accent)
+                .add_modifier(Modifier::BOLD),
+        ));
+    let inner = block.inner(modal);
+    frame.render_widget(block, modal);
+
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(2), Constraint::Min(5), Constraint::Length(2)])
+        .split(inner);
+
+    let current_label = format!(
+        "Current: {}",
+        truncate_text(&browser.current.display().to_string(), chunks[0].width as usize)
+    );
+    let header = Paragraph::new(Line::from(Span::styled(
+        current_label,
+        Style::default().fg(theme.muted),
+    )));
+    frame.render_widget(header, chunks[0]);
+
+    let entries: Vec<ListItem> = browser
+        .entries
+        .iter()
+        .map(|entry| {
+            let style = match entry.kind {
+                PathBrowserEntryKind::Select => Style::default()
+                    .fg(theme.success)
+                    .add_modifier(Modifier::BOLD),
+                PathBrowserEntryKind::Parent => Style::default().fg(theme.muted),
+                PathBrowserEntryKind::Dir => Style::default().fg(theme.text),
+            };
+            ListItem::new(Line::from(Span::styled(entry.label.clone(), style)))
+        })
+        .collect();
+    let highlight_style = Style::default()
+        .bg(theme.accent_soft)
+        .fg(Color::Black)
+        .add_modifier(Modifier::BOLD);
+    let list = List::new(entries)
+        .style(Style::default().bg(theme.header_bg))
+        .highlight_style(highlight_style)
+        .highlight_symbol("");
+    let mut state = ListState::default();
+    let view_height = chunks[1].height as usize;
+    let total = browser.entries.len();
+    let mut offset = 0usize;
+    if total > view_height && view_height > 0 {
+        if browser.selected >= view_height {
+            offset = browser.selected + 1 - view_height;
+        }
+        let max_offset = total.saturating_sub(view_height);
+        if offset > max_offset {
+            offset = max_offset;
+        }
+    }
+    if total > 0 {
+        let selected = browser.selected.saturating_sub(offset);
+        state.select(Some(selected));
+        *state.offset_mut() = offset;
+    }
+    frame.render_stateful_widget(list, chunks[1], &mut state);
+
+    if total > view_height && view_height > 0 {
+        let scroll_len = total.saturating_sub(view_height).saturating_add(1);
+        let mut scroll_state = ScrollbarState::new(scroll_len)
+            .position(offset)
+            .viewport_content_length(view_height);
+        let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
+            .track_symbol(Some("░"))
+            .thumb_symbol("▓")
+            .begin_symbol(None)
+            .end_symbol(None)
+            .track_style(Style::default().fg(theme.border))
+            .thumb_style(Style::default().fg(theme.accent));
+        let scroll_area = Rect {
+            x: chunks[1].x + chunks[1].width.saturating_sub(1),
+            y: chunks[1].y,
+            width: 1,
+            height: chunks[1].height,
+        };
+        frame.render_stateful_widget(scrollbar, scroll_area, &mut scroll_state);
+    }
+
+    let footer = "Enter: open/select  Backspace: up  S: select  Esc: cancel";
+    let footer_line = truncate_text(footer, chunks[2].width as usize);
+    let footer_widget = Paragraph::new(Line::from(Span::styled(
+        footer_line,
+        Style::default().fg(theme.muted),
+    )));
+    frame.render_widget(footer_widget, chunks[2]);
+}
+
 struct SmartRankPreviewRender {
     lines: Vec<Line<'static>>,
     scroll: Option<SmartRankScroll>,
@@ -2663,10 +2855,6 @@ fn build_settings_menu_lines(app: &App, theme: &Theme, selected: usize) -> Vec<L
         Style::default().fg(theme.muted),
     )));
     lines.push(Line::from(Span::styled(
-        "g: configure paths",
-        Style::default().fg(theme.muted),
-    )));
-    lines.push(Line::from(Span::styled(
         "Ctrl+F: filter    Ctrl+L: clear",
         Style::default().fg(theme.muted),
     )));
@@ -2777,14 +2965,6 @@ fn mode_toast(app: &App) -> Option<(String, ToastLevel)> {
                     let hint = if *auto_submit { auto_hint } else { default_hint };
                     format!("Import mod: {path} | {hint}")
                 }
-                InputPurpose::SetupGameRoot => {
-                    let path = value("<path>");
-                    format!("Set game root: {path} | {hint}")
-                }
-                InputPurpose::SetupLarianDir => {
-                    let path = value("<path>");
-                    format!("Set user dir: {path} | {hint}")
-                }
                 InputPurpose::FilterMods => {
                     let filter = value("<all>");
                     format!("Filter mods: {filter} | {hint}")
@@ -2792,6 +2972,7 @@ fn mode_toast(app: &App) -> Option<(String, ToastLevel)> {
             };
             Some((message, ToastLevel::Info))
         }
+        InputMode::Browsing(_) => None,
         InputMode::Normal => {
             if app.move_mode {
                 Some((
@@ -3892,10 +4073,6 @@ fn legend_rows(app: &App) -> Vec<LegendRow> {
             ]);
         }
     }
-    rows.push(LegendRow {
-        key: "g".to_string(),
-        action: "Configure paths".to_string(),
-    });
     rows.push(LegendRow {
         key: "Esc".to_string(),
         action: "Menu".to_string(),

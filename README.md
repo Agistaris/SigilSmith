@@ -73,8 +73,7 @@ cargo run
 - `Up/Down` choose winner (Overrides)
 - `Backspace` clear conflict override (Overrides)
 - `PgUp/PgDn` scroll log
-- `Esc` settings menu (AI Smart Ranking, confirmations, keybinds)
-- `g` set game paths
+- `Esc` settings menu (AI Smart Ranking, confirmations, configure paths, keybinds)
 - `b` rollback last backup
 - `Del` remove mod from library
 - `d` deploy to game
@@ -121,5 +120,8 @@ Global app config (active game) lives at:
 ```
 
 On first launch SigilSmith auto-detects your BG3 paths. If it cannot find them,
-press `g` or open the menu with `Esc` and choose "Configure game paths".
+open the menu with `Esc` and choose "Configure game paths".
 You can also edit the config files directly if BG3 is installed in a non-standard path.
+
+If auto-detect fails, SigilSmith opens a path browser. Use arrows to navigate,
+Enter to open/select, Backspace to go up, and S to select the current folder.

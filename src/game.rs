@@ -34,29 +34,7 @@ impl GameId {
         }
     }
 
-    pub fn root_prompt(self) -> &'static str {
-        match self {
-            GameId::Bg3 => "Game install root",
-        }
-    }
-
-    pub fn user_dir_prompt(self) -> &'static str {
-        match self {
-            GameId::Bg3 => "Larian data dir",
-        }
-    }
-
-    pub fn root_hint(self) -> &'static str {
-        match self {
-            GameId::Bg3 => "Setup: enter BG3 install root (contains Data/ and bin/)",
-        }
-    }
-
-    pub fn user_dir_hint(self) -> &'static str {
-        match self {
-            GameId::Bg3 => "Setup: enter Larian data dir (contains PlayerProfiles/)",
-        }
-    }
+    // Setup prompts are handled by the path browser UI.
 }
 
 pub fn supported_games() -> Vec<GameId> {

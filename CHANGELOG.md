@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.4.2
+
+- Added guided path browser for BG3 install + Larian data directories.
+- Removed accidental path hotkey; configure paths from the menu.
+- Setup flow now shows clear status + auto-detect toast on success.
+
 ## 0.4.1
 
 - Setup onboarding improvements with clearer status and path auto-detect retry.

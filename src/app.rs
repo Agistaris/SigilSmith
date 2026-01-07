@@ -25,14 +25,13 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 use walkdir::WalkDir;
+use directories::BaseDirs;
 
 use blake3::Hasher;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum InputPurpose {
     ImportPath,
-    SetupGameRoot,
-    SetupLarianDir,
     CreateProfile,
     RenameProfile { original: String },
     DuplicateProfile { source: String },
@@ -51,6 +50,7 @@ pub enum InputMode {
         auto_submit: bool,
         last_edit_at: Instant,
     },
+    Browsing(PathBrowser),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -59,6 +59,27 @@ pub enum SetupStep {
     LarianDir,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PathBrowserEntryKind {
+    Select,
+    Parent,
+    Dir,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PathBrowserEntry {
+    pub label: String,
+    pub path: PathBuf,
+    pub kind: PathBrowserEntryKind,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PathBrowser {
+    pub step: SetupStep,
+    pub current: PathBuf,
+    pub entries: Vec<PathBrowserEntry>,
+    pub selected: usize,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DialogChoice {
@@ -469,14 +490,15 @@ impl App {
         app.log_info("Detecting game paths...".to_string());
         if let Some(error) = setup_error {
             app.log_warn(format!("Path auto-detect failed: {error}"));
-            app.status = "Setup required: press g to configure paths".to_string();
+            app.status = "Setup required: open Menu (Esc) to configure paths".to_string();
         } else if app.paths_ready() {
-            app.status = "Paths ready (press g to change)".to_string();
+            app.status = "Paths ready (Esc → Menu to change)".to_string();
             app.log_info(format!(
                 "Paths ready: root={} user={}",
                 app.config.game_root.display(),
                 app.config.larian_dir.display()
             ));
+            app.set_toast("Paths detected: BG3 + Larian data", ToastLevel::Info, Duration::from_secs(3));
         }
         app.ensure_setup();
         app.sync_native_mods();
@@ -1815,26 +1837,115 @@ impl App {
 
     pub fn enter_setup_game_root(&mut self) {
         self.move_mode = false;
-        self.input_mode = InputMode::Editing {
-            prompt: self.game_id.root_prompt().to_string(),
-            buffer: String::new(),
-            purpose: InputPurpose::SetupGameRoot,
-            auto_submit: false,
-            last_edit_at: Instant::now(),
-        };
-        self.status = self.game_id.root_hint().to_string();
+        self.open_path_browser(SetupStep::GameRoot);
     }
 
     pub fn enter_setup_larian_dir(&mut self) {
         self.move_mode = false;
-        self.input_mode = InputMode::Editing {
-            prompt: self.game_id.user_dir_prompt().to_string(),
-            buffer: String::new(),
-            purpose: InputPurpose::SetupLarianDir,
-            auto_submit: false,
-            last_edit_at: Instant::now(),
+        self.open_path_browser(SetupStep::LarianDir);
+    }
+
+    fn open_path_browser(&mut self, step: SetupStep) {
+        let current = self.path_browser_start(step);
+        let entries = self.build_path_browser_entries(step, &current);
+        let title = match step {
+            SetupStep::GameRoot => "Select BG3 install root (Data/ + bin/)",
+            SetupStep::LarianDir => "Select Larian data dir (PlayerProfiles/)",
         };
-        self.status = self.game_id.user_dir_hint().to_string();
+        self.input_mode = InputMode::Browsing(PathBrowser {
+            step,
+            current,
+            entries,
+            selected: 0,
+        });
+        self.status = title.to_string();
+    }
+
+    fn path_browser_start(&self, step: SetupStep) -> PathBuf {
+        let home = BaseDirs::new()
+            .map(|base| base.home_dir().to_path_buf())
+            .unwrap_or_else(|| PathBuf::from("/"));
+        let mut candidates = Vec::new();
+        match step {
+            SetupStep::GameRoot => {
+                if !self.config.game_root.as_os_str().is_empty() {
+                    candidates.push(self.config.game_root.clone());
+                }
+                candidates.push(home.join(".steam/steam/steamapps/common"));
+                candidates.push(home.join(".local/share/Steam/steamapps/common"));
+            }
+            SetupStep::LarianDir => {
+                if !self.config.larian_dir.as_os_str().is_empty() {
+                    candidates.push(self.config.larian_dir.clone());
+                }
+                candidates.push(home.join(".local/share/Larian Studios"));
+                candidates.push(home.join(
+                    ".local/share/Steam/steamapps/compatdata/1086940/pfx/drive_c/users/steamuser/AppData/Local/Larian Studios",
+                ));
+            }
+        }
+        candidates
+            .into_iter()
+            .find(|path| path.is_dir())
+            .unwrap_or(home)
+    }
+
+    fn path_browser_selectable(&self, step: SetupStep, path: &PathBuf) -> bool {
+        match step {
+            SetupStep::GameRoot => game::looks_like_game_root(self.game_id, path),
+            SetupStep::LarianDir => game::looks_like_user_dir(self.game_id, path),
+        }
+    }
+
+    pub(crate) fn build_path_browser_entries(
+        &self,
+        step: SetupStep,
+        current: &PathBuf,
+    ) -> Vec<PathBrowserEntry> {
+        let mut entries = Vec::new();
+        if self.path_browser_selectable(step, current) {
+            entries.push(PathBrowserEntry {
+                label: "✓ Select this folder".to_string(),
+                path: current.clone(),
+                kind: PathBrowserEntryKind::Select,
+            });
+        }
+        if let Some(parent) = current.parent() {
+            entries.push(PathBrowserEntry {
+                label: "..".to_string(),
+                path: parent.to_path_buf(),
+                kind: PathBrowserEntryKind::Parent,
+            });
+        }
+        let mut dirs = Vec::new();
+        if let Ok(read_dir) = fs::read_dir(current) {
+            for entry in read_dir.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    let name = path
+                        .file_name()
+                        .and_then(|name| name.to_str())
+                        .map(|name| format!("{name}/"))
+                        .unwrap_or_else(|| path.display().to_string());
+                    dirs.push(PathBrowserEntry {
+                        label: name,
+                        path,
+                        kind: PathBrowserEntryKind::Dir,
+                    });
+                }
+            }
+        }
+        dirs.sort_by(|a, b| a.label.to_lowercase().cmp(&b.label.to_lowercase()));
+        entries.extend(dirs);
+        entries
+    }
+
+    pub(crate) fn apply_path_browser_selection(&mut self, step: SetupStep, path: PathBuf) -> Result<()> {
+        self.input_mode = InputMode::Normal;
+        match step {
+            SetupStep::GameRoot => self.submit_game_root_path(path),
+            SetupStep::LarianDir => self.submit_larian_dir_path(path),
+        }
     }
 
     pub fn enter_import_mode(&mut self) {
@@ -1888,8 +1999,6 @@ impl App {
     pub fn handle_submit(&mut self, purpose: InputPurpose, value: String) -> Result<()> {
         match purpose {
             InputPurpose::ImportPath => self.import_mod(value),
-            InputPurpose::SetupGameRoot => self.submit_game_root(value),
-            InputPurpose::SetupLarianDir => self.submit_larian_dir(value),
             InputPurpose::CreateProfile => self.create_profile(value),
             InputPurpose::RenameProfile { original } => self.rename_profile(original, value),
             InputPurpose::DuplicateProfile { source } => self.duplicate_profile(source, value),
@@ -1962,19 +2071,18 @@ impl App {
         Ok(())
     }
 
-    fn submit_game_root(&mut self, raw_path: String) -> Result<()> {
-        let path = expand_tilde(raw_path.trim());
+    fn submit_game_root_path(&mut self, path: PathBuf) -> Result<()> {
         if !path.exists() {
             self.status = format!("Path not found: {}", path.display());
             self.log_warn(format!("Game root not found: {}", path.display()));
-            self.enter_setup_game_root();
+            self.open_path_browser(SetupStep::GameRoot);
             return Ok(());
         }
 
         if !game::looks_like_game_root(self.game_id, &path) {
             self.status = "Invalid game root: expected Data/ and bin/".to_string();
             self.log_warn(format!("Invalid game root: {}", path.display()));
-            self.enter_setup_game_root();
+            self.open_path_browser(SetupStep::GameRoot);
             return Ok(());
         }
 
@@ -1985,10 +2093,11 @@ impl App {
                 self.config.save()?;
                 self.status = "Game paths set".to_string();
                 self.log_info(format!("Game root set: {}", path.display()));
+                self.set_toast("Paths updated", ToastLevel::Info, Duration::from_secs(2));
             }
             Err(err) => {
                 self.status =
-                    "Game root set. Larian data dir not found; please enter it.".to_string();
+                    "Game root set. Larian data dir not found; please select it.".to_string();
                 self.log_warn(format!("Larian dir auto-detect failed: {err}"));
                 self.start_setup(SetupStep::LarianDir);
             }
@@ -1997,24 +2106,23 @@ impl App {
         Ok(())
     }
 
-    fn submit_larian_dir(&mut self, raw_path: String) -> Result<()> {
-        let path = expand_tilde(raw_path.trim());
+    fn submit_larian_dir_path(&mut self, path: PathBuf) -> Result<()> {
         if !path.exists() {
             self.status = format!("Path not found: {}", path.display());
             self.log_warn(format!("Larian dir not found: {}", path.display()));
-            self.enter_setup_larian_dir();
+            self.open_path_browser(SetupStep::LarianDir);
             return Ok(());
         }
 
         if !game::looks_like_user_dir(self.game_id, &path) {
             self.status = "Invalid Larian dir: expected PlayerProfiles/".to_string();
             self.log_warn(format!("Invalid Larian dir: {}", path.display()));
-            self.enter_setup_larian_dir();
+            self.open_path_browser(SetupStep::LarianDir);
             return Ok(());
         }
 
         if !game::looks_like_game_root(self.game_id, &self.config.game_root) {
-            self.status = "Game root missing: enter BG3 install root".to_string();
+            self.status = "Game root missing: select BG3 install root".to_string();
             self.log_warn("Game root missing while setting Larian dir".to_string());
             self.start_setup(SetupStep::GameRoot);
             return Ok(());
@@ -2024,6 +2132,7 @@ impl App {
         self.config.save()?;
         self.status = "Game paths set".to_string();
         self.log_info(format!("Larian dir set: {}", path.display()));
+        self.set_toast("Paths updated", ToastLevel::Info, Duration::from_secs(2));
         Ok(())
     }
 
@@ -3418,7 +3527,7 @@ impl App {
 
     fn queue_deploy(&mut self, reason: &str) {
         if !self.paths_ready() {
-            self.status = "Game paths not set: press g to configure".to_string();
+            self.status = "Game paths not set: open Menu (Esc) to configure".to_string();
             self.log_warn("Deploy skipped: game paths not set".to_string());
             return;
         }
@@ -3440,7 +3549,7 @@ impl App {
 
     fn queue_deploy_with_options(&mut self, reason: &str, backup: bool) {
         if !self.paths_ready() {
-            self.status = "Game paths not set: press g to configure".to_string();
+            self.status = "Game paths not set: open Menu (Esc) to configure".to_string();
             self.log_warn("Deploy skipped: game paths not set".to_string());
             return;
         }
