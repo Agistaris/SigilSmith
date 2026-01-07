@@ -274,6 +274,7 @@ fn handle_smart_rank_preview(app: &mut App, key: KeyEvent) -> Result<()> {
 
 #[derive(Debug, Clone, Copy)]
 enum SettingsItemKind {
+    ActionSetupPaths,
     ToggleProfileDelete,
     ToggleModDelete,
     ActionSmartRank,
@@ -288,6 +289,11 @@ struct SettingsItem {
 
 fn settings_items(app: &App) -> Vec<SettingsItem> {
     vec![
+        SettingsItem {
+            label: "Configure game paths",
+            kind: SettingsItemKind::ActionSetupPaths,
+            checked: None,
+        },
         SettingsItem {
             label: "Confirm profile delete",
             kind: SettingsItemKind::ToggleProfileDelete,
@@ -325,6 +331,10 @@ fn handle_settings_menu(app: &mut App, key: KeyEvent) -> Result<()> {
         KeyCode::Enter | KeyCode::Char(' ') => {
             if let Some(item) = items.get(menu.selected) {
                 match item.kind {
+                    SettingsItemKind::ActionSetupPaths => {
+                        app.close_settings_menu();
+                        app.enter_setup_game_root();
+                    }
                     SettingsItemKind::ToggleProfileDelete => {
                         if let Err(err) = app.toggle_confirm_profile_delete() {
                             app.status = format!("Settings update failed: {err}");
@@ -1313,6 +1323,14 @@ fn draw(frame: &mut Frame<'_>, app: &mut App) {
         label_style,
         value_style: Style::default().fg(theme.muted),
     });
+    if !app.paths_ready() {
+        rows.push(KvRow {
+            label: "Setup".to_string(),
+            value: "Press g to configure".to_string(),
+            label_style,
+            value_style: Style::default().fg(theme.warning),
+        });
+    }
     let legend_block = theme.subpanel("Legend");
     let legend_fill = Block::default().style(Style::default().bg(theme.subpanel_bg));
     frame.render_widget(legend_fill, context_chunks[1]);
@@ -2608,6 +2626,13 @@ fn build_settings_menu_lines(app: &App, theme: &Theme, selected: usize) -> Vec<L
             Style::default().fg(theme.text)
         };
         let row = match item.kind {
+            SettingsItemKind::ActionSetupPaths | SettingsItemKind::ActionSmartRank => vec![
+                Span::styled(prefix.to_string(), style),
+                Span::raw(" "),
+                Span::styled("▶", Style::default().fg(theme.accent)),
+                Span::raw(" "),
+                Span::styled(item.label.to_string(), style),
+            ],
             SettingsItemKind::ToggleProfileDelete | SettingsItemKind::ToggleModDelete => {
                 let marker = if item.checked.unwrap_or(false) {
                     "[x]"
@@ -2622,13 +2647,6 @@ fn build_settings_menu_lines(app: &App, theme: &Theme, selected: usize) -> Vec<L
                     Span::styled(item.label.to_string(), style),
                 ]
             }
-            SettingsItemKind::ActionSmartRank => vec![
-                Span::styled(prefix.to_string(), style),
-                Span::raw(" "),
-                Span::styled("▶", Style::default().fg(theme.accent)),
-                Span::raw(" "),
-                Span::styled(item.label.to_string(), style),
-            ],
         };
         lines.push(Line::from(row));
     }
@@ -2645,6 +2663,10 @@ fn build_settings_menu_lines(app: &App, theme: &Theme, selected: usize) -> Vec<L
         Style::default().fg(theme.muted),
     )));
     lines.push(Line::from(Span::styled(
+        "g: configure paths",
+        Style::default().fg(theme.muted),
+    )));
+    lines.push(Line::from(Span::styled(
         "Ctrl+F: filter    Ctrl+L: clear",
         Style::default().fg(theme.muted),
     )));
@@ -2658,6 +2680,42 @@ fn build_settings_menu_lines(app: &App, theme: &Theme, selected: usize) -> Vec<L
     )));
     lines.push(Line::from(Span::styled(
         "←/→: select override  ↑/↓: choose",
+        Style::default().fg(theme.muted),
+    )));
+
+    let root = if app.config.game_root.as_os_str().is_empty() {
+        "<not set>".to_string()
+    } else {
+        app.config.game_root.display().to_string()
+    };
+    let user_dir = if app.config.larian_dir.as_os_str().is_empty() {
+        "<not set>".to_string()
+    } else {
+        app.config.larian_dir.display().to_string()
+    };
+    let config_path = app.config.data_dir.join("config.json");
+    let path_width = 50usize;
+
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        "Paths",
+        Style::default()
+            .fg(theme.accent)
+            .add_modifier(Modifier::BOLD),
+    )));
+    lines.push(Line::from(Span::styled(
+        format!("Root: {}", truncate_text(&root, path_width)),
+        Style::default().fg(theme.muted),
+    )));
+    lines.push(Line::from(Span::styled(
+        format!("User: {}", truncate_text(&user_dir, path_width)),
+        Style::default().fg(theme.muted),
+    )));
+    lines.push(Line::from(Span::styled(
+        format!(
+            "Config: {}",
+            truncate_text(&config_path.display().to_string(), path_width)
+        ),
         Style::default().fg(theme.muted),
     )));
 
@@ -3321,6 +3379,12 @@ fn build_explorer_details(app: &App, theme: &Theme, width: usize) -> Vec<Line<'s
                     label_style,
                     value_style,
                 });
+                rows.push(KvRow {
+                    label: "Config".to_string(),
+                    value: app.config.data_dir.join("config.json").display().to_string(),
+                    label_style,
+                    value_style,
+                });
                 let status_style =
                     Style::default().fg(if app.paths_ready() { theme.success } else { theme.warning });
                 let status_label = if app.paths_ready() {
@@ -3828,6 +3892,14 @@ fn legend_rows(app: &App) -> Vec<LegendRow> {
             ]);
         }
     }
+    rows.push(LegendRow {
+        key: "g".to_string(),
+        action: "Configure paths".to_string(),
+    });
+    rows.push(LegendRow {
+        key: "Esc".to_string(),
+        action: "Menu".to_string(),
+    });
     rows
 }
 

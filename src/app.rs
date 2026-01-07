@@ -368,7 +368,14 @@ impl App {
             Some(&config.game_root),
             Some(&config.larian_dir),
         ) {
-            setup_error = Some(err.to_string());
+            // Retry auto-detect when stored paths are missing or stale.
+            if let Ok(paths) = game::detect_paths(game_id, None, None) {
+                config.game_root = paths.game_root;
+                config.larian_dir = paths.larian_dir;
+                let _ = config.save();
+            } else {
+                setup_error = Some(err.to_string());
+            }
         }
 
         let mut library = Library::load_or_create(&config.data_dir)?;
@@ -459,8 +466,17 @@ impl App {
 
         let mod_count = app.library.mods.len();
         app.log_info(format!("Library loaded: {mod_count} mod(s)"));
+        app.log_info("Detecting game paths...".to_string());
         if let Some(error) = setup_error {
             app.log_warn(format!("Path auto-detect failed: {error}"));
+            app.status = "Setup required: press g to configure paths".to_string();
+        } else if app.paths_ready() {
+            app.status = "Paths ready (press g to change)".to_string();
+            app.log_info(format!(
+                "Paths ready: root={} user={}",
+                app.config.game_root.display(),
+                app.config.larian_dir.display()
+            ));
         }
         app.ensure_setup();
         app.sync_native_mods();
