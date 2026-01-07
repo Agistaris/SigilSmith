@@ -6,6 +6,7 @@ This repo uses Cargo for versioning and `packaging/` for Linux artifacts.
 
 - Update `Cargo.toml` version.
 - Update `CHANGELOG.md` with release notes.
+- Ensure screenshots in `docs/` are up to date (see README).
 
 ## 2) Build + Verify
 
@@ -47,8 +48,9 @@ git push -u origin main
 4) Tag: `vX.Y.Z` (create tag on publish).
 5) Title: `SigilSmith vX.Y.Z`.
 6) Paste the `CHANGELOG.md` entry into the release notes.
-7) Upload all files from `dist/`.
-8) Publish.
+7) Add screenshots + quick install steps to the release body (keep concise).
+8) Upload all files from `dist/`.
+9) Publish.
 
 ## 4a) Release-only Public Repo
 

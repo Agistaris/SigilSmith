@@ -2460,13 +2460,12 @@ fn build_smart_rank_preview_render(
                     entry.to - entry.from
                 };
                 let is_major = highlight_delta > 0 && delta == highlight_delta;
-                let mod_text = truncate_text(&entry.name, mod_width);
-                let created_text = format_date_cell(entry.created_at);
-                let added_text = format_date_cell(Some(entry.added_at));
-                let current_text =
-                    format!("{:>width$}", entry.from + 1, width = current_width);
-                let proposed_text =
-                    format!("{:>width$}", entry.to + 1, width = proposed_width);
+                let mod_text = format_padded_cell(&entry.name, mod_width);
+                let created_text = format_padded_cell(&format_date_cell(entry.created_at), created_width);
+                let added_text =
+                    format_padded_cell(&format_date_cell(Some(entry.added_at)), added_width);
+                let current_text = format!("{:>width$}", entry.from + 1, width = current_width);
+                let proposed_text = format!("{:>width$}", entry.to + 1, width = proposed_width);
                 let row_bg = if index % 2 == 1 {
                     Some(theme.row_alt_bg)
                 } else {
@@ -2582,6 +2581,12 @@ fn build_smart_rank_preview_render(
         lines,
         scroll: scroll_meta,
     }
+}
+
+fn format_padded_cell(value: &str, width: usize) -> String {
+    let text = truncate_text(value, width);
+    let pad = width.saturating_sub(text.chars().count());
+    format!("{text}{}", " ".repeat(pad))
 }
 
 fn build_settings_menu_lines(app: &App, theme: &Theme, selected: usize) -> Vec<Line<'static>> {

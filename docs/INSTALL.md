@@ -17,6 +17,8 @@ chmod +x SigilSmith-*.AppImage
 ./SigilSmith-*.AppImage
 ```
 
+Tip: This is a terminal UI. If you launch from a file manager, choose “Run in Konsole” or launch from a terminal.
+
 ## .deb
 
 ```bash

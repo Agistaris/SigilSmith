@@ -2,7 +2,7 @@
 
 ## ModForge Page
 - [ ] Add license file in repo (MIT or Apache-2.0 recommended)
-- [ ] Add screenshots (TUI + import + log)
+- [ ] Add screenshots (overview + overrides + smart ranking)
 - [ ] Add short + long description (see modforge-listing.md)
 - [ ] Add install steps + requirements
 - [ ] Declare that no game assets are included

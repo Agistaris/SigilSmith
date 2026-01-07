@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.4.0
+
+- Major UI refresh with refined header/footer, full-width striping, and cohesive panel layout.
+- Overrides workflow polish: dedicated Override Actions panel, debounced swap overlay, clearer legends.
+- AI Smart Ranking preview with scrollable diff view, dates, conflict stats, and warnings.
+- Metadata accuracy: Created dates now read from meta.lsx/info.json (incl. Zstd paks) with background refresh.
+- Native mod sync improvements + self-heal for missing pak files before deploy.
+- Import pipeline updates (zip/7z detection + loose metadata persistence).
+
 ## 0.3.3
 
 - Adds AI Smart Ranking preview (pak + loose scan) with apply/cancel.

@@ -6,6 +6,26 @@ SigilSmith is a Linux-first TUI mod manager for Baldur's Gate 3. It focuses on n
 - Loose files -> `Baldur's Gate 3/Data/Generated` or `Baldur's Gate 3/Data`
 - Bin overrides -> `Baldur's Gate 3/bin`
 
+Multi-game support is coming next via an open adapter template (BG3-first today, more games soon).
+
+## Screenshots
+
+![Overview](docs/01-hero-overview.png)
+![Profiles](docs/02-explorer-profiles.png)
+![Overrides](docs/03-overrides-mode.png)
+![Smart Ranking](docs/04-smart-ranking.png)
+![Settings](docs/05-settings-menu.png)
+![Import Toast](docs/06-import-toast.png)
+
+## Highlights
+
+- Drag & drop `.zip/.7z/.pak` or folders; automatic target detection.
+- Profiles + load order with deterministic override rules (last wins).
+- Override Actions panel with debounced swap overlay for manual conflict picks.
+- AI Smart Ranking preview (diff view + scroll) to suggest a stable order.
+- Created/Added dates from meta.lsx/info.json for better ordering heuristics.
+- Native mod.io entries show inline and can be managed alongside manual mods.
+
 ## Requirements
 
 - Rust (stable toolchain)
@@ -31,7 +51,7 @@ cargo run
 
 ## Keybinds
 
-- `Tab` cycle focus (Explorer/Mods/Conflicts)
+- `Tab` cycle focus (Explorer/Mods/Overrides/Log)
 - `Enter` select/expand in Explorer
 - `a` new profile (Explorer)
 - `r` or `F2` rename profile (Explorer)
@@ -49,9 +69,11 @@ cargo run
 - `3` override: Generated
 - `4` override: Data
 - `5` override: Bin
-- `Left/Right/Enter` cycle conflict winner (Conflicts)
-- `Backspace` clear conflict override (Conflicts)
+- `Left/Right` cycle overrides (Overrides)
+- `Up/Down` choose winner (Overrides)
+- `Backspace` clear conflict override (Overrides)
 - `PgUp/PgDn` scroll log
+- `Esc` settings menu (AI Smart Ranking, confirmations, keybinds)
 - `g` set game paths
 - `b` rollback last backup
 - `Del` remove mod from library

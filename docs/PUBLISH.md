@@ -11,6 +11,20 @@ Use GitHub Releases as the canonical download source, then mirror to mod sites.
 5) Link back to the GitHub Release page for full artifacts and checksums.
 6) Paste the release notes from `CHANGELOG.md`.
 
+## ModForge
+
+1) Use the copy in `modforge/modforge-listing.md`.
+2) Add the latest screenshots (Overview, Overrides, Smart Ranking).
+3) Upload the AppImage or tar.gz.
+4) Link back to GitHub Releases for checksums + alternate formats.
+
+## CurseForge
+
+1) Create a BG3 Tools/Utilities entry.
+2) Paste the same description + features from ModForge.
+3) Upload the AppImage or tar.gz.
+4) Link to GitHub Releases for other formats + checksums.
+
 ## mod.io (If Tools Are Allowed)
 
 If the BG3 mod.io category allows tools/utility uploads:
