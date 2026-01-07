@@ -5,9 +5,11 @@ use crate::{
     game::{self, GameId},
     importer,
     library::{
-        FileOverride, normalize_label, Library, ModEntry, ModSource, PakInfo, ProfileEntry,
+        library_mod_root, normalize_times, path_times, resolve_times, FileOverride,
+        normalize_label, InstallTarget, Library, ModEntry, ModSource, PakInfo, ProfileEntry,
         TargetKind, TargetOverride,
     },
+    metadata,
     native_pak,
     smart_rank,
 };
@@ -22,6 +24,7 @@ use std::{
     thread,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
+use walkdir::WalkDir;
 
 use blake3::Hasher;
 
@@ -122,6 +125,22 @@ enum DeployMessage {
     },
 }
 
+#[derive(Debug, Clone)]
+struct MetadataUpdate {
+    id: String,
+    created_at: Option<i64>,
+    modified_at: Option<i64>,
+}
+
+enum MetadataMessage {
+    Completed {
+        updates: Vec<MetadataUpdate>,
+    },
+    Failed {
+        error: String,
+    },
+}
+
 enum ConflictMessage {
     Completed {
         conflicts: Vec<deploy::ConflictEntry>,
@@ -196,6 +215,7 @@ pub enum Focus {
     Explorer,
     Mods,
     Conflicts,
+    Log,
 }
 
 #[derive(Debug, Clone)]
@@ -245,6 +265,9 @@ pub struct App {
     smart_rank_mode: Option<SmartRankMode>,
     smart_rank_tx: Sender<SmartRankMessage>,
     smart_rank_rx: Receiver<SmartRankMessage>,
+    metadata_tx: Sender<MetadataMessage>,
+    metadata_rx: Receiver<MetadataMessage>,
+    metadata_active: bool,
     import_queue: VecDeque<PathBuf>,
     import_active: Option<PathBuf>,
     import_tx: Sender<ImportMessage>,
@@ -266,6 +289,7 @@ pub struct App {
     pub conflicts: Vec<deploy::ConflictEntry>,
     pub conflict_selected: usize,
     pub override_swap: Option<OverrideSwap>,
+    pub pending_override: Option<PendingOverride>,
     explorer_game_expanded: HashSet<GameId>,
     explorer_profiles_expanded: HashSet<GameId>,
 }
@@ -282,10 +306,27 @@ pub struct OverrideSwap {
 }
 
 #[derive(Debug, Clone)]
+pub struct PendingOverride {
+    pub conflict_index: usize,
+    pub winner_id: String,
+    pub from: String,
+    pub to: String,
+    pub last_input: Instant,
+}
+
+#[derive(Debug, Clone)]
+pub struct OverrideSwapInfo {
+    pub from: String,
+    pub to: String,
+}
+
+#[derive(Debug, Clone)]
 pub struct SmartRankMove {
     pub name: String,
     pub from: usize,
     pub to: usize,
+    pub created_at: Option<i64>,
+    pub added_at: i64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -349,6 +390,7 @@ impl App {
         let (deploy_tx, deploy_rx) = mpsc::channel();
         let (conflict_tx, conflict_rx) = mpsc::channel();
         let (smart_rank_tx, smart_rank_rx) = mpsc::channel();
+        let (metadata_tx, metadata_rx) = mpsc::channel();
         let log_path = config.data_dir.join("sigilsmith.log");
 
         let mut app = Self {
@@ -378,6 +420,9 @@ impl App {
             smart_rank_mode: None,
             smart_rank_tx,
             smart_rank_rx,
+            metadata_tx,
+            metadata_rx,
+            metadata_active: false,
             import_queue: VecDeque::new(),
             import_active: None,
             import_tx,
@@ -399,6 +444,7 @@ impl App {
             conflicts: Vec::new(),
             conflict_selected: 0,
             override_swap: None,
+            pending_override: None,
             explorer_game_expanded: {
                 let mut expanded = HashSet::new();
                 expanded.insert(game_id);
@@ -418,6 +464,7 @@ impl App {
         }
         app.ensure_setup();
         app.sync_native_mods();
+        app.start_metadata_refresh();
         app.queue_conflict_scan("startup");
         if app.paths_ready() {
             app.start_smart_rank_scan(SmartRankMode::Warmup);
@@ -673,11 +720,18 @@ impl App {
             if from == to {
                 continue;
             }
-            let name = mod_map
-                .get(&id)
-                .map(|mod_entry| mod_entry.display_name())
-                .unwrap_or_else(|| id.clone());
-            moves.push(SmartRankMove { name, from, to });
+            let (name, created_at, added_at) = if let Some(mod_entry) = mod_map.get(&id) {
+                (mod_entry.display_name(), mod_entry.created_at, mod_entry.added_at)
+            } else {
+                (id.clone(), None, 0)
+            };
+            moves.push(SmartRankMove {
+                name,
+                from,
+                to,
+                created_at,
+                added_at,
+            });
         }
         moves.sort_by_key(|entry| entry.from);
 
@@ -764,26 +818,23 @@ impl App {
             || self.smart_rank_active
     }
 
-    pub fn override_swap_info(&self) -> Option<&OverrideSwap> {
+    pub fn override_swap_info(&self) -> Option<OverrideSwapInfo> {
         if self.focus != Focus::Conflicts {
             return None;
+        }
+        if let Some(pending) = &self.pending_override {
+            return Some(OverrideSwapInfo {
+                from: pending.from.clone(),
+                to: pending.to.clone(),
+            });
         }
         let Some(info) = self.override_swap.as_ref() else {
             return None;
         };
-        if !(self.deploy_active || self.deploy_pending) {
-            return None;
-        }
-        let is_override = self
-            .deploy_reason
-            .as_deref()
-            .map(|reason| reason.contains("conflict override"))
-            .unwrap_or(false);
-        if is_override {
-            Some(info)
-        } else {
-            None
-        }
+        Some(OverrideSwapInfo {
+            from: info.from.clone(),
+            to: info.to.clone(),
+        })
     }
 
     pub fn explorer_items(&self) -> Vec<ExplorerItem> {
@@ -967,13 +1018,15 @@ impl App {
         self.focus = match self.focus {
             Focus::Explorer => Focus::Mods,
             Focus::Mods => Focus::Conflicts,
-            Focus::Conflicts => Focus::Explorer,
+            Focus::Conflicts => Focus::Log,
+            Focus::Log => Focus::Explorer,
         };
         self.move_mode = false;
         self.status = match self.focus {
             Focus::Explorer => "Focus: explorer".to_string(),
             Focus::Mods => "Focus: mod stack".to_string(),
             Focus::Conflicts => "Focus: overrides".to_string(),
+            Focus::Log => "Focus: log".to_string(),
         };
     }
 
@@ -1417,6 +1470,7 @@ impl App {
             return;
         }
         self.conflict_selected -= 1;
+        self.pending_override = None;
     }
 
     pub fn conflict_move_down(&mut self) {
@@ -1424,6 +1478,7 @@ impl App {
             return;
         }
         self.conflict_selected += 1;
+        self.pending_override = None;
     }
 
     pub fn cycle_conflict_winner(&mut self, delta: i32) {
@@ -1441,22 +1496,37 @@ impl App {
         let len = conflict.candidates.len() as i32;
         let next_index = (current_index as i32 + delta).rem_euclid(len) as usize;
         let winner_id = conflict.candidates[next_index].mod_id.clone();
-        if let Err(err) = self.set_conflict_winner(self.conflict_selected, winner_id) {
-            self.status = format!("Override failed: {err}");
-            self.log_error(format!("Override failed: {err}"));
-        }
+        self.schedule_conflict_winner(winner_id);
     }
 
     pub fn clear_conflict_override(&mut self) {
         let Some(conflict) = self.conflicts.get(self.conflict_selected).cloned() else {
             return;
         };
-        if let Err(err) =
-            self.set_conflict_winner(self.conflict_selected, conflict.default_winner_id)
-        {
-            self.status = format!("Override failed: {err}");
-            self.log_error(format!("Override failed: {err}"));
+        self.schedule_conflict_winner(conflict.default_winner_id);
+    }
+
+    fn schedule_conflict_winner(&mut self, winner_id: String) {
+        let Some(conflict) = self.conflicts.get(self.conflict_selected) else {
+            return;
+        };
+        if winner_id == conflict.winner_id {
+            self.pending_override = None;
+            return;
         }
+        let to_name = conflict
+            .candidates
+            .iter()
+            .find(|candidate| candidate.mod_id == winner_id)
+            .map(|candidate| candidate.mod_name.clone())
+            .unwrap_or_else(|| winner_id.clone());
+        self.pending_override = Some(PendingOverride {
+            conflict_index: self.conflict_selected,
+            winner_id,
+            from: conflict.winner_name.clone(),
+            to: to_name,
+            last_input: Instant::now(),
+        });
     }
 
     fn set_conflict_winner(&mut self, index: usize, winner_id: String) -> Result<()> {
@@ -1683,6 +1753,21 @@ impl App {
         if let Some(toast) = &self.toast {
             if toast.expires_at <= Instant::now() {
                 self.toast = None;
+            }
+        }
+
+        if let Some(pending) = &self.pending_override {
+            if pending.last_input.elapsed() >= Duration::from_millis(250) {
+                let pending = self.pending_override.take().unwrap();
+                if pending.conflict_index >= self.conflicts.len() {
+                    return;
+                }
+                if let Err(err) =
+                    self.set_conflict_winner(pending.conflict_index, pending.winner_id)
+                {
+                    self.status = format!("Override failed: {err}");
+                    self.log_error(format!("Override failed: {err}"));
+                }
             }
         }
     }
@@ -2050,6 +2135,73 @@ impl App {
                 Err(TryRecvError::Empty) => break,
                 Err(TryRecvError::Disconnected) => {
                     self.smart_rank_active = false;
+                    break;
+                }
+            }
+        }
+    }
+
+    fn start_metadata_refresh(&mut self) {
+        if self.metadata_active {
+            return;
+        }
+        self.metadata_active = true;
+        let tx = self.metadata_tx.clone();
+        let config = self.config.clone();
+        let library = self.library.clone();
+        let game_id = self.game_id;
+        thread::spawn(move || {
+            let result = collect_metadata_updates(game_id, &config, &library);
+            let message = match result {
+                Ok(updates) => MetadataMessage::Completed { updates },
+                Err(err) => MetadataMessage::Failed {
+                    error: err.to_string(),
+                },
+            };
+            let _ = tx.send(message);
+        });
+    }
+
+    pub fn poll_metadata_refresh(&mut self) {
+        loop {
+            match self.metadata_rx.try_recv() {
+                Ok(message) => match message {
+                    MetadataMessage::Completed { updates } => {
+                        self.metadata_active = false;
+                        if updates.is_empty() {
+                            continue;
+                        }
+                        let mut updated = false;
+                        for update in updates {
+                            if let Some(mod_entry) = self
+                                .library
+                                .mods
+                                .iter_mut()
+                                .find(|entry| entry.id == update.id)
+                            {
+                                if mod_entry.created_at != update.created_at {
+                                    mod_entry.created_at = update.created_at;
+                                    updated = true;
+                                }
+                                if mod_entry.modified_at != update.modified_at {
+                                    mod_entry.modified_at = update.modified_at;
+                                    updated = true;
+                                }
+                            }
+                        }
+                        if updated {
+                            let _ = self.library.save(&self.config.data_dir);
+                            self.log_info("Metadata refresh applied".to_string());
+                        }
+                    }
+                    MetadataMessage::Failed { error } => {
+                        self.metadata_active = false;
+                        self.log_warn(format!("Metadata refresh failed: {error}"));
+                    }
+                },
+                Err(TryRecvError::Empty) => break,
+                Err(TryRecvError::Disconnected) => {
+                    self.metadata_active = false;
                     break;
                 }
             }
@@ -2670,6 +2822,29 @@ impl App {
                     }
                 }
             }
+            {
+                let pak_path = paths.larian_mods_dir.join(&filename);
+                let meta_created = metadata::read_meta_lsx_from_pak(&pak_path)
+                    .and_then(|meta| meta.created_at);
+                let (raw_created, raw_modified) = path_times(&pak_path);
+                let (created_at, modified_at) =
+                    resolve_times(meta_created, raw_created, raw_modified);
+                let should_refresh_created = meta_created.is_some()
+                    || mod_entry.created_at.is_none()
+                    || mod_entry.created_at == Some(mod_entry.added_at);
+                if should_refresh_created {
+                    if let Some(created_at) = created_at {
+                        mod_entry.created_at = Some(created_at);
+                    }
+                }
+                if let Some(modified_at) = modified_at {
+                    if mod_entry.modified_at.is_none()
+                        || mod_entry.modified_at.map(|value| value < modified_at).unwrap_or(true)
+                    {
+                        mod_entry.modified_at = Some(modified_at);
+                    }
+                }
+            }
             if changed {
                 updated_native_files += 1;
             }
@@ -2691,9 +2866,17 @@ impl App {
             }
             let filename = native_pak::resolve_native_pak_filename(&info, &native_pak_index)
                 .unwrap_or_else(|| format!("{}.pak", info.folder));
+            let pak_path = paths.larian_mods_dir.join(&filename);
+            let meta_created = metadata::read_meta_lsx_from_pak(&pak_path)
+                .and_then(|meta| meta.created_at);
+            let (raw_created, raw_modified) = path_times(&pak_path);
+            let (created_at, modified_at) =
+                resolve_times(meta_created, raw_created, raw_modified);
             let mod_entry = ModEntry {
                 id: uuid.clone(),
                 name: info.name.clone(),
+                created_at,
+                modified_at,
                 added_at: now_timestamp(),
                 targets: vec![crate::library::InstallTarget::Pak {
                     file: filename,
@@ -2805,6 +2988,75 @@ impl App {
                 self.log_info("Native mod order synced".to_string());
             }
         }
+    }
+
+    fn self_heal_missing_paks(&mut self) -> usize {
+        let mod_map = self.library.index_by_id();
+        let mut actions = Vec::new();
+        for (id, mod_entry) in &mod_map {
+            if mod_entry.is_native() {
+                continue;
+            }
+            let mut missing_pak = false;
+            let mut has_other_enabled = false;
+            for target in &mod_entry.targets {
+                let kind = target.kind();
+                if !mod_entry.is_target_enabled(kind) {
+                    continue;
+                }
+                match target {
+                    InstallTarget::Pak { file, .. } => {
+                        let source = library_mod_root(&self.config.data_dir)
+                            .join(id)
+                            .join(file);
+                        if !source.exists() {
+                            missing_pak = true;
+                        }
+                    }
+                    _ => has_other_enabled = true,
+                }
+            }
+            if missing_pak {
+                actions.push((
+                    id.clone(),
+                    mod_entry.display_name(),
+                    has_other_enabled,
+                ));
+            }
+        }
+
+        if actions.is_empty() {
+            return 0;
+        }
+
+        let mut changed = false;
+        if let Some(profile) = self.library.active_profile_mut() {
+            for (id, _, has_other_enabled) in &actions {
+                if *has_other_enabled {
+                    continue;
+                }
+                if let Some(entry) = profile.order.iter_mut().find(|entry| entry.id == *id) {
+                    if entry.enabled {
+                        entry.enabled = false;
+                        changed = true;
+                    }
+                }
+            }
+        }
+
+        for (id, _, _) in &actions {
+            if let Some(mod_entry) = self.library.mods.iter_mut().find(|entry| entry.id == *id) {
+                if set_target_override(mod_entry, TargetKind::Pak, false) {
+                    changed = true;
+                }
+            }
+        }
+
+        if changed {
+            let _ = self.library.save(&self.config.data_dir);
+        }
+
+        actions.len()
     }
 
     pub fn deploy(&mut self) -> Result<()> {
@@ -3242,6 +3494,18 @@ impl App {
             return;
         }
 
+        let healed = self.self_heal_missing_paks();
+        if healed > 0 {
+            self.log_warn(format!(
+                "Self-heal: disabled missing pak(s) for {healed} mod(s)"
+            ));
+            self.set_toast(
+                &format!("Self-heal: disabled {healed} missing mod(s)"),
+                ToastLevel::Warn,
+                Duration::from_secs(3),
+            );
+        }
+
         let reason = self
             .deploy_reason
             .take()
@@ -3297,6 +3561,7 @@ impl App {
 
     fn handle_conflict_message(&mut self, message: ConflictMessage) {
         self.conflict_active = false;
+        self.pending_override = None;
         match message {
             ConflictMessage::Completed { conflicts } => {
                 let count = conflicts.len();
@@ -3602,9 +3867,13 @@ fn append_log_file(path: &PathBuf, level: LogLevel, message: &str) -> std::io::R
 }
 
 fn build_unknown_entry(path: &PathBuf, label: &str) -> ModEntry {
+    let (raw_created, raw_modified) = path_times(path);
+    let (created_at, modified_at) = normalize_times(raw_created, raw_modified);
     ModEntry {
         id: unknown_id(path),
         name: label.to_string(),
+        created_at,
+        modified_at,
         added_at: now_timestamp(),
         targets: Vec::new(),
         target_overrides: Vec::new(),
@@ -3626,9 +3895,239 @@ fn unknown_id(path: &PathBuf) -> String {
     format!("unknown-{}", hasher.finalize().to_hex())
 }
 
+fn set_target_override(mod_entry: &mut ModEntry, kind: TargetKind, enabled: bool) -> bool {
+    if let Some(override_entry) = mod_entry
+        .target_overrides
+        .iter_mut()
+        .find(|entry| entry.kind == kind)
+    {
+        if override_entry.enabled != enabled {
+            override_entry.enabled = enabled;
+            return true;
+        }
+        return false;
+    }
+    mod_entry
+        .target_overrides
+        .push(TargetOverride { kind, enabled });
+    true
+}
+
+fn collect_metadata_updates(
+    game_id: GameId,
+    config: &GameConfig,
+    library: &Library,
+) -> Result<Vec<MetadataUpdate>> {
+    let paths = game::detect_paths(
+        game_id,
+        Some(&config.game_root),
+        Some(&config.larian_dir),
+    )
+    .ok();
+    let native_index = paths
+        .as_ref()
+        .map(|paths| native_pak::build_native_pak_index(&paths.larian_mods_dir));
+
+    let mut updates = Vec::new();
+    for mod_entry in &library.mods {
+        let should_refresh_created = mod_entry.created_at.is_none()
+            || mod_entry.created_at == Some(mod_entry.added_at);
+        let should_refresh_modified = mod_entry.modified_at.is_none()
+            || (mod_entry.is_native()
+                && mod_entry.created_at.is_some()
+                && mod_entry.created_at == mod_entry.modified_at);
+
+        let mut meta_created: Option<i64> = None;
+        let mut json_created: Option<i64> = None;
+        let mut file_created: Option<i64> = None;
+        let mut file_modified: Option<i64> = None;
+
+        for pak_path in resolve_pak_paths(
+            mod_entry,
+            &config.data_dir,
+            paths.as_ref(),
+            native_index.as_deref(),
+        ) {
+            if let Some(meta) = metadata::read_meta_lsx_from_pak(&pak_path) {
+                if let Some(created) = meta.created_at {
+                    meta_created = Some(match meta_created {
+                        Some(existing) => existing.min(created),
+                        None => created,
+                    });
+                }
+            }
+            let (raw_created, raw_modified) = path_times(&pak_path);
+            if let Some(created) = raw_created {
+                file_created = Some(match file_created {
+                    Some(existing) => existing.min(created),
+                    None => created,
+                });
+            }
+            if let Some(modified) = raw_modified {
+                file_modified = Some(match file_modified {
+                    Some(existing) => existing.max(modified),
+                    None => modified,
+                });
+            }
+        }
+
+        let mod_root = library_mod_root(&config.data_dir).join(&mod_entry.id);
+        if mod_root.exists() {
+            if let Some(meta_path) = metadata::find_meta_lsx(&mod_root) {
+                if let Some(meta) = metadata::read_meta_lsx(&meta_path) {
+                    if let Some(created) = meta.created_at {
+                        meta_created = Some(match meta_created {
+                            Some(existing) => existing.min(created),
+                            None => created,
+                        });
+                    }
+                }
+            }
+            if let Some(info_path) = metadata::find_info_json(&mod_root) {
+                let json_mods = metadata::read_json_mods(&info_path);
+                if let Some(created) = json_mods.iter().filter_map(|info| info.created_at).min() {
+                    json_created = Some(match json_created {
+                        Some(existing) => existing.min(created),
+                        None => created,
+                    });
+                }
+            }
+            let (raw_created, raw_modified) = scan_mod_targets_times(mod_entry, &mod_root);
+            if let Some(created) = raw_created {
+                file_created = Some(match file_created {
+                    Some(existing) => existing.min(created),
+                    None => created,
+                });
+            }
+            if let Some(modified) = raw_modified {
+                file_modified = Some(match file_modified {
+                    Some(existing) => existing.max(modified),
+                    None => modified,
+                });
+            }
+        }
+
+        let primary_created = json_created.or(meta_created);
+        let (created_candidate, modified_candidate) =
+            resolve_times(primary_created, file_created, file_modified);
+
+        let should_update_created = primary_created.is_some() || should_refresh_created;
+        let mut next_created = mod_entry.created_at;
+        let mut next_modified = mod_entry.modified_at;
+
+        if should_update_created {
+            if let Some(created) = created_candidate {
+                next_created = Some(created);
+            }
+        }
+
+        if let Some(modified) = modified_candidate {
+            if should_refresh_modified
+                || next_modified.map(|value| value < modified).unwrap_or(true)
+            {
+                next_modified = Some(modified);
+            }
+        }
+
+        if next_created != mod_entry.created_at || next_modified != mod_entry.modified_at {
+            updates.push(MetadataUpdate {
+                id: mod_entry.id.clone(),
+                created_at: next_created,
+                modified_at: next_modified,
+            });
+        }
+    }
+
+    Ok(updates)
+}
+
 fn now_timestamp() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs() as i64
+}
+
+fn resolve_pak_paths(
+    mod_entry: &ModEntry,
+    data_dir: &PathBuf,
+    paths: Option<&crate::bg3::GamePaths>,
+    native_index: Option<&[native_pak::NativePakEntry]>,
+) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    let mut push_unique = |path: PathBuf| {
+        if !out.iter().any(|existing| existing == &path) {
+            out.push(path);
+        }
+    };
+    for target in &mod_entry.targets {
+        let InstallTarget::Pak { file, info } = target else {
+            continue;
+        };
+        if mod_entry.is_native() {
+            if let Some(paths) = paths {
+                let by_folder = paths.larian_mods_dir.join(format!("{}.pak", info.folder));
+                if by_folder.exists() {
+                    push_unique(by_folder);
+                }
+                let by_file = paths.larian_mods_dir.join(file);
+                if by_file.exists() {
+                    push_unique(by_file);
+                }
+            }
+            if let Some(index) = native_index {
+                if let Some(path) = native_pak::resolve_native_pak_path(info, index) {
+                    push_unique(path);
+                }
+            }
+        } else {
+            let path = data_dir.join("mods").join(&mod_entry.id).join(file);
+            if path.exists() {
+                push_unique(path);
+            }
+        }
+    }
+    out
+}
+
+fn scan_mod_targets_times(mod_entry: &ModEntry, mod_root: &PathBuf) -> (Option<i64>, Option<i64>) {
+    let mut created_at: Option<i64> = None;
+    let mut modified_at: Option<i64> = None;
+    for target in &mod_entry.targets {
+        let dir = match target {
+            InstallTarget::Data { dir } => mod_root.join(dir),
+            InstallTarget::Generated { dir } => mod_root.join(dir),
+            InstallTarget::Bin { dir } => mod_root.join(dir),
+            InstallTarget::Pak { .. } => continue,
+        };
+        if !dir.exists() {
+            continue;
+        }
+        for entry in WalkDir::new(&dir).into_iter().filter_map(Result::ok) {
+            if !entry.file_type().is_file() {
+                continue;
+            }
+            let meta = match entry.metadata() {
+                Ok(meta) => meta,
+                Err(_) => continue,
+            };
+            let created_value = meta
+                .created()
+                .ok()
+                .and_then(|created| created.duration_since(UNIX_EPOCH).ok())
+                .map(|duration| duration.as_secs() as i64);
+            let modified_value = meta
+                .modified()
+                .ok()
+                .and_then(|modified| modified.duration_since(UNIX_EPOCH).ok())
+                .map(|duration| duration.as_secs() as i64);
+            if let Some(value) = created_value.or(modified_value) {
+                created_at = Some(created_at.map_or(value, |current| current.min(value)));
+            }
+            if let Some(value) = modified_value {
+                modified_at = Some(modified_at.map_or(value, |current| current.max(value)));
+            }
+        }
+    }
+    normalize_times(created_at, modified_at)
 }

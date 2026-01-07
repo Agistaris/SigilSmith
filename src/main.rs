@@ -6,6 +6,7 @@ mod deploy;
 mod game;
 mod importer;
 mod library;
+mod metadata;
 mod native_pak;
 mod smart_rank;
 mod ui;

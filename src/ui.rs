@@ -136,6 +136,7 @@ fn run_loop(terminal: &mut Terminal<impl Backend>, app: &mut App) -> Result<()> 
             }
         }
         app.poll_imports();
+        app.poll_metadata_refresh();
         app.poll_smart_rank();
         app.clamp_selection();
         terminal.draw(|frame| draw(frame, app))?;
@@ -379,6 +380,7 @@ fn handle_normal_mode(app: &mut App, key: KeyEvent) -> Result<()> {
         Focus::Explorer => handle_explorer_mode(app, key)?,
         Focus::Mods => handle_mods_mode(app, key)?,
         Focus::Conflicts => handle_conflicts_mode(app, key)?,
+        Focus::Log => handle_log_mode(app, key)?,
     }
 
     Ok(())
@@ -521,6 +523,15 @@ fn handle_conflicts_mode(app: &mut App, key: KeyEvent) -> Result<()> {
         _ => {}
     }
 
+    Ok(())
+}
+
+fn handle_log_mode(app: &mut App, key: KeyEvent) -> Result<()> {
+    match key.code {
+        KeyCode::Up | KeyCode::Char('k') | KeyCode::Char('K') => app.scroll_log_up(1),
+        KeyCode::Down | KeyCode::Char('j') | KeyCode::Char('J') => app.scroll_log_down(1),
+        _ => {}
+    }
     Ok(())
 }
 
@@ -806,7 +817,7 @@ fn should_start_import(c: char) -> bool {
     matches!(c, '/' | '~' | '.' | 'f' | 'F' | '"' | '\'')
 }
 
-fn draw(frame: &mut Frame<'_>, app: &App) {
+fn draw(frame: &mut Frame<'_>, app: &mut App) {
     let area = frame.size();
     let theme = Theme::new();
     let bottom_height = CONFLICTS_BAR_HEIGHT.min(area.height.saturating_sub(3));
@@ -1037,7 +1048,9 @@ fn draw(frame: &mut Frame<'_>, app: &App) {
         let table_width = table_chunks[0].width;
         let spacing = 1u16;
         let min_mod = 16u16;
-        let fixed_without_target = 3 + 2 + 5 + 6 + min_mod + spacing * 5;
+        let date_width = 10u16;
+        let fixed_without_target =
+            3 + 2 + 5 + 6 + date_width + date_width + min_mod + spacing * 7;
         let max_target = table_width.saturating_sub(fixed_without_target);
         let mut target_col = target_width as u16;
         if max_target > 0 {
@@ -1057,6 +1070,8 @@ fn draw(frame: &mut Frame<'_>, app: &App) {
                 Constraint::Length(5),
                 Constraint::Length(6),
                 Constraint::Length(target_col),
+                Constraint::Length(date_width),
+                Constraint::Length(date_width),
                 Constraint::Min(min_mod),
             ],
         )
@@ -1067,6 +1082,8 @@ fn draw(frame: &mut Frame<'_>, app: &App) {
             Cell::from("Order"),
             Cell::from("Kind"),
             Cell::from("Target"),
+            Cell::from("Created"),
+            Cell::from("Added"),
             Cell::from("Mod"),
         ])
         .style(
@@ -1127,13 +1144,18 @@ fn draw(frame: &mut Frame<'_>, app: &App) {
                 .position(state.offset())
                 .viewport_content_length(view_height);
             let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
-                .track_symbol(Some("|"))
-                .thumb_symbol("#")
+                .track_symbol(Some("░"))
+                .thumb_symbol("▓")
                 .begin_symbol(None)
                 .end_symbol(None)
                 .track_style(Style::default().fg(theme.border))
                 .thumb_style(Style::default().fg(theme.accent));
-            frame.render_stateful_widget(scrollbar, table_chunks[1], &mut scroll_state);
+            let mut scroll_area = table_chunks[1];
+            if scroll_area.height > 1 {
+                scroll_area.y = scroll_area.y.saturating_add(1);
+                scroll_area.height = scroll_area.height.saturating_sub(1);
+            }
+            frame.render_stateful_widget(scrollbar, scroll_area, &mut scroll_state);
         }
     }
 
@@ -1347,20 +1369,30 @@ fn draw(frame: &mut Frame<'_>, app: &App) {
 
     let log_area = lower_chunks[1];
     let log_bg = theme.log_bg;
-    let log_block = theme.panel("Log").style(Style::default().bg(log_bg));
+    let log_block = theme
+        .panel("Log")
+        .border_style(Style::default().fg(if app.focus == Focus::Log {
+            theme.accent
+        } else {
+            theme.border
+        }))
+        .style(Style::default().bg(log_bg));
     let log_inner = log_block.inner(log_area);
     frame.render_widget(log_block, log_area);
     let log_chunks = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([Constraint::Min(10), Constraint::Length(1)])
         .split(log_inner);
-    let log_lines = build_log_lines(app, &theme, log_chunks[0].height as usize);
-    let log = Paragraph::new(log_lines).style(Style::default().fg(theme.text).bg(log_bg));
-    frame.render_widget(log, log_chunks[0]);
     let log_total = app.logs.len();
     let log_view = log_chunks[0].height.max(1) as usize;
     let max_scroll = log_total.saturating_sub(log_view);
-    let scroll = app.log_scroll.min(max_scroll);
+    if app.log_scroll > max_scroll {
+        app.log_scroll = max_scroll;
+    }
+    let log_lines = build_log_lines(app, &theme, log_view);
+    let log = Paragraph::new(log_lines).style(Style::default().fg(theme.text).bg(log_bg));
+    frame.render_widget(log, log_chunks[0]);
+    let scroll = app.log_scroll;
     let log_start = log_total.saturating_sub(log_view + scroll);
     if log_total > log_view && log_view > 0 {
         let scroll_len = log_total.saturating_sub(log_view).saturating_add(1);
@@ -1368,8 +1400,8 @@ fn draw(frame: &mut Frame<'_>, app: &App) {
             .position(log_start)
             .viewport_content_length(log_view);
         let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
-            .track_symbol(Some("|"))
-            .thumb_symbol("#")
+            .track_symbol(Some("░"))
+            .thumb_symbol("▓")
             .begin_symbol(None)
             .end_symbol(None)
             .track_style(Style::default().fg(theme.border))
@@ -1570,6 +1602,7 @@ fn build_focus_tabs_line(app: &App, theme: &Theme) -> Line<'static> {
         ("Explorer", Focus::Explorer),
         ("Mods", Focus::Mods),
         ("Overrides", Focus::Conflicts),
+        ("Log", Focus::Log),
     ];
     let mut spans = Vec::new();
     for (index, (label, focus)) in tabs.iter().enumerate() {
@@ -2148,7 +2181,19 @@ fn draw_settings_menu(frame: &mut Frame<'_>, app: &App, theme: &Theme) {
     frame.render_widget(menu_widget, menu_area);
 }
 
-fn draw_smart_rank_preview(frame: &mut Frame<'_>, app: &App, theme: &Theme) {
+struct SmartRankPreviewRender {
+    lines: Vec<Line<'static>>,
+    scroll: Option<SmartRankScroll>,
+}
+
+struct SmartRankScroll {
+    total: usize,
+    view: usize,
+    position: usize,
+    header_lines: usize,
+}
+
+fn draw_smart_rank_preview(frame: &mut Frame<'_>, app: &mut App, theme: &Theme) {
     let Some(preview) = &app.smart_rank_preview else {
         return;
     };
@@ -2162,9 +2207,9 @@ fn draw_smart_rank_preview(frame: &mut Frame<'_>, app: &App, theme: &Theme) {
     let y = area.y + (area.height.saturating_sub(height)) / 2;
     let preview_area = Rect::new(x, y, width, height);
 
-    let inner_width = preview_area.width.saturating_sub(2) as usize;
+    let inner_width = preview_area.width.saturating_sub(3) as usize;
     let inner_height = preview_area.height.saturating_sub(2) as usize;
-    let lines = build_smart_rank_preview_lines(
+    let render = build_smart_rank_preview_render(
         preview,
         theme,
         inner_width,
@@ -2185,23 +2230,57 @@ fn draw_smart_rank_preview(frame: &mut Frame<'_>, app: &App, theme: &Theme) {
                 .fg(theme.accent)
                 .add_modifier(Modifier::BOLD),
         ));
-    let widget = Paragraph::new(lines)
+    let inner = block.inner(preview_area);
+    let widget = Paragraph::new(render.lines)
         .block(block)
         .style(Style::default().fg(theme.text))
         .alignment(Alignment::Left);
     frame.render_widget(widget, preview_area);
+
+    let scroll_meta = render.scroll;
+    if let Some(scroll) = scroll_meta {
+        app.smart_rank_scroll = scroll.position;
+        if scroll.total > scroll.view && inner.width > 0 && inner.height > 0 {
+            let body_height = scroll.view.min(inner.height as usize) as u16;
+            if body_height > 0 {
+                let scroll_area = Rect {
+                    x: inner.x + inner.width.saturating_sub(1),
+                    y: inner.y.saturating_add(scroll.header_lines as u16),
+                    width: 1,
+                    height: body_height,
+                };
+                let scroll_len = scroll.total.saturating_sub(scroll.view).saturating_add(1);
+                let mut scroll_state = ScrollbarState::new(scroll_len)
+                    .position(scroll.position)
+                    .viewport_content_length(scroll.view);
+                let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
+                    .track_symbol(Some("░"))
+                    .thumb_symbol("▓")
+                    .begin_symbol(None)
+                    .end_symbol(None)
+                    .track_style(Style::default().fg(theme.border))
+                    .thumb_style(Style::default().fg(theme.accent));
+                frame.render_stateful_widget(scrollbar, scroll_area, &mut scroll_state);
+            }
+        }
+    } else {
+        app.smart_rank_scroll = 0;
+    }
 }
 
-fn build_smart_rank_preview_lines(
+fn build_smart_rank_preview_render(
     preview: &crate::app::SmartRankPreview,
     theme: &Theme,
     width: usize,
     height: usize,
     scroll: usize,
     view: crate::app::SmartRankView,
-) -> Vec<Line<'static>> {
+) -> SmartRankPreviewRender {
     if width == 0 || height == 0 {
-        return Vec::new();
+        return SmartRankPreviewRender {
+            lines: Vec::new(),
+            scroll: None,
+        };
     }
 
     let mut lines = Vec::new();
@@ -2261,21 +2340,84 @@ fn build_smart_rank_preview_lines(
 
     lines.push(Line::from(""));
 
-    let col_width = width.saturating_sub(3) / 2;
-    let col_width = col_width.max(10);
+    let min_mod_width = 10usize;
+    let min_date_width = 8usize;
+    let sep_mod = " | ";
+    let sep_move = " → ";
+    let mut current_width = "Current".len().max(6);
+    let mut proposed_width = "Proposed".len().max(8);
+    let mut created_width = "Created".len().max(10);
+    let mut added_width = "Added".len().max(10);
+    let sep_width = sep_mod.len() * 3 + sep_move.len();
+    let mut mod_width = width
+        .saturating_sub(current_width + proposed_width + created_width + added_width + sep_width);
+    if mod_width < min_mod_width {
+        let deficit = min_mod_width.saturating_sub(mod_width);
+        let shrink_left = deficit / 2 + deficit % 2;
+        let shrink_right = deficit / 2;
+        current_width = current_width.saturating_sub(shrink_left).max(3);
+        proposed_width = proposed_width.saturating_sub(shrink_right).max(3);
+        mod_width = width
+            .saturating_sub(current_width + proposed_width + created_width + added_width + sep_width);
+        if mod_width < min_mod_width {
+            let deficit = min_mod_width.saturating_sub(mod_width);
+            let shrink_created = deficit / 2 + deficit % 2;
+            let shrink_added = deficit / 2;
+            created_width = created_width.saturating_sub(shrink_created).max(min_date_width);
+            added_width = added_width.saturating_sub(shrink_added).max(min_date_width);
+            mod_width = width.saturating_sub(
+                current_width + proposed_width + created_width + added_width + sep_width,
+            );
+        }
+        if mod_width == 0 {
+            mod_width = 1;
+        }
+    }
     if matches!(view, crate::app::SmartRankView::Changes) {
-        let header_pad = " ".repeat(col_width.saturating_sub("Current".len()));
-        let header_right_pad = " ".repeat(col_width.saturating_sub("Proposed".len()));
+        let mod_header = truncate_text("Mod", mod_width);
+        let mod_pad = " ".repeat(mod_width.saturating_sub(mod_header.chars().count()));
+        let created_header = truncate_text("Created", created_width);
+        let created_pad =
+            " ".repeat(created_width.saturating_sub(created_header.chars().count()));
+        let added_header = truncate_text("Added", added_width);
+        let added_pad = " ".repeat(added_width.saturating_sub(added_header.chars().count()));
+        let current_header = truncate_text("Current", current_width);
+        let current_pad =
+            " ".repeat(current_width.saturating_sub(current_header.chars().count()));
+        let proposed_header = truncate_text("Proposed", proposed_width);
+        let proposed_pad =
+            " ".repeat(proposed_width.saturating_sub(proposed_header.chars().count()));
         lines.push(Line::from(vec![
             Span::styled(
-                format!("Current{header_pad}"),
+                format!("{mod_header}{mod_pad}"),
                 Style::default()
                     .fg(theme.accent)
                     .add_modifier(Modifier::BOLD),
             ),
-            Span::styled(" | ", Style::default().fg(theme.muted)),
+            Span::styled(sep_mod, Style::default().fg(theme.muted)),
             Span::styled(
-                format!("Proposed{header_right_pad}"),
+                format!("{created_header}{created_pad}"),
+                Style::default()
+                    .fg(theme.accent)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(sep_mod, Style::default().fg(theme.muted)),
+            Span::styled(
+                format!("{added_header}{added_pad}"),
+                Style::default()
+                    .fg(theme.accent)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(sep_mod, Style::default().fg(theme.muted)),
+            Span::styled(
+                format!("{current_header}{current_pad}"),
+                Style::default()
+                    .fg(theme.accent)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(sep_move, Style::default().fg(theme.muted)),
+            Span::styled(
+                format!("{proposed_header}{proposed_pad}"),
                 Style::default()
                     .fg(theme.accent)
                     .add_modifier(Modifier::BOLD),
@@ -2290,6 +2432,7 @@ fn build_smart_rank_preview_lines(
         )));
     }
 
+    let header_lines = lines.len();
     let mut body_lines = Vec::new();
     if matches!(view, crate::app::SmartRankView::Changes) {
         if preview.moves.is_empty() {
@@ -2298,30 +2441,79 @@ fn build_smart_rank_preview_lines(
                 Style::default().fg(theme.muted),
             )));
         } else {
+            let mut max_delta = 0usize;
             for entry in &preview.moves {
-                let left = format!("{:>2}. {}", entry.from + 1, entry.name);
-                let right = format!("{:>2}. {}", entry.to + 1, entry.name);
-                let left_text = truncate_text(&left, col_width);
-                let right_text = truncate_text(&right, col_width);
-                let left_len = left_text.chars().count();
-                let pad = " ".repeat(col_width.saturating_sub(left_len));
-                let row_bg = theme.accent_soft;
+                let delta = if entry.from > entry.to {
+                    entry.from - entry.to
+                } else {
+                    entry.to - entry.from
+                };
+                if delta > max_delta {
+                    max_delta = delta;
+                }
+            }
+            let highlight_delta = if max_delta > 1 { max_delta } else { 0 };
+            for (index, entry) in preview.moves.iter().enumerate() {
+                let delta = if entry.from > entry.to {
+                    entry.from - entry.to
+                } else {
+                    entry.to - entry.from
+                };
+                let is_major = highlight_delta > 0 && delta == highlight_delta;
+                let mod_text = truncate_text(&entry.name, mod_width);
+                let created_text = format_date_cell(entry.created_at);
+                let added_text = format_date_cell(Some(entry.added_at));
+                let current_text =
+                    format!("{:>width$}", entry.from + 1, width = current_width);
+                let proposed_text =
+                    format!("{:>width$}", entry.to + 1, width = proposed_width);
+                let row_bg = if index % 2 == 1 {
+                    Some(theme.row_alt_bg)
+                } else {
+                    None
+                };
+                let mut mod_style = Style::default().fg(if is_major {
+                    theme.accent
+                } else {
+                    theme.text
+                });
+                if is_major {
+                    mod_style = mod_style
+                        .add_modifier(Modifier::BOLD)
+                        .bg(theme.accent_soft);
+                }
+                let mut date_style = Style::default().fg(theme.muted);
+                let mut current_style = Style::default().fg(theme.muted);
+                let mut proposed_style =
+                    Style::default().fg(theme.text).add_modifier(Modifier::BOLD);
+                let mut sep_style = Style::default().fg(theme.muted);
+                let mut arrow_style = Style::default().fg(if is_major {
+                    theme.success
+                } else {
+                    theme.muted
+                });
+                if let Some(bg) = row_bg {
+                    if !is_major {
+                        mod_style = mod_style.bg(bg);
+                    }
+                    date_style = date_style.bg(bg);
+                    current_style = current_style.bg(bg);
+                    proposed_style = proposed_style.bg(bg);
+                    sep_style = sep_style.bg(bg);
+                    arrow_style = arrow_style.bg(bg);
+                }
                 body_lines.push(Line::from(vec![
-                    Span::styled(
-                        left_text,
-                        Style::default().fg(theme.muted).bg(row_bg),
-                    ),
-                    Span::styled(
-                        format!("{pad} | "),
-                        Style::default().fg(theme.muted).bg(row_bg),
-                    ),
-                    Span::styled(
-                        right_text,
-                        Style::default()
-                            .fg(theme.text)
-                            .bg(row_bg)
-                            .add_modifier(Modifier::BOLD),
-                    ),
+                    Span::styled(mod_text, mod_style),
+                    Span::styled(sep_mod, sep_style),
+                    Span::styled(created_text, date_style),
+                    Span::styled(sep_mod, sep_style),
+                    Span::styled(added_text, date_style),
+                    Span::styled(sep_mod, sep_style),
+                    Span::styled(current_text, current_style),
+                    Span::styled(" ", sep_style),
+                    Span::styled("→", arrow_style),
+                    Span::styled(" ", sep_style),
+                    Span::styled(proposed_text, proposed_style),
                 ]));
             }
         }
@@ -2347,7 +2539,10 @@ fn build_smart_rank_preview_lines(
             "Enter: apply | Esc: cancel",
             Style::default().fg(theme.muted),
         )));
-        return lines;
+        return SmartRankPreviewRender {
+            lines,
+            scroll: None,
+        };
     }
 
     let total = body_lines.len();
@@ -2372,7 +2567,21 @@ fn build_smart_rank_preview_lines(
         Style::default().fg(theme.muted),
     )));
 
-    lines
+    let scroll_meta = if total > available {
+        Some(SmartRankScroll {
+            total,
+            view: available,
+            position: scroll,
+            header_lines,
+        })
+    } else {
+        None
+    };
+
+    SmartRankPreviewRender {
+        lines,
+        scroll: scroll_meta,
+    }
 }
 
 fn build_settings_menu_lines(app: &App, theme: &Theme, selected: usize) -> Vec<Line<'static>> {
@@ -2786,12 +2995,16 @@ fn row_for_entry(
     } else {
         Style::default().fg(theme.muted)
     };
+    let created_text = format_date_cell(mod_entry.created_at);
+    let added_text = format_date_cell(Some(mod_entry.added_at));
     let mut row = Row::new(vec![
         Cell::from(enabled_text.to_string()).style(enabled_style),
         Cell::from(native_marker.to_string()).style(native_style),
         Cell::from((order_index + 1).to_string()),
         Cell::from(kind.to_string()).style(kind_style),
         Cell::from(state_label).style(state_style),
+        Cell::from(created_text).style(Style::default().fg(theme.muted)),
+        Cell::from(added_text).style(Style::default().fg(theme.muted)),
         Cell::from(mod_entry.display_name()),
     ]);
     if row_index % 2 == 1 {
@@ -2815,6 +3028,50 @@ fn truncate_text(value: &str, max_width: usize) -> String {
     let mut out = value.chars().take(take).collect::<String>();
     out.push_str("...");
     out
+}
+
+fn format_short_date(timestamp: i64) -> Option<String> {
+    if timestamp <= 0 {
+        return None;
+    }
+    let date = time::OffsetDateTime::from_unix_timestamp(timestamp).ok()?;
+    let year = date.year();
+    let month = date.month() as u8;
+    let day = date.day();
+    let locale = locale_hint();
+    let formatted = if prefers_mdy(&locale) {
+        format!("{month:02}-{day:02}-{year:04}")
+    } else if prefers_ymd(&locale) {
+        format!("{year:04}-{month:02}-{day:02}")
+    } else {
+        format!("{day:02}-{month:02}-{year:04}")
+    };
+    Some(formatted)
+}
+
+fn locale_hint() -> String {
+    std::env::var("LC_TIME")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .or_else(|| std::env::var("LANG").ok())
+        .unwrap_or_default()
+        .to_ascii_uppercase()
+}
+
+fn prefers_mdy(locale: &str) -> bool {
+    locale.contains("US") || locale.contains("PH")
+}
+
+fn prefers_ymd(locale: &str) -> bool {
+    locale.contains("CN")
+        || locale.contains("JP")
+        || locale.contains("KR")
+        || locale.contains("TW")
+        || locale.contains("HU")
+}
+
+fn format_date_cell(value: Option<i64>) -> String {
+    format_short_date(value.unwrap_or_default()).unwrap_or_else(|| "---- -- --".to_string())
 }
 
 fn pad_lines(
@@ -2895,6 +3152,33 @@ fn build_details(app: &App, theme: &Theme, width: usize) -> Vec<Line<'static>> {
         label_style,
         value_style,
     });
+    let added_label = format_short_date(mod_entry.added_at).unwrap_or_else(|| "-".to_string());
+    rows.push(KvRow {
+        label: "Added".to_string(),
+        value: added_label,
+        label_style,
+        value_style,
+    });
+    if let Some(modified_at) = mod_entry.modified_at {
+        if let Some(modified_label) = format_short_date(modified_at) {
+            rows.push(KvRow {
+                label: "Modified".to_string(),
+                value: modified_label,
+                label_style,
+                value_style,
+            });
+        }
+    }
+    if let Some(created_at) = mod_entry.created_at {
+        if let Some(created_label) = format_short_date(created_at) {
+            rows.push(KvRow {
+                label: "Created".to_string(),
+                value: created_label,
+                label_style,
+                value_style,
+            });
+        }
+    }
     if mod_entry.is_native() {
         rows.push(KvRow {
             label: "Source".to_string(),
@@ -3127,17 +3411,20 @@ fn build_explorer_details(app: &App, theme: &Theme, width: usize) -> Vec<Line<'s
 }
 
 fn build_conflict_details(app: &App, theme: &Theme, width: usize) -> Vec<Line<'static>> {
-    if app.conflicts_scanning() {
-        return vec![Line::from(Span::styled(
-            "Scanning overrides...",
-            Style::default().fg(theme.muted),
-        ))];
-    }
-    if app.conflicts_pending() {
-        return vec![Line::from(Span::styled(
-            "Override scan queued...",
-            Style::default().fg(theme.muted),
-        ))];
+    let swap_active = app.override_swap_info().is_some();
+    if !swap_active {
+        if app.conflicts_scanning() {
+            return vec![Line::from(Span::styled(
+                "Scanning overrides...",
+                Style::default().fg(theme.muted),
+            ))];
+        }
+        if app.conflicts_pending() {
+            return vec![Line::from(Span::styled(
+                "Override scan queued...",
+                Style::default().fg(theme.muted),
+            ))];
+        }
     }
     let Some(conflict) = app.conflicts.get(app.conflict_selected) else {
         return vec![Line::from(Span::styled(
@@ -3512,6 +3799,22 @@ fn legend_rows(app: &App) -> Vec<LegendRow> {
                 LegendRow {
                     key: "Ctrl+F/Ctrl+L".to_string(),
                     action: "Filter/Clear".to_string(),
+                },
+                LegendRow {
+                    key: "Tab".to_string(),
+                    action: "Cycle focus".to_string(),
+                },
+            ]);
+        }
+        Focus::Log => {
+            rows.extend([
+                LegendRow {
+                    key: "↑/↓".to_string(),
+                    action: "Scroll log".to_string(),
+                },
+                LegendRow {
+                    key: "PgUp/PgDn".to_string(),
+                    action: "Page scroll".to_string(),
                 },
                 LegendRow {
                     key: "Tab".to_string(),

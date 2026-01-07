@@ -2,11 +2,11 @@ use crate::{
     config::GameConfig,
     game,
     library::{InstallTarget, Library, ModEntry, ProfileEntry, TargetKind},
+    metadata,
     native_pak,
 };
 use anyhow::{Context, Result};
 use lz4_flex::block::decompress;
-use quick_xml::{events::Event, Reader};
 use std::{
     collections::{HashMap, HashSet},
     fs::File,
@@ -91,6 +91,7 @@ struct RankItem {
     patch_score: u8,
     patch_reasons: Vec<String>,
     dependencies: Vec<String>,
+    date_hint: i64,
 }
 
 #[derive(Debug, Clone)]
@@ -177,6 +178,7 @@ where
         let mut has_data = false;
         let mut dependencies = Vec::new();
         let mut tags = Vec::new();
+        let mut meta_created = None;
 
         if entry.enabled {
             match group {
@@ -235,6 +237,7 @@ where
                 ) {
                     dependencies = meta.dependencies;
                     tags = meta.tags;
+                    meta_created = meta.created_at;
                 }
             }
         }
@@ -265,6 +268,11 @@ where
         }
 
         let file_count = file_paths.len();
+        let date_hint = mod_entry
+            .created_at
+            .or(meta_created)
+            .or(mod_entry.modified_at)
+            .unwrap_or(mod_entry.added_at);
         items.push(RankItem {
             id: entry.id.clone(),
             enabled: entry.enabled,
@@ -279,6 +287,7 @@ where
             patch_score,
             patch_reasons: patch_notes,
             dependencies,
+            date_hint,
         });
     }
 
@@ -542,6 +551,10 @@ fn compare_rank_items(a: &RankItem, b: &RankItem) -> std::cmp::Ordering {
     if count != std::cmp::Ordering::Equal {
         return count;
     }
+    let date = a.date_hint.cmp(&b.date_hint);
+    if date != std::cmp::Ordering::Equal {
+        return date;
+    }
     a.original_index.cmp(&b.original_index)
 }
 
@@ -564,17 +577,23 @@ fn read_mod_metadata(
     config: &GameConfig,
     larian_mods_dir: &Path,
     native_pak_index: &[native_pak::NativePakEntry],
-) -> Result<PakMeta> {
+) -> Result<metadata::ModMeta> {
     let data_dir = &config.data_dir;
     let pak_paths = collect_pak_paths(mod_entry, data_dir, larian_mods_dir, native_pak_index);
-    let mut merged = PakMeta::default();
+    let mut merged = metadata::ModMeta::default();
     for pak_path in pak_paths {
         if !pak_path.exists() {
             continue;
         }
-        if let Ok(meta) = read_pak_metadata(&pak_path) {
+        if let Some(meta) = metadata::read_meta_lsx_from_pak(&pak_path) {
             merged.dependencies.extend(meta.dependencies);
             merged.tags.extend(meta.tags);
+            if let Some(created_at) = meta.created_at {
+                merged.created_at = Some(match merged.created_at {
+                    Some(existing) => existing.min(created_at),
+                    None => created_at,
+                });
+            }
         }
     }
     Ok(merged)
@@ -725,214 +744,6 @@ fn scan_pak_index(path: &Path) -> Result<Vec<FileEntry>> {
     Ok(out)
 }
 
-#[derive(Debug)]
-struct PakIndexEntry {
-    path: String,
-    offset: u64,
-    compressed_size: u32,
-    decompressed_size: u32,
-    compression: CompressionType,
-}
-
-#[derive(Debug, Clone, Copy)]
-enum CompressionType {
-    None,
-    Zlib,
-    Lz4,
-    Zstd,
-}
-
-#[derive(Default)]
-struct PakMeta {
-    dependencies: Vec<String>,
-    tags: Vec<String>,
-}
-
-fn read_pak_metadata(path: &Path) -> Result<PakMeta> {
-    let entries = read_pak_index_entries(path)?;
-    let meta_entry = entries.iter().find(|entry| {
-        let lower = entry.path.to_ascii_lowercase();
-        lower.ends_with("/meta.lsx") && lower.contains("/mods/")
-    });
-
-    let Some(entry) = meta_entry else {
-        return Ok(PakMeta::default());
-    };
-
-    let mut file = File::open(path)?;
-    file.seek(SeekFrom::Start(entry.offset))?;
-    let mut compressed = vec![0u8; entry.compressed_size as usize];
-    file.read_exact(&mut compressed)?;
-    let bytes = match entry.compression {
-        CompressionType::None => compressed,
-        CompressionType::Lz4 => decompress(&compressed, entry.decompressed_size as usize)?,
-        CompressionType::Zlib => {
-            let mut decoder = flate2::read::ZlibDecoder::new(compressed.as_slice());
-            let mut out = vec![0u8; entry.decompressed_size as usize];
-            decoder.read_exact(&mut out)?;
-            out
-        }
-        CompressionType::Zstd => {
-            return Ok(PakMeta::default());
-        }
-    };
-
-    parse_meta_lsx(&bytes)
-}
-
-fn read_pak_index_entries(path: &Path) -> Result<Vec<PakIndexEntry>> {
-    const ENTRY_LEN: usize = 272;
-    const PATH_LEN: usize = 256;
-    const MIN_VERSION: u32 = 18;
-
-    let mut file = File::open(path).with_context(|| format!("open pak {:?}", path))?;
-    let mut id = [0u8; 4];
-    file.read_exact(&mut id)?;
-    if &id != b"LSPK" {
-        anyhow::bail!("invalid pak header");
-    }
-    let version = read_u32(&mut file)?;
-    if version < MIN_VERSION {
-        anyhow::bail!("unsupported pak version {version}");
-    }
-    let footer_offset = read_u64(&mut file)?;
-    let footer_offset = i64::try_from(footer_offset)?;
-    file.seek(SeekFrom::Start(0))?;
-    file.seek(SeekFrom::Current(footer_offset))?;
-
-    let file_count = read_u32(&mut file)? as usize;
-    let compressed_len = read_u32(&mut file)? as usize;
-    let decompressed_len = file_count.saturating_mul(ENTRY_LEN);
-
-    let mut compressed = vec![0u8; compressed_len];
-    file.read_exact(&mut compressed)?;
-    let table = decompress(&compressed, decompressed_len)?;
-
-    let mut out = Vec::new();
-    for index in 0..file_count {
-        let start = index * ENTRY_LEN;
-        let end = start + ENTRY_LEN;
-        if end > table.len() {
-            break;
-        }
-        let entry = &table[start..end];
-        let path_end = entry[..PATH_LEN]
-            .iter()
-            .position(|byte| *byte == 0)
-            .unwrap_or(PATH_LEN);
-        let raw_path = String::from_utf8_lossy(&entry[..path_end]);
-        let path = normalize_path(&raw_path);
-
-        let offset_upper = u32::from_le_bytes(entry[256..260].try_into().unwrap_or([0; 4]));
-        let offset_lower = u16::from_le_bytes(entry[260..262].try_into().unwrap_or([0; 2]));
-        let offset = u64::from(offset_upper) | (u64::from(offset_lower) << 32);
-        let offset = offset & 0x000f_ffff_ffff_ffff;
-
-        let compression = match entry[263] & 0x0F {
-            0 => CompressionType::None,
-            1 => CompressionType::Zlib,
-            2 => CompressionType::Lz4,
-            _ => CompressionType::Zstd,
-        };
-        let compressed_size = u32::from_le_bytes(entry[264..268].try_into().unwrap_or([0; 4]));
-        let decompressed_size = u32::from_le_bytes(entry[268..272].try_into().unwrap_or([0; 4]));
-
-        out.push(PakIndexEntry {
-            path,
-            offset,
-            compressed_size,
-            decompressed_size,
-            compression,
-        });
-    }
-
-    Ok(out)
-}
-
-fn parse_meta_lsx(bytes: &[u8]) -> Result<PakMeta> {
-    let mut reader = Reader::from_reader(bytes);
-    reader.trim_text(true);
-    let mut buf = Vec::new();
-    let mut node_stack: Vec<String> = Vec::new();
-    let mut deps = Vec::new();
-    let mut tags = Vec::new();
-    let mut in_dependencies = false;
-    let mut in_dependency = false;
-    let mut in_module_info = false;
-
-    loop {
-        match reader.read_event_into(&mut buf) {
-            Ok(Event::Start(e)) => {
-                if e.name().as_ref() == b"node" {
-                    if let Some(id) = attr_value(&e, b"id") {
-                        node_stack.push(id.clone());
-                        in_dependencies = node_stack.iter().any(|node| node == "Dependencies");
-                        in_dependency = node_stack.iter().any(|node| node == "Dependency");
-                        in_module_info = node_stack.iter().any(|node| node == "ModuleInfo");
-                    }
-                }
-            }
-            Ok(Event::Empty(e)) => {
-                if e.name().as_ref() == b"attribute" {
-                    if in_dependencies && in_dependency {
-                        if let (Some(id), Some(value)) =
-                            (attr_value(&e, b"id"), attr_value(&e, b"value"))
-                        {
-                            if id == "UUID" {
-                                deps.push(value);
-                            }
-                        }
-                    }
-                    if in_module_info {
-                        if let (Some(id), Some(value)) =
-                            (attr_value(&e, b"id"), attr_value(&e, b"value"))
-                        {
-                            if id == "Tags" && !value.trim().is_empty() {
-                                tags.extend(split_tags(&value));
-                            }
-                        }
-                    }
-                }
-            }
-            Ok(Event::End(e)) => {
-                if e.name().as_ref() == b"node" {
-                    node_stack.pop();
-                    in_dependencies = node_stack.iter().any(|node| node == "Dependencies");
-                    in_dependency = node_stack.iter().any(|node| node == "Dependency");
-                    in_module_info = node_stack.iter().any(|node| node == "ModuleInfo");
-                }
-            }
-            Ok(Event::Eof) => break,
-            Err(_) => break,
-            _ => {}
-        }
-        buf.clear();
-    }
-
-    Ok(PakMeta {
-        dependencies: deps,
-        tags,
-    })
-}
-
-fn attr_value(e: &quick_xml::events::BytesStart<'_>, key: &[u8]) -> Option<String> {
-    for attr in e.attributes().flatten() {
-        if attr.key.as_ref() == key {
-            if let Ok(value) = attr.unescape_value() {
-                return Some(value.to_string());
-            }
-        }
-    }
-    None
-}
-
-fn split_tags(value: &str) -> Vec<String> {
-    value
-        .split(|c| c == ';' || c == ',' || c == '|')
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-        .collect()
-}
 
 fn patch_score(mod_entry: &ModEntry, tags: &[String]) -> (u8, Vec<String>) {
     let mut score = 0u8;

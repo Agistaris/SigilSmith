@@ -4,6 +4,7 @@ use std::{
     collections::HashMap,
     fs,
     path::{Path, PathBuf},
+    time::{SystemTime, UNIX_EPOCH},
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -141,6 +142,10 @@ pub struct FileOverride {
 pub struct ModEntry {
     pub id: String,
     pub name: String,
+    #[serde(default)]
+    pub created_at: Option<i64>,
+    #[serde(default)]
+    pub modified_at: Option<i64>,
     pub added_at: i64,
     pub targets: Vec<InstallTarget>,
     #[serde(default)]
@@ -303,6 +308,53 @@ impl PakInfo {
 
 pub fn library_mod_root(data_dir: &Path) -> PathBuf {
     data_dir.join("mods")
+}
+
+pub fn path_times(path: &Path) -> (Option<i64>, Option<i64>) {
+    let meta = fs::metadata(path).ok();
+    let created_at = meta
+        .as_ref()
+        .and_then(|m| m.created().ok())
+        .and_then(system_time_to_epoch);
+    let modified_at = meta
+        .as_ref()
+        .and_then(|m| m.modified().ok())
+        .and_then(system_time_to_epoch);
+    (created_at, modified_at)
+}
+
+pub fn normalize_times(created: Option<i64>, modified: Option<i64>) -> (Option<i64>, Option<i64>) {
+    match (created, modified) {
+        (Some(created), Some(modified)) => (
+            Some(created.min(modified)),
+            Some(created.max(modified)),
+        ),
+        (Some(created), None) => (Some(created), Some(created)),
+        (None, Some(modified)) => (Some(modified), Some(modified)),
+        (None, None) => (None, None),
+    }
+}
+
+pub fn resolve_times(
+    primary_created: Option<i64>,
+    file_created: Option<i64>,
+    file_modified: Option<i64>,
+) -> (Option<i64>, Option<i64>) {
+    if let Some(primary) = primary_created {
+        let modified = file_modified
+            .or(file_created)
+            .map(|value| value.max(primary))
+            .or(Some(primary));
+        return (Some(primary), modified);
+    }
+
+    normalize_times(file_created, file_modified)
+}
+
+fn system_time_to_epoch(time: SystemTime) -> Option<i64> {
+    time.duration_since(UNIX_EPOCH)
+        .ok()
+        .map(|duration| duration.as_secs() as i64)
 }
 
 pub fn clean_source_label(label: &str) -> String {
