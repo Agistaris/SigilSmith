@@ -48,9 +48,10 @@ git push -u origin main
 4) Tag: `vX.Y.Z` (create tag on publish).
 5) Title: `SigilSmith vX.Y.Z`.
 6) Paste the `CHANGELOG.md` entry into the release notes.
-7) Add screenshots + quick install steps to the release body (keep concise).
-8) Upload all files from `dist/`.
-9) Publish.
+7) Optionally start from `docs/release_body.md` for a full release description.
+8) Add screenshots + quick install steps to the release body (keep concise).
+9) Upload all files from `dist/`.
+10) Publish.
 
 ## 4a) Release-only Public Repo
 

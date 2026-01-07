@@ -21,7 +21,7 @@ Use GitHub Releases as the canonical download source, then mirror to mod sites.
 ## CurseForge
 
 1) Create a BG3 Tools/Utilities entry.
-2) Paste the same description + features from ModForge.
+2) Paste the copy from `docs/curseforge-listing.md`.
 3) Upload the AppImage or tar.gz.
 4) Link to GitHub Releases for other formats + checksums.
 
