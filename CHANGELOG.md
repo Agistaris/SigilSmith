@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.4.1
+
+- Setup onboarding improvements with clearer status and path auto-detect retry.
+- Settings menu now includes a "Configure game paths" action plus path display.
+- Context + Explorer details show config path and setup hints.
+- Added Nexus readme + header banners for release pages.
+
 ## 0.4.0
 
 - Major UI refresh with refined header/footer, full-width striping, and cohesive panel layout.

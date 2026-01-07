@@ -2,6 +2,10 @@
 
 SigilSmith ships Linux builds as AppImage, .deb, .rpm, and .tar.gz on GitHub Releases.
 
+On first launch, SigilSmith auto-detects your BG3 paths. If detection fails,
+press `g` (or `Esc` → Configure game paths) and set them manually. Config files
+live under `~/.local/share/sigilsmith/`.
+
 ## AppImage (Recommended)
 
 1) Download the latest AppImage from the release page.

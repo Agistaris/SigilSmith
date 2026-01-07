@@ -41,11 +41,20 @@ fi
   echo
   echo "## Downloads"
   echo
+  found=0
   if ls "$DIST_DIR"/sigilsmith-"$VERSION"-* >/dev/null 2>&1; then
     for file in "$DIST_DIR"/sigilsmith-"$VERSION"-*; do
       echo "- $(basename "$file")"
     done
-  else
+    found=1
+  fi
+  if ls "$DIST_DIR"/sigilsmith_"$VERSION"-*.deb >/dev/null 2>&1; then
+    for file in "$DIST_DIR"/sigilsmith_"$VERSION"-*.deb; do
+      echo "- $(basename "$file")"
+    done
+    found=1
+  fi
+  if [ "$found" -eq 0 ]; then
     echo "- (build artifacts not found yet)"
   fi
   echo

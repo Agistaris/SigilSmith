@@ -120,4 +120,6 @@ Global app config (active game) lives at:
 ~/.local/share/sigilsmith/config.json
 ```
 
-You can edit these if BG3 is installed in a non-standard path.
+On first launch SigilSmith auto-detects your BG3 paths. If it cannot find them,
+press `g` or open the menu with `Esc` and choose "Configure game paths".
+You can also edit the config files directly if BG3 is installed in a non-standard path.

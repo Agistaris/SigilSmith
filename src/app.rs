@@ -405,7 +405,7 @@ impl App {
             game_id,
             config,
             library,
-            status: "Ready".to_string(),
+            status: "Detecting game paths...".to_string(),
             selected: 0,
             input_mode: InputMode::Normal,
             should_quit: false,
