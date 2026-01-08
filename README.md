@@ -16,6 +16,7 @@ Multi-game support is coming next via an open adapter template (BG3-first today,
 ![Smart Ranking](docs/04-smart-ranking.png)
 ![Settings](docs/05-settings-menu.png)
 ![Import Toast](docs/06-import-toast.png)
+![Directory Select](docs/07_directory_select.png)
 
 ## Highlights
 

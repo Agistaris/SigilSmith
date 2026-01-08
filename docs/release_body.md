@@ -1,12 +1,13 @@
-# SigilSmith v0.4.1
+# SigilSmith v0.4.2
 
 SigilSmith is a Linux-first TUI mod manager for Baldur's Gate 3. Drag-drop mods, manage profiles, resolve overrides, and deploy with confidence. Multi-game support is coming next via an open adapter template.
 
 ## Highlights
 
-- Setup onboarding improvements with clearer status and path auto-detect retry.
-- Settings menu now includes a Configure Paths action plus config path display.
-- Context + Explorer details show config path and setup hints.
+- Guided path browser for BG3 install + Larian data directories.
+- Path browser supports manual path entry with list/path focus switching.
+- Settings menu includes Configure Paths and shows current config locations.
+- Public repo now includes full source under Apache-2.0 with CI-built releases.
 - Override Actions panel with debounced swap overlay for manual conflict picks.
 - AI Smart Ranking preview (diff + scroll) for safer order suggestions.
 
@@ -18,6 +19,7 @@ SigilSmith is a Linux-first TUI mod manager for Baldur's Gate 3. Drag-drop mods,
 ![Smart Ranking](docs/04-smart-ranking.png)
 ![Settings](docs/05-settings-menu.png)
 ![Import Toast](docs/06-import-toast.png)
+![Directory Select](docs/07_directory_select.png)
 
 ## Install
 
