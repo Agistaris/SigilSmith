@@ -2917,6 +2917,7 @@ impl App {
                 return;
             }
         };
+        let modsettings_exists = paths.modsettings_path.exists();
         let native_pak_index = native_pak::build_native_pak_index(&paths.larian_mods_dir);
 
         let snapshot = match deploy::read_modsettings_snapshot(&paths.modsettings_path) {
@@ -2927,6 +2928,7 @@ impl App {
             }
         };
         let deploy::ModSettingsSnapshot { modules, order } = snapshot;
+        let modules_set: HashSet<String> = modules.iter().map(|info| info.uuid.clone()).collect();
 
         let mut existing_ids: HashSet<String> =
             self.library.mods.iter().map(|entry| entry.id.clone()).collect();
@@ -3031,42 +3033,40 @@ impl App {
             self.library.ensure_mods_in_profiles();
         }
 
-        let mut updated_enabled = false;
-        let native_ids: HashSet<String> = self
-            .library
-            .mods
-            .iter()
-            .filter(|mod_entry| mod_entry.is_native())
-            .map(|mod_entry| mod_entry.id.clone())
-            .collect();
-        if let Some(profile) = self.library.active_profile_mut() {
-            for entry in &mut profile.order {
-                let is_native = native_ids.contains(&entry.id);
-                if !is_native {
-                    continue;
-                }
-                let desired = order_set.contains(&entry.id);
-                if entry.enabled != desired {
-                    entry.enabled = desired;
-                    updated_enabled = true;
-                }
-            }
-        }
-
         let mod_has_pak: HashMap<String, bool> = self
             .library
             .mods
             .iter()
             .map(|mod_entry| (mod_entry.id.clone(), mod_entry.has_target_kind(TargetKind::Pak)))
             .collect();
+        let mut updated_enabled = false;
         let mut reordered = false;
-        if let Some(profile) = self.library.active_profile_mut() {
-            if !order.is_empty() {
-                let entry_map: HashMap<String, ProfileEntry> = profile
-                    .order
-                    .iter()
-                    .cloned()
-                    .map(|entry| (entry.id.clone(), entry))
+        if modsettings_exists {
+            let enabled_set: HashSet<String> = if order.is_empty() {
+                modules_set
+            } else {
+                order_set.clone()
+            };
+            if let Some(profile) = self.library.active_profile_mut() {
+                for entry in &mut profile.order {
+                    let has_pak = mod_has_pak.get(&entry.id).copied().unwrap_or(false);
+                    if !has_pak {
+                        continue;
+                    }
+                    let desired = enabled_set.contains(&entry.id);
+                    if entry.enabled != desired {
+                        entry.enabled = desired;
+                        updated_enabled = true;
+                    }
+                }
+            }
+            if let Some(profile) = self.library.active_profile_mut() {
+                if !order.is_empty() {
+                    let entry_map: HashMap<String, ProfileEntry> = profile
+                        .order
+                        .iter()
+                        .cloned()
+                        .map(|entry| (entry.id.clone(), entry))
                     .collect();
                 let mut loose_ids = Vec::new();
                 let mut pak_ids = Vec::new();
@@ -3099,11 +3099,12 @@ impl App {
                         reordered_entries.push(entry.clone());
                     }
                 }
-                if reordered_entries.len() == profile.order.len()
-                    && reordered_entries != profile.order
-                {
-                    profile.order = reordered_entries;
-                    reordered = true;
+                    if reordered_entries.len() == profile.order.len()
+                        && reordered_entries != profile.order
+                    {
+                        profile.order = reordered_entries;
+                        reordered = true;
+                    }
                 }
             }
         }
