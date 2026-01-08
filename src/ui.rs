@@ -557,6 +557,10 @@ fn handle_browser_mode(
     key: KeyEvent,
     browser: &mut PathBrowser,
 ) -> Result<bool> {
+    let invalid_hint = match browser.step {
+        SetupStep::GameRoot => "Not a BG3 install root (needs Data/ + bin/).",
+        SetupStep::LarianDir => "Not a Larian data dir (needs PlayerProfiles/).",
+    };
     let len = browser.entries.len();
     match browser.focus {
         PathBrowserFocus::PathInput => match key.code {
@@ -630,27 +634,35 @@ fn handle_browser_mode(
                     path_browser_set_current(app, browser, parent.to_path_buf());
                 }
             }
-            KeyCode::Char('s') | KeyCode::Char('S') => {
-                if let Some(select) = browser
-                    .entries
-                    .iter()
-                    .find(|entry| entry.kind == PathBrowserEntryKind::Select)
-                {
+        KeyCode::Char('s') | KeyCode::Char('S') => {
+            if let Some(select) = browser
+                .entries
+                .iter()
+                .find(|entry| entry.kind == PathBrowserEntryKind::Select)
+            {
+                if select.selectable {
                     app.apply_path_browser_selection(browser.step, select.path.clone())?;
                     return Ok(true);
                 }
+                app.status = invalid_hint.to_string();
+                app.set_toast(invalid_hint, ToastLevel::Warn, Duration::from_secs(2));
             }
-            KeyCode::Enter => {
-                if let Some(entry) = browser.entries.get(browser.selected) {
-                    match entry.kind {
-                        PathBrowserEntryKind::Select => {
+        }
+        KeyCode::Enter => {
+            if let Some(entry) = browser.entries.get(browser.selected) {
+                match entry.kind {
+                    PathBrowserEntryKind::Select => {
+                        if entry.selectable {
                             app.apply_path_browser_selection(browser.step, entry.path.clone())?;
                             return Ok(true);
                         }
-                        PathBrowserEntryKind::Parent | PathBrowserEntryKind::Dir => {
-                            path_browser_set_current(app, browser, entry.path.clone());
-                        }
+                        app.status = invalid_hint.to_string();
+                        app.set_toast(invalid_hint, ToastLevel::Warn, Duration::from_secs(2));
                     }
+                    PathBrowserEntryKind::Parent | PathBrowserEntryKind::Dir => {
+                        path_browser_set_current(app, browser, entry.path.clone());
+                    }
+                }
                 }
             }
             KeyCode::Esc => {
@@ -2385,7 +2397,38 @@ fn draw_path_browser(frame: &mut Frame<'_>, _app: &App, theme: &Theme, browser: 
         current_label,
         Style::default().fg(theme.muted),
     ));
-    let header = Paragraph::new(vec![path_line, current_line]);
+    let selectable = browser
+        .entries
+        .iter()
+        .find(|entry| entry.kind == PathBrowserEntryKind::Select)
+        .map(|entry| entry.selectable)
+        .unwrap_or(false);
+    let (valid_label, invalid_label) = match browser.step {
+        SetupStep::GameRoot => (
+            " BG3 install root detected ",
+            "Not a BG3 install root (needs Data/ + bin/)",
+        ),
+        SetupStep::LarianDir => (
+            " Larian data dir detected ",
+            "Not a Larian data dir (needs PlayerProfiles/)",
+        ),
+    };
+    let status_span = if selectable {
+        Span::styled(
+            valid_label,
+            Style::default()
+                .fg(Color::Black)
+                .bg(theme.success)
+                .add_modifier(Modifier::BOLD),
+        )
+    } else {
+        Span::styled(invalid_label, Style::default().fg(theme.warning))
+    };
+    let status_line = Line::from(vec![
+        Span::styled("Status: ", Style::default().fg(theme.muted)),
+        status_span,
+    ]);
+    let header = Paragraph::new(vec![path_line, current_line, status_line]);
     frame.render_widget(header, chunks[0]);
 
     let entries: Vec<ListItem> = browser
@@ -2393,9 +2436,15 @@ fn draw_path_browser(frame: &mut Frame<'_>, _app: &App, theme: &Theme, browser: 
         .iter()
         .map(|entry| {
             let style = match entry.kind {
-                PathBrowserEntryKind::Select => Style::default()
-                    .fg(theme.success)
-                    .add_modifier(Modifier::BOLD),
+                PathBrowserEntryKind::Select => {
+                    if entry.selectable {
+                        Style::default()
+                            .fg(theme.success)
+                            .add_modifier(Modifier::BOLD)
+                    } else {
+                        Style::default().fg(theme.warning)
+                    }
+                }
                 PathBrowserEntryKind::Parent => Style::default().fg(theme.muted),
                 PathBrowserEntryKind::Dir => Style::default().fg(theme.text),
             };

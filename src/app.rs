@@ -77,6 +77,7 @@ pub struct PathBrowserEntry {
     pub label: String,
     pub path: PathBuf,
     pub kind: PathBrowserEntryKind,
+    pub selectable: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1914,18 +1915,19 @@ impl App {
         current: &PathBuf,
     ) -> Vec<PathBrowserEntry> {
         let mut entries = Vec::new();
-        if self.path_browser_selectable(step, current) {
-            entries.push(PathBrowserEntry {
-                label: "✓ Select this folder".to_string(),
-                path: current.clone(),
-                kind: PathBrowserEntryKind::Select,
-            });
-        }
+        let selectable = self.path_browser_selectable(step, current);
+        entries.push(PathBrowserEntry {
+            label: "[ Select this folder ]".to_string(),
+            path: current.clone(),
+            kind: PathBrowserEntryKind::Select,
+            selectable,
+        });
         if let Some(parent) = current.parent() {
             entries.push(PathBrowserEntry {
                 label: "..".to_string(),
                 path: parent.to_path_buf(),
                 kind: PathBrowserEntryKind::Parent,
+                selectable: false,
             });
         }
         let mut dirs = Vec::new();
@@ -1942,6 +1944,7 @@ impl App {
                         label: name,
                         path,
                         kind: PathBrowserEntryKind::Dir,
+                        selectable: false,
                     });
                 }
             }
