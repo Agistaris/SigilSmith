@@ -98,6 +98,10 @@ cargo run
 
 Support links (Ko-fi + GitHub Sponsors) are coming next update.
 
+## Credits
+
+- saghm for the `larian_formats` crate used for BG3 LSPK + modsettings parsing.
+
 ## License & Trademarks
 
 SigilSmith is licensed under Apache-2.0. The SigilSmith name and logo are trademarks of
