@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.4.7
+
+- Auto-restart after applying updates (AppImage/tarball).
+
 ## 0.4.6
 
 - Allow applying ready updates from the settings menu.

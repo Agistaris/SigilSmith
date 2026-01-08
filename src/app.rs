@@ -2395,12 +2395,13 @@ impl App {
         match update::apply_downloaded_update(&info, &path) {
             Ok(update::ApplyOutcome::Applied) => {
                 self.update_status = UpdateStatus::Applied { info: info.clone() };
-                self.status = format!("Update applied: v{} (restart)", info.version);
+                self.status = format!("Update applied: v{} (restarting)", info.version);
                 self.set_toast(
-                    &format!("Updated to v{} (restart to use)", info.version),
+                    &format!("Updated to v{} (restarting)", info.version),
                     ToastLevel::Info,
-                    Duration::from_secs(4),
+                    Duration::from_secs(3),
                 );
+                self.restart_after_update();
             }
             Ok(update::ApplyOutcome::Manual { instructions }) => {
                 self.log_info(instructions.clone());
@@ -2412,6 +2413,28 @@ impl App {
                 };
                 self.status = format!("Update apply failed: {err}");
                 self.log_error(format!("Update apply failed: {err}"));
+            }
+        }
+    }
+
+    fn restart_after_update(&mut self) {
+        let args: Vec<String> = std::env::args().skip(1).collect();
+        let exec = std::env::var("APPIMAGE")
+            .ok()
+            .map(PathBuf::from)
+            .or_else(|| std::env::current_exe().ok());
+        let Some(exec) = exec else {
+            self.log_warn("Restart failed: no executable path".to_string());
+            return;
+        };
+
+        match std::process::Command::new(&exec).args(&args).spawn() {
+            Ok(_) => {
+                self.log_info("Restarting after update".to_string());
+                self.should_quit = true;
+            }
+            Err(err) => {
+                self.log_warn(format!("Restart failed: {err}"));
             }
         }
     }
