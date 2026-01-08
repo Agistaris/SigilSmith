@@ -2405,11 +2405,11 @@ fn draw_path_browser(frame: &mut Frame<'_>, _app: &App, theme: &Theme, browser: 
         .unwrap_or(false);
     let (valid_label, invalid_label) = match browser.step {
         SetupStep::GameRoot => (
-            " BG3 install root detected ",
+            " BG3 install root valid ",
             "Not a BG3 install root (needs Data/ + bin/)",
         ),
         SetupStep::LarianDir => (
-            " Larian data dir detected ",
+            " Larian data dir valid ",
             "Not a Larian data dir (needs PlayerProfiles/)",
         ),
     };
@@ -2463,8 +2463,16 @@ fn draw_path_browser(frame: &mut Frame<'_>, _app: &App, theme: &Theme, browser: 
         .style(Style::default().bg(theme.header_bg))
         .highlight_style(highlight_style)
         .highlight_symbol("");
+    let list_chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(1), Constraint::Min(1)])
+        .split(chunks[1]);
+    let spacer = Paragraph::new(Line::from(""))
+        .style(Style::default().bg(theme.header_bg));
+    frame.render_widget(spacer, list_chunks[0]);
+
     let mut state = ListState::default();
-    let view_height = chunks[1].height as usize;
+    let view_height = list_chunks[1].height as usize;
     let total = browser.entries.len();
     let mut offset = 0usize;
     if total > view_height && view_height > 0 {
@@ -2481,7 +2489,7 @@ fn draw_path_browser(frame: &mut Frame<'_>, _app: &App, theme: &Theme, browser: 
         state.select(Some(selected));
         *state.offset_mut() = offset;
     }
-    frame.render_stateful_widget(list, chunks[1], &mut state);
+    frame.render_stateful_widget(list, list_chunks[1], &mut state);
 
     if total > view_height && view_height > 0 {
         let scroll_len = total.saturating_sub(view_height).saturating_add(1);
@@ -2496,21 +2504,44 @@ fn draw_path_browser(frame: &mut Frame<'_>, _app: &App, theme: &Theme, browser: 
             .track_style(Style::default().fg(theme.border))
             .thumb_style(Style::default().fg(theme.accent));
         let scroll_area = Rect {
-            x: chunks[1].x + chunks[1].width.saturating_sub(1),
-            y: chunks[1].y,
+            x: list_chunks[1].x + list_chunks[1].width.saturating_sub(1),
+            y: list_chunks[1].y,
             width: 1,
-            height: chunks[1].height,
+            height: list_chunks[1].height,
         };
         frame.render_stateful_widget(scrollbar, scroll_area, &mut scroll_state);
     }
 
-    let footer = "Tab: switch  Enter: open/select  Backspace: up  S: select  Esc: cancel";
-    let footer_line = truncate_text(footer, chunks[2].width as usize);
-    let footer_widget = Paragraph::new(Line::from(Span::styled(
-        footer_line,
-        Style::default().fg(theme.muted),
-    )))
-    .alignment(Alignment::Center);
+    let footer_plain =
+        "[Tab] Switch  [Enter] Open/Select  [Backspace] Up  [S] Select  [Esc] Cancel";
+    let footer_widget = if footer_plain.chars().count() > chunks[2].width as usize {
+        let footer_line = truncate_text(footer_plain, chunks[2].width as usize);
+        Paragraph::new(Line::from(Span::styled(
+            footer_line,
+            Style::default().fg(theme.muted),
+        )))
+        .alignment(Alignment::Center)
+    } else {
+        let key_style = Style::default()
+            .fg(theme.accent)
+            .add_modifier(Modifier::BOLD);
+        let text_style = Style::default().fg(theme.muted);
+        let footer_line = Line::from(vec![
+            Span::styled("[Tab]", key_style),
+            Span::styled(" Switch  ", text_style),
+            Span::styled("[Enter]", key_style),
+            Span::styled(" Open/Select  ", text_style),
+            Span::styled("[Backspace]", key_style),
+            Span::styled(" Up  ", text_style),
+            Span::styled("[S]", key_style),
+            Span::styled(" Select  ", text_style),
+            Span::styled("[Esc]", key_style),
+            Span::styled(" Cancel", text_style),
+        ]);
+        Paragraph::new(footer_line)
+            .style(Style::default().fg(theme.muted))
+            .alignment(Alignment::Center)
+    };
     frame.render_widget(footer_widget, chunks[2]);
 }
 
