@@ -2428,7 +2428,7 @@ fn draw_path_browser(frame: &mut Frame<'_>, _app: &App, theme: &Theme, browser: 
         Span::styled("Status: ", Style::default().fg(theme.muted)),
         status_span,
     ]);
-    let header = Paragraph::new(vec![path_line, current_line, status_line]);
+    let header = Paragraph::new(vec![path_line, current_line, status_line, Line::from("")]);
     frame.render_widget(header, chunks[0]);
 
     let entries: Vec<ListItem> = browser
@@ -2509,7 +2509,8 @@ fn draw_path_browser(frame: &mut Frame<'_>, _app: &App, theme: &Theme, browser: 
     let footer_widget = Paragraph::new(Line::from(Span::styled(
         footer_line,
         Style::default().fg(theme.muted),
-    )));
+    )))
+    .alignment(Alignment::Center);
     frame.render_widget(footer_widget, chunks[2]);
 }
 
