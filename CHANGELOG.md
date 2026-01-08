@@ -3,6 +3,7 @@
 ## 0.4.2
 
 - Added guided path browser for BG3 install + Larian data directories.
+- Path browser now supports manual path entry and list/path focus switching.
 - Removed accidental path hotkey; configure paths from the menu.
 - Setup flow now shows clear status + auto-detect toast on success.
 - Public repo now includes full source under Apache-2.0 with CI-built releases.

@@ -34,6 +34,7 @@ https://github.com/Agistaris/SigilSmith/releases/tag/v0.4.2
 • Loose files deploy to Data/Generated (or Data).
 • .pak files deploy to the Larian Mods directory.
 • If paths are not detected, open the menu to configure (browser opens automatically).
+  Use Tab to edit the path directly.
 • Full source is available on GitHub (Apache-2.0), with CI-built releases and checksums.
 
 :: ROADMAP ::

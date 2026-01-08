@@ -5,8 +5,9 @@ All release artifacts are built from source by GitHub Actions and published with
 
 On first launch, SigilSmith auto-detects your BG3 paths. If detection fails,
 open the menu with `Esc` and choose "Configure game paths". A path browser will
-open: use arrows to navigate, Enter to open/select, Backspace to go up, and S
-to select the current folder. Config files live under `~/.local/share/sigilsmith/`.
+open: use arrows to navigate, Enter to open/select, Backspace to go up, Tab to
+edit the path, and S to select the current folder. Config files live under
+`~/.local/share/sigilsmith/`.
 
 ## AppImage (Recommended)
 

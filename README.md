@@ -136,4 +136,5 @@ open the menu with `Esc` and choose "Configure game paths".
 You can also edit the config files directly if BG3 is installed in a non-standard path.
 
 If auto-detect fails, SigilSmith opens a path browser. Use arrows to navigate,
-Enter to open/select, Backspace to go up, and S to select the current folder.
+Enter to open/select, Backspace to go up, Tab to edit the path, and S to select
+the current folder.

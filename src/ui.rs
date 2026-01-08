@@ -1,7 +1,8 @@
 use crate::{
     app::{
-        App, DialogChoice, DialogKind, ExplorerItem, ExplorerItemKind, Focus, InputMode,
-        InputPurpose, LogLevel, ToastLevel, PathBrowser, PathBrowserEntryKind, SetupStep,
+        expand_tilde, App, DialogChoice, DialogKind, ExplorerItem, ExplorerItemKind, Focus,
+        InputMode, InputPurpose, LogLevel, ToastLevel, PathBrowser, PathBrowserEntryKind,
+        PathBrowserFocus, SetupStep,
     },
     library::{InstallTarget, ModEntry, TargetKind},
 };
@@ -21,7 +22,7 @@ use ratatui::{
 };
 use std::{
     io,
-    path::Path,
+    path::{Path, PathBuf},
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
@@ -182,11 +183,10 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Result<()> {
             handle_normal_mode(app, key)
         }
         InputMode::Browsing(mut browser) => {
-            handle_browser_mode(app, key, &mut browser)?;
-            if matches!(app.input_mode, InputMode::Normal) {
-                return Ok(());
+            let close = handle_browser_mode(app, key, &mut browser)?;
+            if !close {
+                app.input_mode = InputMode::Browsing(browser);
             }
-            app.input_mode = InputMode::Browsing(browser);
             Ok(())
         }
         InputMode::Editing {
@@ -552,76 +552,125 @@ fn handle_log_mode(app: &mut App, key: KeyEvent) -> Result<()> {
     Ok(())
 }
 
-fn handle_browser_mode(app: &mut App, key: KeyEvent, browser: &mut PathBrowser) -> Result<()> {
+fn handle_browser_mode(
+    app: &mut App,
+    key: KeyEvent,
+    browser: &mut PathBrowser,
+) -> Result<bool> {
     let len = browser.entries.len();
-    match key.code {
-        KeyCode::Up | KeyCode::Char('k') | KeyCode::Char('K') => {
-            browser.selected = browser.selected.saturating_sub(1);
-        }
-        KeyCode::Down | KeyCode::Char('j') | KeyCode::Char('J') => {
-            if len > 0 {
-                browser.selected = (browser.selected + 1).min(len.saturating_sub(1));
+    match browser.focus {
+        PathBrowserFocus::PathInput => match key.code {
+            KeyCode::Esc => {
+                app.input_mode = InputMode::Normal;
+                if !app.paths_ready() {
+                    app.status = "Setup required: open Menu (Esc) to configure paths".to_string();
+                }
+                return Ok(true);
             }
-        }
-        KeyCode::PageUp => {
-            browser.selected = browser.selected.saturating_sub(10);
-        }
-        KeyCode::PageDown => {
-            if len > 0 {
-                browser.selected = (browser.selected + 10).min(len.saturating_sub(1));
+            KeyCode::Tab => {
+                browser.focus = PathBrowserFocus::List;
             }
-        }
-        KeyCode::Home => {
-            browser.selected = 0;
-        }
-        KeyCode::End => {
-            if len > 0 {
-                browser.selected = len.saturating_sub(1);
+            KeyCode::Enter => {
+                let path = expand_tilde(&browser.path_input);
+                if path.is_dir() {
+                    path_browser_set_current(app, browser, path);
+                    browser.focus = PathBrowserFocus::List;
+                } else {
+                    app.status = format!("Path not found: {}", browser.path_input.trim());
+                }
             }
-        }
-        KeyCode::Left | KeyCode::Backspace => {
-            if let Some(parent) = browser.current.parent() {
-                browser.current = parent.to_path_buf();
-                browser.entries = app.build_path_browser_entries(browser.step, &browser.current);
+            KeyCode::Backspace | KeyCode::Delete => {
+                browser.path_input.pop();
+            }
+            KeyCode::Char('u') | KeyCode::Char('U')
+                if key.modifiers.contains(KeyModifiers::CONTROL) =>
+            {
+                browser.path_input.clear();
+            }
+            KeyCode::Char(c) => {
+                if !key.modifiers.contains(KeyModifiers::CONTROL)
+                    && !key.modifiers.contains(KeyModifiers::ALT)
+                {
+                    browser.path_input.push(c);
+                }
+            }
+            _ => {}
+        },
+        PathBrowserFocus::List => match key.code {
+            KeyCode::Up | KeyCode::Char('k') | KeyCode::Char('K') => {
+                browser.selected = browser.selected.saturating_sub(1);
+            }
+            KeyCode::Down | KeyCode::Char('j') | KeyCode::Char('J') => {
+                if len > 0 {
+                    browser.selected = (browser.selected + 1).min(len.saturating_sub(1));
+                }
+            }
+            KeyCode::PageUp => {
+                browser.selected = browser.selected.saturating_sub(10);
+            }
+            KeyCode::PageDown => {
+                if len > 0 {
+                    browser.selected = (browser.selected + 10).min(len.saturating_sub(1));
+                }
+            }
+            KeyCode::Home => {
                 browser.selected = 0;
             }
-        }
-        KeyCode::Char('s') | KeyCode::Char('S') => {
-            if let Some(select) = browser
-                .entries
-                .iter()
-                .find(|entry| entry.kind == PathBrowserEntryKind::Select)
-            {
-                app.apply_path_browser_selection(browser.step, select.path.clone())?;
-                return Ok(());
+            KeyCode::End => {
+                if len > 0 {
+                    browser.selected = len.saturating_sub(1);
+                }
             }
-        }
-        KeyCode::Enter => {
-            if let Some(entry) = browser.entries.get(browser.selected) {
-                match entry.kind {
-                    PathBrowserEntryKind::Select => {
-                        app.apply_path_browser_selection(browser.step, entry.path.clone())?;
-                        return Ok(());
-                    }
-                    PathBrowserEntryKind::Parent | PathBrowserEntryKind::Dir => {
-                        browser.current = entry.path.clone();
-                        browser.entries =
-                            app.build_path_browser_entries(browser.step, &browser.current);
-                        browser.selected = 0;
+            KeyCode::Tab => {
+                browser.focus = PathBrowserFocus::PathInput;
+                browser.path_input = browser.current.display().to_string();
+            }
+            KeyCode::Left | KeyCode::Backspace => {
+                if let Some(parent) = browser.current.parent() {
+                    path_browser_set_current(app, browser, parent.to_path_buf());
+                }
+            }
+            KeyCode::Char('s') | KeyCode::Char('S') => {
+                if let Some(select) = browser
+                    .entries
+                    .iter()
+                    .find(|entry| entry.kind == PathBrowserEntryKind::Select)
+                {
+                    app.apply_path_browser_selection(browser.step, select.path.clone())?;
+                    return Ok(true);
+                }
+            }
+            KeyCode::Enter => {
+                if let Some(entry) = browser.entries.get(browser.selected) {
+                    match entry.kind {
+                        PathBrowserEntryKind::Select => {
+                            app.apply_path_browser_selection(browser.step, entry.path.clone())?;
+                            return Ok(true);
+                        }
+                        PathBrowserEntryKind::Parent | PathBrowserEntryKind::Dir => {
+                            path_browser_set_current(app, browser, entry.path.clone());
+                        }
                     }
                 }
             }
-        }
-        KeyCode::Esc => {
-            app.input_mode = InputMode::Normal;
-            if !app.paths_ready() {
-                app.status = "Setup required: open Menu (Esc) to configure paths".to_string();
+            KeyCode::Esc => {
+                app.input_mode = InputMode::Normal;
+                if !app.paths_ready() {
+                    app.status = "Setup required: open Menu (Esc) to configure paths".to_string();
+                }
+                return Ok(true);
             }
-            return Ok(());
-        }
-        _ => {}
+            _ => {}
+        },
     }
-    Ok(())
+    Ok(false)
+}
+
+fn path_browser_set_current(app: &App, browser: &mut PathBrowser, path: PathBuf) {
+    browser.current = path.clone();
+    browser.entries = app.build_path_browser_entries(browser.step, &browser.current);
+    browser.selected = 0;
+    browser.path_input = path.display().to_string();
 }
 
 fn handle_input_mode(
@@ -2306,17 +2355,37 @@ fn draw_path_browser(frame: &mut Frame<'_>, _app: &App, theme: &Theme, browser: 
 
     let chunks = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Length(2), Constraint::Min(5), Constraint::Length(2)])
+        .constraints([Constraint::Length(3), Constraint::Min(5), Constraint::Length(2)])
         .split(inner);
 
+    let path_focus = browser.focus == PathBrowserFocus::PathInput;
+    let mut path_value = browser.path_input.clone();
+    if path_focus {
+        path_value.push('|');
+    }
+    let path_width = chunks[0].width.saturating_sub(6) as usize;
+    let path_value = truncate_text(&path_value, path_width.max(1));
+    let path_style = if path_focus {
+        Style::default()
+            .bg(theme.accent_soft)
+            .fg(Color::Black)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(theme.text)
+    };
+    let path_line = Line::from(vec![
+        Span::styled("Path: ", Style::default().fg(theme.muted)),
+        Span::styled(path_value, path_style),
+    ]);
     let current_label = format!(
         "Current: {}",
         truncate_text(&browser.current.display().to_string(), chunks[0].width as usize)
     );
-    let header = Paragraph::new(Line::from(Span::styled(
+    let current_line = Line::from(Span::styled(
         current_label,
         Style::default().fg(theme.muted),
-    )));
+    ));
+    let header = Paragraph::new(vec![path_line, current_line]);
     frame.render_widget(header, chunks[0]);
 
     let entries: Vec<ListItem> = browser
@@ -2333,10 +2402,14 @@ fn draw_path_browser(frame: &mut Frame<'_>, _app: &App, theme: &Theme, browser: 
             ListItem::new(Line::from(Span::styled(entry.label.clone(), style)))
         })
         .collect();
-    let highlight_style = Style::default()
-        .bg(theme.accent_soft)
-        .fg(Color::Black)
-        .add_modifier(Modifier::BOLD);
+    let highlight_style = if browser.focus == PathBrowserFocus::List {
+        Style::default()
+            .bg(theme.accent_soft)
+            .fg(Color::Black)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().bg(theme.header_bg).fg(theme.text)
+    };
     let list = List::new(entries)
         .style(Style::default().bg(theme.header_bg))
         .highlight_style(highlight_style)
@@ -2382,7 +2455,7 @@ fn draw_path_browser(frame: &mut Frame<'_>, _app: &App, theme: &Theme, browser: 
         frame.render_stateful_widget(scrollbar, scroll_area, &mut scroll_state);
     }
 
-    let footer = "Enter: open/select  Backspace: up  S: select  Esc: cancel";
+    let footer = "Tab: switch  Enter: open/select  Backspace: up  S: select  Esc: cancel";
     let footer_line = truncate_text(footer, chunks[2].width as usize);
     let footer_widget = Paragraph::new(Line::from(Span::styled(
         footer_line,

@@ -66,6 +66,12 @@ pub enum PathBrowserEntryKind {
     Dir,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PathBrowserFocus {
+    List,
+    PathInput,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PathBrowserEntry {
     pub label: String,
@@ -79,6 +85,8 @@ pub struct PathBrowser {
     pub current: PathBuf,
     pub entries: Vec<PathBrowserEntry>,
     pub selected: usize,
+    pub path_input: String,
+    pub focus: PathBrowserFocus,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1852,11 +1860,14 @@ impl App {
             SetupStep::GameRoot => "Select BG3 install root (Data/ + bin/)",
             SetupStep::LarianDir => "Select Larian data dir (PlayerProfiles/)",
         };
+        let input_seed = current.display().to_string();
         self.input_mode = InputMode::Browsing(PathBrowser {
             step,
             current,
             entries,
             selected: 0,
+            path_input: input_seed,
+            focus: PathBrowserFocus::List,
         });
         self.status = title.to_string();
     }
@@ -3790,7 +3801,7 @@ fn mod_matches_filter(mod_entry: &ModEntry, filter: &str) -> bool {
 
 const LOG_CAPACITY: usize = 200;
 
-fn expand_tilde(input: &str) -> PathBuf {
+pub(crate) fn expand_tilde(input: &str) -> PathBuf {
     let mut value = input.trim().to_string();
     value = strip_outer_quotes(&value);
     if let Some(rest) = value.strip_prefix("file://") {
