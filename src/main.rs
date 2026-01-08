@@ -9,6 +9,7 @@ mod library;
 mod metadata;
 mod native_pak;
 mod smart_rank;
+mod update;
 mod ui;
 
 use anyhow::Result;

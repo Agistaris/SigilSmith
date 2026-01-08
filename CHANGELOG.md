@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.4.4
+
+- Settings menu now shows app version + update status and supports manual update checks.
+- Update availability surfaces in settings with clear status messaging.
+
+## 0.4.3
+
+- Auto-update check on startup with AppImage self-update and deb/tar instructions.
+- Update downloads are verified with SHA256SUMS before applying.
+
 ## 0.4.2
 
 - Added guided path browser for BG3 install + Larian data directories.

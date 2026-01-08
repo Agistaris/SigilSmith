@@ -1,7 +1,7 @@
 use crate::{
     app::{
         expand_tilde, App, DialogChoice, DialogKind, ExplorerItem, ExplorerItemKind, Focus,
-        InputMode, InputPurpose, LogLevel, ToastLevel, PathBrowser, PathBrowserEntryKind,
+        InputMode, InputPurpose, LogLevel, ToastLevel, UpdateStatus, PathBrowser, PathBrowserEntryKind,
         PathBrowserFocus, SetupStep,
     },
     library::{InstallTarget, ModEntry, TargetKind},
@@ -139,6 +139,7 @@ fn run_loop(terminal: &mut Terminal<impl Backend>, app: &mut App) -> Result<()> 
         app.poll_imports();
         app.poll_metadata_refresh();
         app.poll_smart_rank();
+        app.poll_updates();
         app.clamp_selection();
         terminal.draw(|frame| draw(frame, app))?;
 
@@ -286,11 +287,12 @@ enum SettingsItemKind {
     ToggleProfileDelete,
     ToggleModDelete,
     ActionSmartRank,
+    ActionCheckUpdates,
 }
 
 #[derive(Debug, Clone)]
 struct SettingsItem {
-    label: &'static str,
+    label: String,
     kind: SettingsItemKind,
     checked: Option<bool>,
 }
@@ -298,26 +300,45 @@ struct SettingsItem {
 fn settings_items(app: &App) -> Vec<SettingsItem> {
     vec![
         SettingsItem {
-            label: "Confirm profile delete",
+            label: "Confirm profile delete".to_string(),
             kind: SettingsItemKind::ToggleProfileDelete,
             checked: Some(app.app_config.confirm_profile_delete),
         },
         SettingsItem {
-            label: "Confirm mod delete",
+            label: "Confirm mod delete".to_string(),
             kind: SettingsItemKind::ToggleModDelete,
             checked: Some(app.app_config.confirm_mod_delete),
         },
         SettingsItem {
-            label: "Configure game paths",
+            label: "Configure game paths".to_string(),
             kind: SettingsItemKind::ActionSetupPaths,
             checked: None,
         },
         SettingsItem {
-            label: "AI Smart Ranking",
+            label: update_menu_label(app),
+            kind: SettingsItemKind::ActionCheckUpdates,
+            checked: None,
+        },
+        SettingsItem {
+            label: "AI Smart Ranking".to_string(),
             kind: SettingsItemKind::ActionSmartRank,
             checked: None,
         },
     ]
+}
+
+fn update_menu_label(app: &App) -> String {
+    match &app.update_status {
+        UpdateStatus::Checking => "Check for updates (checking...)".to_string(),
+        UpdateStatus::Available { info, .. } => {
+            format!("Update available: v{} (Enter to update)", info.version)
+        }
+        UpdateStatus::Applied { info } => format!("Update applied: v{} (restart)", info.version),
+        UpdateStatus::UpToDate { .. } => "Check for updates (latest)".to_string(),
+        UpdateStatus::Failed { .. } => "Check for updates (failed; retry)".to_string(),
+        UpdateStatus::Skipped { .. } => "Check for updates (see log)".to_string(),
+        UpdateStatus::Idle => "Check for updates".to_string(),
+    }
 }
 
 fn handle_settings_menu(app: &mut App, key: KeyEvent) -> Result<()> {
@@ -358,6 +379,9 @@ fn handle_settings_menu(app: &mut App, key: KeyEvent) -> Result<()> {
                     SettingsItemKind::ActionSmartRank => {
                         app.close_settings_menu();
                         app.open_smart_rank_preview();
+                    }
+                    SettingsItemKind::ActionCheckUpdates => {
+                        app.request_update_check();
                     }
                 }
             }
@@ -2961,6 +2985,14 @@ fn build_settings_menu_lines(app: &App, theme: &Theme, selected: usize) -> Vec<L
             .fg(theme.accent)
             .add_modifier(Modifier::BOLD),
     )));
+    lines.push(Line::from(Span::styled(
+        format!("Version: v{}", env!("CARGO_PKG_VERSION")),
+        Style::default().fg(theme.muted),
+    )));
+    lines.push(Line::from(Span::styled(
+        update_status_line(app),
+        Style::default().fg(theme.muted),
+    )));
     lines.push(Line::from(""));
 
     let items = settings_items(app);
@@ -2972,7 +3004,9 @@ fn build_settings_menu_lines(app: &App, theme: &Theme, selected: usize) -> Vec<L
             Style::default().fg(theme.text)
         };
         let row = match item.kind {
-            SettingsItemKind::ActionSetupPaths | SettingsItemKind::ActionSmartRank => vec![
+            SettingsItemKind::ActionSetupPaths
+            | SettingsItemKind::ActionSmartRank
+            | SettingsItemKind::ActionCheckUpdates => vec![
                 Span::styled(prefix.to_string(), style),
                 Span::raw(" "),
                 Span::styled("▶", Style::default().fg(theme.accent)),
@@ -3068,6 +3102,22 @@ fn build_settings_menu_lines(app: &App, theme: &Theme, selected: usize) -> Vec<L
     )));
 
     lines
+}
+
+fn update_status_line(app: &App) -> String {
+    match &app.update_status {
+        UpdateStatus::Checking => "Updates: checking...".to_string(),
+        UpdateStatus::Available { info, .. } => {
+            format!("Updates: v{} available (press Enter)", info.version)
+        }
+        UpdateStatus::Applied { info } => format!("Updates: applied v{} (restart)", info.version),
+        UpdateStatus::UpToDate { version } => format!("Updates: latest (v{})", version),
+        UpdateStatus::Failed { error } => format!("Updates: failed ({error})"),
+        UpdateStatus::Skipped { version, reason } => {
+            format!("Updates: v{version} skipped ({reason})")
+        }
+        UpdateStatus::Idle => "Updates: not checked".to_string(),
+    }
 }
 
 fn mode_toast(app: &App) -> Option<(String, ToastLevel)> {

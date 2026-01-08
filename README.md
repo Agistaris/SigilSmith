@@ -26,6 +26,7 @@ Multi-game support is coming next via an open adapter template (BG3-first today,
 - AI Smart Ranking preview (diff view + scroll) to suggest a stable order.
 - Created/Added dates from meta.lsx/info.json for better ordering heuristics.
 - Native mod.io entries show inline and can be managed alongside manual mods.
+- Auto-update check on startup (AppImage self-update, deb/tar downloads with instructions).
 
 ## Requirements
 

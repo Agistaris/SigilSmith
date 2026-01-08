@@ -12,6 +12,7 @@ use crate::{
     metadata,
     native_pak,
     smart_rank,
+    update,
 };
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
@@ -135,6 +136,21 @@ pub enum LogLevel {
     Error,
 }
 
+#[derive(Debug, Clone)]
+pub enum UpdateStatus {
+    Idle,
+    Checking,
+    UpToDate { version: String },
+    Available {
+        info: update::UpdateInfo,
+        path: PathBuf,
+        instructions: String,
+    },
+    Applied { info: update::UpdateInfo },
+    Skipped { version: String, reason: String },
+    Failed { error: String },
+}
+
 enum ImportMessage {
     Completed {
         path: PathBuf,
@@ -178,6 +194,11 @@ enum ConflictMessage {
     Failed {
         error: String,
     },
+}
+
+enum UpdateMessage {
+    Completed(update::UpdateResult),
+    Failed { error: String },
 }
 
 #[derive(Debug, Clone)]
@@ -287,6 +308,7 @@ pub struct App {
     pub toast: Option<Toast>,
     pub mod_filter: String,
     pub settings_menu: Option<SettingsMenu>,
+    pub update_status: UpdateStatus,
     pub smart_rank_preview: Option<SmartRankPreview>,
     pub smart_rank_scroll: usize,
     pub smart_rank_view: SmartRankView,
@@ -298,6 +320,9 @@ pub struct App {
     metadata_tx: Sender<MetadataMessage>,
     metadata_rx: Receiver<MetadataMessage>,
     metadata_active: bool,
+    update_tx: Sender<UpdateMessage>,
+    update_rx: Receiver<UpdateMessage>,
+    update_active: bool,
     import_queue: VecDeque<PathBuf>,
     import_active: Option<PathBuf>,
     import_tx: Sender<ImportMessage>,
@@ -428,6 +453,7 @@ impl App {
         let (conflict_tx, conflict_rx) = mpsc::channel();
         let (smart_rank_tx, smart_rank_rx) = mpsc::channel();
         let (metadata_tx, metadata_rx) = mpsc::channel();
+        let (update_tx, update_rx) = mpsc::channel();
         let log_path = config.data_dir.join("sigilsmith.log");
 
         let mut app = Self {
@@ -449,6 +475,7 @@ impl App {
             toast: None,
             mod_filter: String::new(),
             settings_menu: None,
+            update_status: UpdateStatus::Idle,
             smart_rank_preview: None,
             smart_rank_scroll: 0,
             smart_rank_view: SmartRankView::Changes,
@@ -460,6 +487,9 @@ impl App {
             metadata_tx,
             metadata_rx,
             metadata_active: false,
+            update_tx,
+            update_rx,
+            update_active: false,
             import_queue: VecDeque::new(),
             import_active: None,
             import_tx,
@@ -516,6 +546,7 @@ impl App {
         if app.paths_ready() {
             app.start_smart_rank_scan(SmartRankMode::Warmup);
         }
+        app.start_update_check();
         Ok(app)
     }
 
@@ -633,6 +664,7 @@ impl App {
 
     pub fn open_settings_menu(&mut self) {
         self.settings_menu = Some(SettingsMenu { selected: 0 });
+        self.start_update_check();
     }
 
     pub fn close_settings_menu(&mut self) {
@@ -2301,6 +2333,42 @@ impl App {
         });
     }
 
+    fn start_update_check(&mut self) {
+        if cfg!(debug_assertions) {
+            return;
+        }
+        if self.update_active {
+            return;
+        }
+        self.update_status = UpdateStatus::Checking;
+        self.update_active = true;
+        let tx = self.update_tx.clone();
+        let current_version = env!("CARGO_PKG_VERSION").to_string();
+        thread::spawn(move || {
+            let message = match update::check_for_updates(&current_version) {
+                Ok(result) => UpdateMessage::Completed(result),
+                Err(err) => UpdateMessage::Failed {
+                    error: err.to_string(),
+                },
+            };
+            let _ = tx.send(message);
+        });
+    }
+
+    pub fn request_update_check(&mut self) {
+        if let UpdateStatus::Available { path, instructions, .. } = &self.update_status {
+            let path = path.clone();
+            let instructions = instructions.clone();
+            self.log_info(format!("Update package ready: {}", path.display()));
+            self.log_info(instructions);
+            self.set_toast("Update ready: see log", ToastLevel::Info, Duration::from_secs(3));
+        }
+        self.start_update_check();
+        if self.update_active {
+            self.status = "Checking for updates...".to_string();
+        }
+    }
+
     pub fn poll_metadata_refresh(&mut self) {
         loop {
             match self.metadata_rx.try_recv() {
@@ -2341,6 +2409,80 @@ impl App {
                 Err(TryRecvError::Empty) => break,
                 Err(TryRecvError::Disconnected) => {
                     self.metadata_active = false;
+                    break;
+                }
+            }
+        }
+    }
+
+    pub fn poll_updates(&mut self) {
+        loop {
+            match self.update_rx.try_recv() {
+                Ok(message) => {
+                    self.update_active = false;
+                    match message {
+                        UpdateMessage::Completed(result) => match result {
+                            update::UpdateResult::UpToDate => {
+                                self.update_status = UpdateStatus::UpToDate {
+                                    version: env!("CARGO_PKG_VERSION").to_string(),
+                                };
+                                self.log_info("Update check: up to date".to_string());
+                            }
+                            update::UpdateResult::Applied(info) => {
+                                self.update_status = UpdateStatus::Applied { info: info.clone() };
+                                self.status = format!("Update applied: v{}", info.version);
+                                self.log_info(format!(
+                                    "Update applied: v{} ({:?}, {})",
+                                    info.version, info.kind, info.asset_name
+                                ));
+                                self.set_toast(
+                                    &format!("Updated to v{} (restart to use)", info.version),
+                                    ToastLevel::Info,
+                                    Duration::from_secs(4),
+                                );
+                            }
+                            update::UpdateResult::Ready {
+                                info,
+                                path,
+                                instructions,
+                            } => {
+                                self.update_status = UpdateStatus::Available {
+                                    info: info.clone(),
+                                    path: path.clone(),
+                                    instructions: instructions.clone(),
+                                };
+                                self.status = format!("Update ready: v{}", info.version);
+                                self.log_info(format!(
+                                    "Update ready: v{} ({:?}, {})",
+                                    info.version,
+                                    info.kind,
+                                    path.display()
+                                ));
+                                self.log_info(instructions.clone());
+                                self.set_toast(
+                                    &format!("Update ready: v{} (see log)", info.version),
+                                    ToastLevel::Info,
+                                    Duration::from_secs(4),
+                                );
+                            }
+                            update::UpdateResult::Skipped { version, reason } => {
+                                self.update_status =
+                                    UpdateStatus::Skipped { version: version.clone(), reason: reason.clone() };
+                                self.log_warn(format!(
+                                    "Update available (v{version}) skipped: {reason}"
+                                ));
+                            }
+                        },
+                        UpdateMessage::Failed { error } => {
+                            self.update_active = false;
+                            self.update_status = UpdateStatus::Failed { error: error.clone() };
+                            self.log_warn(format!("Update check failed: {error}"));
+                        }
+                    }
+                }
+                Err(TryRecvError::Empty) => break,
+                Err(TryRecvError::Disconnected) => {
+                    self.update_active = false;
                     break;
                 }
             }
