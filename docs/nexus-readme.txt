@@ -1,4 +1,4 @@
-SIGILSMITH - 0.4.5
+SIGILSMITH - 0.4.6
 Linux-first TUI mod manager for Baldur's Gate 3
 
 SigilSmith is a keyboard-first terminal UI for managing BG3 mods on Linux.
@@ -19,15 +19,15 @@ Profiles, overrides, smart ordering, and clean deploys in one place.
 
 :: INSTALL ::
 Recommended (AppImage)
-• chmod +x sigilsmith-0.4.5-x86_64.AppImage
-• ./sigilsmith-0.4.5-x86_64.AppImage
+• chmod +x sigilsmith-0.4.6-x86_64.AppImage
+• ./sigilsmith-0.4.6-x86_64.AppImage
 
 Alternate formats
-• sigilsmith-0.4.5-linux-x86_64.tar.gz
-• sigilsmith_0.4.5-1_amd64.deb
+• sigilsmith-0.4.6-linux-x86_64.tar.gz
+• sigilsmith_0.4.6-1_amd64.deb
 
 :: GITHUB RELEASE / CHECKSUMS ::
-https://github.com/Agistaris/SigilSmith/releases/tag/v0.4.5
+https://github.com/Agistaris/SigilSmith/releases/tag/v0.4.6
 
 :: NOTES ::
 • SigilSmith only manages files you provide; no game assets are bundled.

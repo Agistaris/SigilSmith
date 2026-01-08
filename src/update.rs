@@ -44,6 +44,12 @@ pub enum UpdateResult {
     },
 }
 
+#[derive(Debug, Clone)]
+pub enum ApplyOutcome {
+    Applied,
+    Manual { instructions: String },
+}
+
 #[derive(Debug, Deserialize)]
 struct Release {
     tag_name: String,
@@ -152,6 +158,39 @@ pub fn check_for_updates(current_version: &str) -> Result<UpdateResult> {
                 ),
             })
         }
+    }
+}
+
+pub fn apply_downloaded_update(info: &UpdateInfo, path: &Path) -> Result<ApplyOutcome> {
+    match info.kind {
+        UpdateKind::AppImage => {
+            if let Some(appimage_path) = detect_update_target().appimage_path {
+                match apply_appimage_update(path, &appimage_path) {
+                    Ok(()) => Ok(ApplyOutcome::Applied),
+                    Err(_) => Ok(ApplyOutcome::Manual {
+                        instructions: format!(
+                            "Move update into place: mv '{}' '{}'",
+                            path.display(),
+                            appimage_path.display()
+                        ),
+                    }),
+                }
+            } else {
+                Ok(ApplyOutcome::Manual {
+                    instructions: format!(
+                        "Move update into place: mv '{}' '<path-to-AppImage>'",
+                        path.display()
+                    ),
+                })
+            }
+        }
+        UpdateKind::Deb => Ok(ApplyOutcome::Manual {
+            instructions: format!("Install update: sudo dpkg -i '{}'", path.display()),
+        }),
+        UpdateKind::Rpm => Ok(ApplyOutcome::Manual {
+            instructions: format!("Install update: sudo rpm -Uvh '{}'", path.display()),
+        }),
+        UpdateKind::Tarball => apply_tarball_update(path),
     }
 }
 
@@ -432,4 +471,60 @@ fn set_executable(path: &Path) -> Result<()> {
         fs::set_permissions(path, perms)?;
     }
     Ok(())
+}
+
+fn apply_tarball_update(path: &Path) -> Result<ApplyOutcome> {
+    let current = env::current_exe().context("resolve current executable")?;
+    let target_dir = match current.parent() {
+        Some(dir) => dir.to_path_buf(),
+        None => {
+            return Ok(ApplyOutcome::Manual {
+                instructions: format!(
+                    "Extract and replace: tar -xzf '{}' -C '<install-dir>'",
+                    path.display()
+                ),
+            })
+        }
+    };
+
+    if !dir_writable(&target_dir) {
+        return Ok(ApplyOutcome::Manual {
+            instructions: format!(
+                "Extract and replace: tar -xzf '{}' -C '{}'",
+                path.display(),
+                target_dir.display()
+            ),
+        });
+    }
+
+    let status = std::process::Command::new("tar")
+        .arg("-xzf")
+        .arg(path)
+        .arg("-C")
+        .arg(&target_dir)
+        .status()
+        .context("run tar")?;
+
+    if status.success() {
+        Ok(ApplyOutcome::Applied)
+    } else {
+        Ok(ApplyOutcome::Manual {
+            instructions: format!(
+                "Extract and replace: tar -xzf '{}' -C '{}'",
+                path.display(),
+                target_dir.display()
+            ),
+        })
+    }
+}
+
+fn dir_writable(dir: &Path) -> bool {
+    let test_path = dir.join(".sigilsmith-write-test");
+    match File::create(&test_path) {
+        Ok(_) => {
+            let _ = fs::remove_file(&test_path);
+            true
+        }
+        Err(_) => false,
+    }
 }

@@ -381,7 +381,11 @@ fn handle_settings_menu(app: &mut App, key: KeyEvent) -> Result<()> {
                         app.open_smart_rank_preview();
                     }
                     SettingsItemKind::ActionCheckUpdates => {
-                        app.request_update_check();
+                        if matches!(app.update_status, UpdateStatus::Available { .. }) {
+                            app.apply_ready_update();
+                        } else {
+                            app.request_update_check();
+                        }
                     }
                 }
             }

@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.4.6
+
+- Allow applying ready updates from the settings menu.
+- Auto-apply tarball updates when the install directory is writable.
+
 ## 0.4.5
 
 - Fix update check state persisting after completion/timeout.

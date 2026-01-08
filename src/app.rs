@@ -2384,6 +2384,38 @@ impl App {
         }
     }
 
+    pub fn apply_ready_update(&mut self) {
+        let UpdateStatus::Available { info, path, .. } = self.update_status.clone() else {
+            self.request_update_check();
+            return;
+        };
+
+        self.status = "Applying update...".to_string();
+        self.log_info(format!("Applying update v{}", info.version));
+        match update::apply_downloaded_update(&info, &path) {
+            Ok(update::ApplyOutcome::Applied) => {
+                self.update_status = UpdateStatus::Applied { info: info.clone() };
+                self.status = format!("Update applied: v{} (restart)", info.version);
+                self.set_toast(
+                    &format!("Updated to v{} (restart to use)", info.version),
+                    ToastLevel::Info,
+                    Duration::from_secs(4),
+                );
+            }
+            Ok(update::ApplyOutcome::Manual { instructions }) => {
+                self.log_info(instructions.clone());
+                self.set_toast("Update ready: see log", ToastLevel::Info, Duration::from_secs(3));
+            }
+            Err(err) => {
+                self.update_status = UpdateStatus::Failed {
+                    error: err.to_string(),
+                };
+                self.status = format!("Update apply failed: {err}");
+                self.log_error(format!("Update apply failed: {err}"));
+            }
+        }
+    }
+
     pub fn poll_metadata_refresh(&mut self) {
         loop {
             match self.metadata_rx.try_recv() {
