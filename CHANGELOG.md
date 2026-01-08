@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.4.5
+
+- Fix update check state persisting after completion/timeout.
+
 ## 0.4.4
 
 - Settings menu now shows app version + update status and supports manual update checks.

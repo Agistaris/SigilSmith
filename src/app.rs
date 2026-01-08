@@ -323,6 +323,7 @@ pub struct App {
     update_tx: Sender<UpdateMessage>,
     update_rx: Receiver<UpdateMessage>,
     update_active: bool,
+    update_started_at: Option<Instant>,
     import_queue: VecDeque<PathBuf>,
     import_active: Option<PathBuf>,
     import_tx: Sender<ImportMessage>,
@@ -490,6 +491,7 @@ impl App {
             update_tx,
             update_rx,
             update_active: false,
+            update_started_at: None,
             import_queue: VecDeque::new(),
             import_active: None,
             import_tx,
@@ -1849,6 +1851,18 @@ impl App {
                 }
             }
         }
+
+        if self.update_active {
+            if let Some(started_at) = self.update_started_at {
+                if started_at.elapsed() >= Duration::from_secs(15) {
+                    self.update_active = false;
+                    self.update_started_at = None;
+                    self.update_status =
+                        UpdateStatus::Failed { error: "timeout".to_string() };
+                    self.log_warn("Update check timed out".to_string());
+                }
+            }
+        }
     }
 
     pub fn paths_ready(&self) -> bool {
@@ -2342,6 +2356,7 @@ impl App {
         }
         self.update_status = UpdateStatus::Checking;
         self.update_active = true;
+        self.update_started_at = Some(Instant::now());
         let tx = self.update_tx.clone();
         let current_version = env!("CARGO_PKG_VERSION").to_string();
         thread::spawn(move || {
@@ -2420,6 +2435,7 @@ impl App {
             match self.update_rx.try_recv() {
                 Ok(message) => {
                     self.update_active = false;
+                    self.update_started_at = None;
                     match message {
                         UpdateMessage::Completed(result) => match result {
                             update::UpdateResult::UpToDate => {
@@ -2483,6 +2499,7 @@ impl App {
                 Err(TryRecvError::Empty) => break,
                 Err(TryRecvError::Disconnected) => {
                     self.update_active = false;
+                    self.update_started_at = None;
                     break;
                 }
             }
