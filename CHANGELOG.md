@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+## 0.5.0
+
+- Native mod entries resolve .pak filenames (including spaces) and stop overwriting Created dates when metadata is missing.
+- Mod stack search bar with `/` or `Ctrl+F`, debounced preview, and inline clear hints; global shortcuts focus the mod stack.
+- Mod stack sorting with visible indicator, Ctrl+arrow cycling, and a guard dialog when moving while sorted/filtered.
+- Help overlay and context panels refined with stable legend/hotkeys layout and clearer headers.
+- PageUp/PageDown now page through the mod list when focused.
+- Import pipeline improvements for script extender-style archives and override `.pak` files without `meta.lsx`.
+- Ignore `.git` and `.vscode` folders when importing/scanning/deploying loose files.
+- Update checks fixed from the settings menu.
+- Refresh release headers and screenshots for the 0.5.x series.
+
 ## 0.4.8
 
 - Reconcile modsettings entries without managed storage to resolve native .pak filenames (incl. spaces) and timestamps.
