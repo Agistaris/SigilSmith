@@ -2,8 +2,7 @@ use crate::{
     config::GameConfig,
     game,
     library::{InstallTarget, Library, ModEntry, ProfileEntry, TargetKind},
-    metadata,
-    native_pak,
+    metadata, native_pak,
 };
 use anyhow::{Context, Result};
 use lz4_flex::block::decompress;
@@ -131,9 +130,7 @@ where
         Some(&config.game_root),
         Some(&config.larian_dir),
     )?;
-    let profile = library
-        .active_profile()
-        .context("active profile not set")?;
+    let profile = library.active_profile().context("active profile not set")?;
     let mod_map = library.index_by_id();
     let mut warnings = Vec::new();
     let native_pak_index = native_pak::build_native_pak_index(&paths.larian_mods_dir);
@@ -157,7 +154,11 @@ where
             .targets
             .iter()
             .any(|target| !matches!(target, InstallTarget::Pak { .. }));
-        let group = if has_loose { RankGroup::Loose } else { RankGroup::Pak };
+        let group = if has_loose {
+            RankGroup::Loose
+        } else {
+            RankGroup::Pak
+        };
         group_by_id.insert(entry.id.clone(), group);
         if entry.enabled {
             match group {
@@ -229,12 +230,9 @@ where
             }
 
             if matches!(group, RankGroup::Pak) {
-                if let Ok(meta) = read_mod_metadata(
-                    mod_entry,
-                    config,
-                    &paths.larian_mods_dir,
-                    &native_pak_index,
-                ) {
+                if let Ok(meta) =
+                    read_mod_metadata(mod_entry, config, &paths.larian_mods_dir, &native_pak_index)
+                {
                     dependencies = meta.dependencies;
                     tags = meta.tags;
                     meta_created = meta.created_at;
@@ -298,9 +296,10 @@ where
     for group in [RankGroup::Loose, RankGroup::Pak] {
         let mut path_counts: HashMap<String, usize> = HashMap::new();
         let mut path_mods: HashMap<String, Vec<String>> = HashMap::new();
-        for item in items.iter().filter(|item| {
-            item.group == group && item.enabled && item.has_data
-        }) {
+        for item in items
+            .iter()
+            .filter(|item| item.group == group && item.enabled && item.has_data)
+        {
             for path in &item.file_paths {
                 *path_counts.entry(path.clone()).or_insert(0) += 1;
                 path_mods
@@ -323,11 +322,7 @@ where
             .collect();
         path_entries.sort_by(|a, b| b.1.len().cmp(&a.1.len()));
         for (path, mods) in path_entries.into_iter().take(4) {
-            top_paths.push(ConflictPathInfo {
-                group,
-                path,
-                mods,
-            });
+            top_paths.push(ConflictPathInfo { group, path, mods });
         }
 
         for item in items.iter_mut().filter(|item| item.group == group) {
@@ -381,12 +376,7 @@ where
         .filter(|(a, b)| a.id != b.id)
         .count();
 
-    let explain = build_explain_lines(
-        &items,
-        &top_paths,
-        &mod_map,
-        profile,
-    );
+    let explain = build_explain_lines(&items, &top_paths, &mod_map, profile);
 
     Ok(SmartRankResult {
         order: new_order,
@@ -517,7 +507,8 @@ fn topological_rank<'a>(
     }
 
     if remaining > 0 {
-        warnings.push("Smart rank dependency cycle detected; falling back to score order".to_string());
+        warnings
+            .push("Smart rank dependency cycle detected; falling back to score order".to_string());
         let mut fallback: Vec<&RankItem> = items
             .iter()
             .filter(|item| reorder_set.contains(&item.id))
@@ -615,7 +606,12 @@ fn scan_loose_files(mod_entry: &ModEntry, data_dir: &Path) -> Result<Vec<FileEnt
             continue;
         }
         let prefix = format!("{}:", target_kind_label(kind));
-        for entry in WalkDir::new(&root).into_iter().filter_map(Result::ok) {
+        for entry in WalkDir::new(&root)
+            .follow_links(false)
+            .into_iter()
+            .filter_entry(|entry| !is_ignored_mod_path(entry.path()))
+        {
+            let entry = entry?;
             if !entry.file_type().is_file() {
                 continue;
             }
@@ -744,7 +740,6 @@ fn scan_pak_index(path: &Path) -> Result<Vec<FileEntry>> {
     Ok(out)
 }
 
-
 fn patch_score(mod_entry: &ModEntry, tags: &[String]) -> (u8, Vec<String>) {
     let mut score = 0u8;
     let mut reasons = Vec::new();
@@ -859,8 +854,7 @@ fn build_explain_lines(
                 kind: ExplainLineKind::Item,
                 text: format!(
                     "[{group_label}] {} — {} (winner: {winner})",
-                    info.path,
-                    mods_label
+                    info.path, mods_label
                 ),
             });
         }
@@ -951,6 +945,16 @@ fn normalize_path(path: &str) -> String {
     path.replace('\\', "/")
         .trim_start_matches('/')
         .to_ascii_lowercase()
+}
+
+fn is_ignored_mod_path(path: &Path) -> bool {
+    path.components().any(|component| {
+        let part = component.as_os_str().to_string_lossy();
+        part.eq_ignore_ascii_case("__MACOSX")
+            || part == ".git"
+            || part == ".svn"
+            || part == ".vscode"
+    })
 }
 
 fn target_kind_label(kind: TargetKind) -> &'static str {

@@ -282,22 +282,24 @@ fn select_asset(assets: &[Asset], kind: UpdateKind, arch: &str) -> Option<Asset>
             let name = asset.name.to_lowercase();
             asset.name.ends_with(".AppImage") && aliases.iter().any(|alias| name.contains(alias))
         }
-        UpdateKind::Deb => asset.name.ends_with(".deb")
-            && {
+        UpdateKind::Deb => {
+            asset.name.ends_with(".deb") && {
                 let name = asset.name.to_lowercase();
                 name.contains("amd64") || aliases.iter().any(|alias| name.contains(alias))
-            },
-        UpdateKind::Rpm => asset.name.ends_with(".rpm")
-            && {
+            }
+        }
+        UpdateKind::Rpm => {
+            asset.name.ends_with(".rpm") && {
                 let name = asset.name.to_lowercase();
                 aliases.iter().any(|alias| name.contains(alias))
-            },
-        UpdateKind::Tarball => asset.name.ends_with(".tar.gz")
-            && asset.name.contains("linux")
-            && {
+            }
+        }
+        UpdateKind::Tarball => {
+            asset.name.ends_with(".tar.gz") && asset.name.contains("linux") && {
                 let name = asset.name.to_lowercase();
                 aliases.iter().any(|alias| name.contains(alias))
-            },
+            }
+        }
     };
 
     assets.iter().find(|asset| match_asset(asset)).cloned()
@@ -307,7 +309,9 @@ fn arch_aliases(arch: &str) -> Vec<String> {
     match arch {
         "x86_64" => vec!["x86_64".to_string(), "amd64".to_string()],
         "aarch64" => vec!["aarch64".to_string(), "arm64".to_string()],
-        "arm" | "armv7" | "armhf" => vec!["arm".to_string(), "armv7".to_string(), "armhf".to_string()],
+        "arm" | "armv7" | "armhf" => {
+            vec!["arm".to_string(), "armv7".to_string(), "armhf".to_string()]
+        }
         other => vec![other.to_string()],
     }
 }
@@ -436,28 +440,22 @@ fn verify_sha256(path: &Path, expected: &str) -> Result<()> {
     }
     let actual = format!("{:x}", hasher.finalize());
     if actual != expected.to_lowercase() {
-        return Err(anyhow::anyhow!(
-            "Checksum mismatch for {}",
-            path.display()
-        ));
+        return Err(anyhow::anyhow!("Checksum mismatch for {}", path.display()));
     }
     Ok(())
 }
 
 fn apply_appimage_update(asset_path: &Path, target: &Path) -> Result<()> {
-    let parent = target
-        .parent()
-        .context("resolve AppImage directory")?;
+    let parent = target.parent().context("resolve AppImage directory")?;
     let temp_path = parent.join(".sigilsmith-update");
 
     fs::copy(asset_path, &temp_path).context("stage AppImage update")?;
     set_executable(&temp_path)?;
     fs::rename(&temp_path, target).or_else(|_| {
-        fs::copy(&temp_path, target)
-            .and_then(|_| {
-                let _ = set_executable(target);
-                fs::remove_file(&temp_path)
-            })
+        fs::copy(&temp_path, target).and_then(|_| {
+            let _ = set_executable(target);
+            fs::remove_file(&temp_path)
+        })
     })?;
     Ok(())
 }

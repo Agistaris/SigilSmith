@@ -1,14 +1,17 @@
 use crate::{
     app::{
         expand_tilde, App, DialogChoice, DialogKind, ExplorerItem, ExplorerItemKind, Focus,
-        InputMode, InputPurpose, LogLevel, ToastLevel, UpdateStatus, PathBrowser, PathBrowserEntryKind,
-        PathBrowserFocus, SetupStep,
+        InputMode, InputPurpose, LogLevel, ModSort, ModSortColumn, PathBrowser,
+        PathBrowserEntryKind, PathBrowserFocus, SetupStep, ToastLevel, UpdateStatus,
     },
     library::{InstallTarget, ModEntry, TargetKind},
 };
 use anyhow::Result;
+use arboard::Clipboard;
 use crossterm::{
-    event::{self, DisableBracketedPaste, EnableBracketedPaste, Event, KeyCode, KeyEvent, KeyModifiers},
+    event::{
+        self, DisableBracketedPaste, EnableBracketedPaste, Event, KeyCode, KeyEvent, KeyModifiers,
+    },
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
@@ -31,10 +34,10 @@ const STATUS_WIDTH: u16 = SIDE_PANEL_WIDTH;
 const STATUS_HEIGHT: u16 = 3;
 const HEADER_HEIGHT: u16 = 3;
 const DETAILS_HEIGHT: u16 = 10;
-const CONTEXT_HEIGHT: u16 = 19;
+const CONTEXT_HEIGHT: u16 = 27;
 const LOG_MIN_HEIGHT: u16 = 5;
 const CONFLICTS_BAR_HEIGHT: u16 = STATUS_HEIGHT;
-const FILTER_HEIGHT: u16 = 1;
+const FILTER_HEIGHT: u16 = 2;
 const TABLE_MIN_HEIGHT: u16 = 6;
 const SUBPANEL_PAD_X: u16 = 0;
 const SUBPANEL_PAD_TOP: u16 = 0;
@@ -43,6 +46,7 @@ const SUBPANEL_PAD_TOP: u16 = 0;
 struct Theme {
     accent: Color,
     accent_soft: Color,
+    section_bg: Color,
     border: Color,
     row_alt_bg: Color,
     text: Color,
@@ -62,6 +66,7 @@ impl Theme {
         Self {
             accent: Color::Rgb(120, 198, 255),
             accent_soft: Color::Rgb(58, 92, 138),
+            section_bg: Color::Rgb(84, 146, 200),
             border: Color::Rgb(72, 84, 102),
             row_alt_bg: Color::Rgb(30, 32, 34),
             text: Color::Rgb(216, 226, 236),
@@ -99,15 +104,20 @@ impl Theme {
     }
 
     fn subpanel(&self, title: &'static str) -> Block<'static> {
-        Block::default()
+        let mut block = Block::default()
             .borders(Borders::NONE)
-            .title(Span::styled(
+            .style(Style::default().bg(self.subpanel_bg));
+        if !title.is_empty() {
+            let title = format!(" {title} ");
+            block = block.title(Span::styled(
                 title,
                 Style::default()
-                    .fg(self.accent)
+                    .fg(self.header_bg)
+                    .bg(self.accent_soft)
                     .add_modifier(Modifier::BOLD),
-            ))
-            .style(Style::default().bg(self.subpanel_bg))
+            ));
+        }
+        block
     }
 }
 
@@ -121,7 +131,11 @@ pub fn run(app: &mut App) -> Result<()> {
     let result = run_loop(&mut terminal, app);
 
     disable_raw_mode()?;
-    execute!(terminal.backend_mut(), DisableBracketedPaste, LeaveAlternateScreen)?;
+    execute!(
+        terminal.backend_mut(),
+        DisableBracketedPaste,
+        LeaveAlternateScreen
+    )?;
     terminal.show_cursor()?;
 
     result
@@ -167,6 +181,9 @@ fn run_loop(terminal: &mut Terminal<impl Backend>, app: &mut App) -> Result<()> 
 }
 
 fn handle_key(app: &mut App, key: KeyEvent) -> Result<()> {
+    if app.help_open {
+        return handle_help_mode(app, key);
+    }
     if app.smart_rank_preview.is_some() {
         return handle_smart_rank_preview(app, key);
     }
@@ -196,17 +213,15 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Result<()> {
             purpose,
             auto_submit,
             mut last_edit_at,
-        } => {
-            handle_input_mode(
-                app,
-                key,
-                &mut buffer,
-                purpose.clone(),
-                prompt,
-                auto_submit,
-                &mut last_edit_at,
-            )
-        }
+        } => handle_input_mode(
+            app,
+            key,
+            &mut buffer,
+            purpose.clone(),
+            prompt,
+            auto_submit,
+            &mut last_edit_at,
+        ),
     }
 }
 
@@ -237,6 +252,33 @@ fn handle_dialog_mode(app: &mut App, key: KeyEvent) -> Result<()> {
         KeyCode::Esc => {
             app.dialog_set_choice(DialogChoice::No);
             app.dialog_confirm();
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+fn handle_help_mode(app: &mut App, key: KeyEvent) -> Result<()> {
+    match key.code {
+        KeyCode::Esc | KeyCode::Char('?') => app.close_help(),
+        KeyCode::Char('q') | KeyCode::Char('Q') => app.should_quit = true,
+        KeyCode::Up | KeyCode::Char('k') | KeyCode::Char('K') => {
+            app.help_scroll = app.help_scroll.saturating_sub(1);
+        }
+        KeyCode::Down | KeyCode::Char('j') | KeyCode::Char('J') => {
+            app.help_scroll = app.help_scroll.saturating_add(1);
+        }
+        KeyCode::PageUp => {
+            app.help_scroll = app.help_scroll.saturating_sub(6);
+        }
+        KeyCode::PageDown => {
+            app.help_scroll = app.help_scroll.saturating_add(6);
+        }
+        KeyCode::Home => {
+            app.help_scroll = 0;
+        }
+        KeyCode::End => {
+            app.help_scroll = usize::MAX;
         }
         _ => {}
     }
@@ -399,6 +441,38 @@ fn handle_settings_menu(app: &mut App, key: KeyEvent) -> Result<()> {
 
 fn handle_normal_mode(app: &mut App, key: KeyEvent) -> Result<()> {
     match (key.code, key.modifiers) {
+        (KeyCode::Char('f'), mods) | (KeyCode::Char('F'), mods)
+            if mods.contains(KeyModifiers::CONTROL) =>
+        {
+            app.focus_mods();
+            app.enter_mod_filter();
+            return Ok(());
+        }
+        (KeyCode::Char('/'), _) => {
+            app.focus_mods();
+            app.enter_mod_filter();
+            return Ok(());
+        }
+        (KeyCode::Left, mods) if mods.contains(KeyModifiers::CONTROL) => {
+            app.focus_mods();
+            app.cycle_mod_sort_column(-1);
+            return Ok(());
+        }
+        (KeyCode::Right, mods) if mods.contains(KeyModifiers::CONTROL) => {
+            app.focus_mods();
+            app.cycle_mod_sort_column(1);
+            return Ok(());
+        }
+        (KeyCode::Up, mods) if mods.contains(KeyModifiers::CONTROL) => {
+            app.focus_mods();
+            app.toggle_mod_sort_direction();
+            return Ok(());
+        }
+        (KeyCode::Down, mods) if mods.contains(KeyModifiers::CONTROL) => {
+            app.focus_mods();
+            app.toggle_mod_sort_direction();
+            return Ok(());
+        }
         (KeyCode::Char('q'), _) | (KeyCode::Char('Q'), _) => app.should_quit = true,
         (KeyCode::Char('i'), _) | (KeyCode::Char('I'), _) => app.enter_import_mode(),
         (KeyCode::Char('d'), _) | (KeyCode::Char('D'), _) => {
@@ -415,9 +489,8 @@ fn handle_normal_mode(app: &mut App, key: KeyEvent) -> Result<()> {
         }
         (KeyCode::Esc, _) if app.move_mode => {}
         (KeyCode::Esc, _) => app.toggle_settings_menu(),
-        (KeyCode::PageUp, _) => app.scroll_log_up(3),
-        (KeyCode::PageDown, _) => app.scroll_log_down(3),
         (KeyCode::Tab, _) => app.cycle_focus(),
+        (KeyCode::Char('?'), _) => app.toggle_help(),
         _ => {}
     }
 
@@ -509,12 +582,33 @@ fn handle_mods_mode(app: &mut App, key: KeyEvent) -> Result<()> {
         {
             app.enter_mod_filter();
         }
+        (KeyCode::Char('/'), _) => app.enter_mod_filter(),
         (KeyCode::Char('l'), mods) | (KeyCode::Char('L'), mods)
             if mods.contains(KeyModifiers::CONTROL) =>
         {
             app.clear_mod_filter();
         }
-        (KeyCode::Char('m'), _) | (KeyCode::Char('M'), _) => app.toggle_move_mode(),
+        (KeyCode::Up, mods) if mods.contains(KeyModifiers::CONTROL) => {
+            app.toggle_mod_sort_direction();
+        }
+        (KeyCode::Down, mods) if mods.contains(KeyModifiers::CONTROL) => {
+            app.toggle_mod_sort_direction();
+        }
+        (KeyCode::Left, mods) if mods.contains(KeyModifiers::CONTROL) => {
+            app.cycle_mod_sort_column(-1);
+        }
+        (KeyCode::Right, mods) if mods.contains(KeyModifiers::CONTROL) => {
+            app.cycle_mod_sort_column(1);
+        }
+        (KeyCode::Char('m'), _) | (KeyCode::Char('M'), _) => {
+            if app.move_mode {
+                app.toggle_move_mode();
+            } else if app.mod_filter_active() || !app.mod_sort.is_order_default() {
+                app.prompt_move_blocked(true);
+            } else {
+                app.toggle_move_mode();
+            }
+        }
         (KeyCode::Enter, _) | (KeyCode::Esc, _) if app.move_mode => app.toggle_move_mode(),
         (KeyCode::Char(' '), _) => app.toggle_selected(),
         (KeyCode::Char('a'), _) | (KeyCode::Char('A'), _) => app.enable_visible_mods(),
@@ -524,32 +618,47 @@ fn handle_mods_mode(app: &mut App, key: KeyEvent) -> Result<()> {
         (KeyCode::Delete, _) | (KeyCode::Backspace, _) => app.request_remove_selected(),
         (KeyCode::Char('k'), _) | (KeyCode::Char('K'), _) | (KeyCode::Up, _) => {
             if app.move_mode {
-                app.move_selected_up();
+                if app.mod_filter_active() || !app.mod_sort.is_order_default() {
+                    app.prompt_move_blocked(true);
+                } else {
+                    app.move_selected_up();
+                }
             } else if app.selected > 0 {
                 app.selected -= 1;
             }
         }
         (KeyCode::Char('j'), _) | (KeyCode::Char('J'), _) | (KeyCode::Down, _) => {
             if app.move_mode {
-                app.move_selected_down();
+                if app.mod_filter_active() || !app.mod_sort.is_order_default() {
+                    app.prompt_move_blocked(true);
+                } else {
+                    app.move_selected_down();
+                }
             } else {
                 app.selected += 1
             }
         }
-        (KeyCode::Char('u'), _) | (KeyCode::Char('U'), _) => app.move_selected_up(),
-        (KeyCode::Char('n'), _) | (KeyCode::Char('N'), _) => app.move_selected_down(),
+        (KeyCode::Char('u'), _) | (KeyCode::Char('U'), _) => {
+            if app.mod_filter_active() || !app.mod_sort.is_order_default() {
+                app.prompt_move_blocked(false);
+            } else {
+                app.move_selected_up();
+            }
+        }
+        (KeyCode::Char('n'), _) | (KeyCode::Char('N'), _) => {
+            if app.mod_filter_active() || !app.mod_sort.is_order_default() {
+                app.prompt_move_blocked(false);
+            } else {
+                app.move_selected_down();
+            }
+        }
         (KeyCode::Char('1'), _) => app.select_target_override(None),
         (KeyCode::Char('2'), _) => app.select_target_override(Some(TargetKind::Pak)),
         (KeyCode::Char('3'), _) => app.select_target_override(Some(TargetKind::Generated)),
         (KeyCode::Char('4'), _) => app.select_target_override(Some(TargetKind::Data)),
         (KeyCode::Char('5'), _) => app.select_target_override(Some(TargetKind::Bin)),
-        (KeyCode::Char(c), mods)
-            if !mods.contains(KeyModifiers::CONTROL) && !mods.contains(KeyModifiers::ALT) =>
-        {
-            if should_start_import(c) {
-                app.enter_import_with(c.to_string());
-            }
-        }
+        (KeyCode::PageUp, _) => app.page_mods_up(),
+        (KeyCode::PageDown, _) => app.page_mods_down(),
         _ => {}
     }
 
@@ -575,16 +684,14 @@ fn handle_log_mode(app: &mut App, key: KeyEvent) -> Result<()> {
     match key.code {
         KeyCode::Up | KeyCode::Char('k') | KeyCode::Char('K') => app.scroll_log_up(1),
         KeyCode::Down | KeyCode::Char('j') | KeyCode::Char('J') => app.scroll_log_down(1),
+        KeyCode::PageUp => app.scroll_log_up(3),
+        KeyCode::PageDown => app.scroll_log_down(3),
         _ => {}
     }
     Ok(())
 }
 
-fn handle_browser_mode(
-    app: &mut App,
-    key: KeyEvent,
-    browser: &mut PathBrowser,
-) -> Result<bool> {
+fn handle_browser_mode(app: &mut App, key: KeyEvent, browser: &mut PathBrowser) -> Result<bool> {
     let invalid_hint = match browser.step {
         SetupStep::GameRoot => "Not a BG3 install root (needs Data/ + bin/).",
         SetupStep::LarianDir => "Not a Larian data dir (needs PlayerProfiles/).",
@@ -618,6 +725,12 @@ fn handle_browser_mode(
                 if key.modifiers.contains(KeyModifiers::CONTROL) =>
             {
                 browser.path_input.clear();
+            }
+            KeyCode::Char('v') | KeyCode::Char('V')
+                if key.modifiers.contains(KeyModifiers::CONTROL)
+                    && key.modifiers.contains(KeyModifiers::ALT) =>
+            {
+                paste_clipboard_into(app, &mut browser.path_input);
             }
             KeyCode::Char(c) => {
                 if !key.modifiers.contains(KeyModifiers::CONTROL)
@@ -662,35 +775,35 @@ fn handle_browser_mode(
                     path_browser_set_current(app, browser, parent.to_path_buf());
                 }
             }
-        KeyCode::Char('s') | KeyCode::Char('S') => {
-            if let Some(select) = browser
-                .entries
-                .iter()
-                .find(|entry| entry.kind == PathBrowserEntryKind::Select)
-            {
-                if select.selectable {
-                    app.apply_path_browser_selection(browser.step, select.path.clone())?;
-                    return Ok(true);
+            KeyCode::Char('s') | KeyCode::Char('S') => {
+                if let Some(select) = browser
+                    .entries
+                    .iter()
+                    .find(|entry| entry.kind == PathBrowserEntryKind::Select)
+                {
+                    if select.selectable {
+                        app.apply_path_browser_selection(browser.step, select.path.clone())?;
+                        return Ok(true);
+                    }
+                    app.status = invalid_hint.to_string();
+                    app.set_toast(invalid_hint, ToastLevel::Warn, Duration::from_secs(2));
                 }
-                app.status = invalid_hint.to_string();
-                app.set_toast(invalid_hint, ToastLevel::Warn, Duration::from_secs(2));
             }
-        }
-        KeyCode::Enter => {
-            if let Some(entry) = browser.entries.get(browser.selected) {
-                match entry.kind {
-                    PathBrowserEntryKind::Select => {
-                        if entry.selectable {
-                            app.apply_path_browser_selection(browser.step, entry.path.clone())?;
-                            return Ok(true);
+            KeyCode::Enter => {
+                if let Some(entry) = browser.entries.get(browser.selected) {
+                    match entry.kind {
+                        PathBrowserEntryKind::Select => {
+                            if entry.selectable {
+                                app.apply_path_browser_selection(browser.step, entry.path.clone())?;
+                                return Ok(true);
+                            }
+                            app.status = invalid_hint.to_string();
+                            app.set_toast(invalid_hint, ToastLevel::Warn, Duration::from_secs(2));
                         }
-                        app.status = invalid_hint.to_string();
-                        app.set_toast(invalid_hint, ToastLevel::Warn, Duration::from_secs(2));
+                        PathBrowserEntryKind::Parent | PathBrowserEntryKind::Dir => {
+                            path_browser_set_current(app, browser, entry.path.clone());
+                        }
                     }
-                    PathBrowserEntryKind::Parent | PathBrowserEntryKind::Dir => {
-                        path_browser_set_current(app, browser, entry.path.clone());
-                    }
-                }
                 }
             }
             KeyCode::Esc => {
@@ -711,6 +824,38 @@ fn path_browser_set_current(app: &App, browser: &mut PathBrowser, path: PathBuf)
     browser.entries = app.build_path_browser_entries(browser.step, &browser.current);
     browser.selected = 0;
     browser.path_input = path.display().to_string();
+}
+
+fn sanitize_paste_text(text: &str) -> String {
+    text.replace('\r', " ")
+        .replace('\n', " ")
+        .trim()
+        .to_string()
+}
+
+fn paste_clipboard_into(app: &mut App, target: &mut String) -> bool {
+    let mut clipboard = match Clipboard::new() {
+        Ok(clipboard) => clipboard,
+        Err(err) => {
+            app.status = format!("Clipboard unavailable: {err}");
+            app.log_warn(format!("Clipboard unavailable: {err}"));
+            return false;
+        }
+    };
+    let text = match clipboard.get_text() {
+        Ok(text) => text,
+        Err(err) => {
+            app.status = format!("Clipboard paste failed: {err}");
+            app.log_warn(format!("Clipboard paste failed: {err}"));
+            return false;
+        }
+    };
+    let cleaned = sanitize_paste_text(&text);
+    if cleaned.is_empty() {
+        return false;
+    }
+    target.push_str(&cleaned);
+    true
 }
 
 fn handle_input_mode(
@@ -739,11 +884,12 @@ fn handle_input_mode(
                 InputPurpose::ImportProfile | InputPurpose::ImportPath => {
                     "Import cancelled".to_string()
                 }
-                InputPurpose::FilterMods => "Filter cancelled".to_string(),
+                InputPurpose::FilterMods => "Search cancelled".to_string(),
             };
             app.set_toast(&cancel_message, ToastLevel::Warn, Duration::from_secs(2));
             if matches!(purpose, InputPurpose::FilterMods) {
-                app.status = "Filter cancelled".to_string();
+                app.cancel_mod_filter();
+                app.status = "Search cancelled".to_string();
             }
         }
         KeyCode::Enter => {
@@ -756,6 +902,14 @@ fn handle_input_mode(
                     app.status = format!("Action failed: {err}");
                     app.log_error(format!("Action failed: {err}"));
                 }
+            }
+        }
+        KeyCode::Char('v') | KeyCode::Char('V')
+            if key.modifiers.contains(KeyModifiers::CONTROL)
+                && key.modifiers.contains(KeyModifiers::ALT) =>
+        {
+            if paste_clipboard_into(app, buffer) {
+                *last_edit_at = std::time::Instant::now();
             }
         }
         KeyCode::Char(c) => {
@@ -986,10 +1140,6 @@ fn from_hex(byte: u8) -> Option<u8> {
     }
 }
 
-fn should_start_import(c: char) -> bool {
-    matches!(c, '/' | '~' | '.' | 'f' | 'F' | '"' | '\'')
-}
-
 fn draw(frame: &mut Frame<'_>, app: &mut App) {
     let area = frame.size();
     let theme = Theme::new();
@@ -1026,6 +1176,92 @@ fn draw(frame: &mut Frame<'_>, app: &mut App) {
         filter_active,
     );
     let status_color = status_color(app, &theme);
+    let overrides_total = app.conflicts.len();
+    let overrides_manual = app
+        .conflicts
+        .iter()
+        .filter(|entry| entry.overridden)
+        .count();
+    let overrides_auto = overrides_total.saturating_sub(overrides_manual);
+    let label_style = Style::default().fg(theme.muted);
+    let mut context_rows = Vec::new();
+    context_rows.push(KvRow {
+        label: "Game".to_string(),
+        value: app.game_id.display_name().to_string(),
+        label_style,
+        value_style: Style::default().fg(theme.text),
+    });
+    context_rows.push(KvRow {
+        label: "Profile".to_string(),
+        value: app.active_profile_label(),
+        label_style,
+        value_style: Style::default().fg(if app.is_renaming_active_profile() {
+            theme.warning
+        } else {
+            theme.text
+        }),
+    });
+    context_rows.push(KvRow {
+        label: "Mods".to_string(),
+        value: mods_label.clone(),
+        label_style,
+        value_style: Style::default().fg(theme.text),
+    });
+    context_rows.push(KvRow {
+        label: "Enabled".to_string(),
+        value: enabled_label.clone(),
+        label_style,
+        value_style: Style::default().fg(theme.text),
+    });
+    context_rows.push(KvRow {
+        label: "Overrides".to_string(),
+        value: format!("Auto ({overrides_auto})"),
+        label_style,
+        value_style: Style::default().fg(theme.success),
+    });
+    context_rows.push(KvRow {
+        label: "".to_string(),
+        value: format!("Manual ({overrides_manual})"),
+        label_style,
+        value_style: Style::default().fg(if overrides_manual > 0 {
+            theme.warning
+        } else {
+            theme.muted
+        }),
+    });
+    context_rows.push(KvRow {
+        label: "Auto-deploy".to_string(),
+        value: "On".to_string(),
+        label_style,
+        value_style: Style::default().fg(theme.muted),
+    });
+    context_rows.push(KvRow {
+        label: "Help".to_string(),
+        value: "? shortcuts".to_string(),
+        label_style,
+        value_style: Style::default().fg(theme.accent),
+    });
+    if !app.paths_ready() {
+        context_rows.push(KvRow {
+            label: "Setup".to_string(),
+            value: "Open Menu (Esc) to configure".to_string(),
+            label_style,
+            value_style: Style::default().fg(theme.warning),
+        });
+    }
+    let legend_rows = legend_rows(app);
+    let hotkey_rows = hotkey_rows(app);
+    let base_context_height = context_rows.len().saturating_add(1);
+    let current_context_height =
+        base_context_height.saturating_add(legend_line_count(&legend_rows, &hotkey_rows));
+    let mods_legend_rows = legend_rows_for_focus(Focus::Mods);
+    let mods_hotkeys = hotkey_rows_for_focus(Focus::Mods);
+    let mods_context_height =
+        base_context_height.saturating_add(legend_line_count(&mods_legend_rows, &mods_hotkeys));
+    let inner_context_height = current_context_height
+        .max(mods_context_height)
+        .max(CONTEXT_HEIGHT as usize);
+    let desired_context_height = inner_context_height.saturating_add(2) as u16;
     frame.render_widget(
         Block::default().style(Style::default().bg(theme.header_bg)),
         chunks[0],
@@ -1051,7 +1287,10 @@ fn draw(frame: &mut Frame<'_>, app: &mut App) {
     );
     let available = header_line_area.width as usize;
     let mut left_width = title_text.chars().count().min(available);
-    let mut right_width = stats_text.chars().count().min(available.saturating_sub(left_width));
+    let mut right_width = stats_text
+        .chars()
+        .count()
+        .min(available.saturating_sub(left_width));
     let min_middle = 1usize;
     if left_width + right_width + min_middle > available {
         let overflow = left_width + right_width + min_middle - available;
@@ -1125,7 +1364,9 @@ fn draw(frame: &mut Frame<'_>, app: &mut App) {
         Span::styled("Enabled ", Style::default().fg(theme.muted)),
         Span::styled(
             enabled_label.clone(),
-            Style::default().fg(theme.success).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(theme.success)
+                .add_modifier(Modifier::BOLD),
         ),
     ]);
     let stats = Paragraph::new(stats_line)
@@ -1137,43 +1378,56 @@ fn draw(frame: &mut Frame<'_>, app: &mut App) {
         .direction(Direction::Horizontal)
         .constraints([Constraint::Length(SIDE_PANEL_WIDTH), Constraint::Min(20)])
         .split(chunks[1]);
-    let left_chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Min(10), Constraint::Length(CONTEXT_HEIGHT)])
-        .split(body_chunks[0]);
+    let left_area = body_chunks[0];
+    let context_height = desired_context_height.min(left_area.height);
+    let explorer_height = left_area.height.saturating_sub(context_height);
+    let explorer_area = Rect {
+        x: left_area.x,
+        y: left_area.y,
+        width: left_area.width,
+        height: explorer_height,
+    };
+    let context_area = Rect {
+        x: left_area.x,
+        y: left_area.y.saturating_add(explorer_height),
+        width: left_area.width,
+        height: left_area.height.saturating_sub(explorer_height),
+    };
 
-    let explorer_block = theme
-        .panel_tight("Explorer")
-        .border_style(Style::default().fg(if app.focus == Focus::Explorer {
-            theme.accent
+    if explorer_area.height > 0 {
+        let explorer_block = theme
+            .panel_tight("Explorer")
+            .border_style(Style::default().fg(if app.focus == Focus::Explorer {
+                theme.accent
+            } else {
+                theme.border
+            }))
+            .style(Style::default().bg(theme.subpanel_bg));
+        let explorer_items = build_explorer_items(app, &theme);
+        if explorer_items.is_empty() {
+            let empty = Paragraph::new("No games available.")
+                .style(Style::default().fg(theme.muted).bg(theme.subpanel_bg))
+                .block(explorer_block)
+                .alignment(Alignment::Center);
+            frame.render_widget(empty, explorer_area);
         } else {
-            theme.border
-        }))
-        .style(Style::default().bg(theme.subpanel_bg));
-    let explorer_items = build_explorer_items(app, &theme);
-    if explorer_items.is_empty() {
-        let empty = Paragraph::new("No games available.")
-            .style(Style::default().fg(theme.muted).bg(theme.subpanel_bg))
-            .block(explorer_block)
-            .alignment(Alignment::Center);
-        frame.render_widget(empty, left_chunks[0]);
-    } else {
-        let highlight_style = if app.focus == Focus::Explorer {
-            Style::default()
-                .bg(theme.accent_soft)
-                .fg(Color::Black)
-                .add_modifier(Modifier::BOLD)
-        } else {
-            Style::default().bg(theme.header_bg).fg(theme.text)
-        };
-        let explorer = List::new(explorer_items)
-            .block(explorer_block)
-            .style(Style::default().bg(theme.subpanel_bg))
-            .highlight_style(highlight_style)
-            .highlight_symbol("");
-        let mut state = ListState::default();
-        state.select(Some(app.explorer_selected));
-        frame.render_stateful_widget(explorer, left_chunks[0], &mut state);
+            let highlight_style = if app.focus == Focus::Explorer {
+                Style::default()
+                    .bg(theme.accent_soft)
+                    .fg(Color::Black)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().bg(theme.header_bg).fg(theme.text)
+            };
+            let explorer = List::new(explorer_items)
+                .block(explorer_block)
+                .style(Style::default().bg(theme.subpanel_bg))
+                .highlight_style(highlight_style)
+                .highlight_symbol("");
+            let mut state = ListState::default();
+            state.select(Some(app.explorer_selected));
+            frame.render_stateful_widget(explorer, explorer_area, &mut state);
+        }
     }
 
     let mod_stack_block = theme
@@ -1189,7 +1443,10 @@ fn draw(frame: &mut Frame<'_>, app: &mut App) {
 
     let mod_chunks = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Length(FILTER_HEIGHT), Constraint::Min(TABLE_MIN_HEIGHT)])
+        .constraints([
+            Constraint::Length(FILTER_HEIGHT),
+            Constraint::Min(TABLE_MIN_HEIGHT),
+        ])
         .split(mod_stack_inner);
 
     render_filter_bar(frame, app, &theme, mod_chunks[0], &counts);
@@ -1200,6 +1457,8 @@ fn draw(frame: &mut Frame<'_>, app: &mut App) {
         .split(mod_chunks[1]);
 
     let row_count = rows.len();
+    let view_height = table_chunks[0].height.saturating_sub(1) as usize;
+    app.mods_view_height = view_height;
     if rows.is_empty() {
         let empty = Paragraph::new("Drop a mod archive or folder to import.")
             .style(Style::default().fg(theme.muted).bg(theme.mod_bg))
@@ -1222,8 +1481,7 @@ fn draw(frame: &mut Frame<'_>, app: &mut App) {
         let spacing = 1u16;
         let min_mod = 16u16;
         let date_width = 10u16;
-        let fixed_without_target =
-            3 + 2 + 5 + 6 + date_width + date_width + min_mod + spacing * 7;
+        let fixed_without_target = 3 + 2 + 5 + 6 + date_width + date_width + min_mod + spacing * 7;
         let max_target = table_width.saturating_sub(fixed_without_target);
         let mut target_col = target_width as u16;
         if max_target > 0 {
@@ -1235,6 +1493,17 @@ fn draw(frame: &mut Frame<'_>, app: &mut App) {
         if target_col == 0 {
             target_col = 1;
         }
+        let header = Row::new(vec![
+            mod_header_cell("On", ModSortColumn::Enabled, app.mod_sort, &theme),
+            mod_header_cell("N", ModSortColumn::Native, app.mod_sort, &theme),
+            mod_header_cell("Order", ModSortColumn::Order, app.mod_sort, &theme),
+            mod_header_cell("Kind", ModSortColumn::Kind, app.mod_sort, &theme),
+            mod_header_cell("Target", ModSortColumn::Target, app.mod_sort, &theme),
+            mod_header_cell("Created", ModSortColumn::Created, app.mod_sort, &theme),
+            mod_header_cell("Added", ModSortColumn::Added, app.mod_sort, &theme),
+            mod_header_cell("Mod", ModSortColumn::Name, app.mod_sort, &theme),
+        ])
+        .style(Style::default().bg(theme.header_bg));
         let table = Table::new(
             rows,
             [
@@ -1249,22 +1518,7 @@ fn draw(frame: &mut Frame<'_>, app: &mut App) {
             ],
         )
         .style(Style::default().bg(theme.mod_bg).fg(theme.text))
-        .header(Row::new(vec![
-            Cell::from("On"),
-            Cell::from("N"),
-            Cell::from("Order"),
-            Cell::from("Kind"),
-            Cell::from("Target"),
-            Cell::from("Created"),
-            Cell::from("Added"),
-            Cell::from("Mod"),
-        ])
-        .style(
-            Style::default()
-                .fg(theme.accent)
-                .bg(theme.header_bg)
-                .add_modifier(Modifier::BOLD),
-        ))
+        .header(header)
         .column_spacing(1)
         .highlight_style(if app.focus == Focus::Mods {
             Style::default()
@@ -1278,7 +1532,6 @@ fn draw(frame: &mut Frame<'_>, app: &mut App) {
 
         let mut state = TableState::default();
         state.select(Some(app.selected));
-        let view_height = table_chunks[0].height.saturating_sub(1) as usize;
         if row_count > view_height && view_height > 0 {
             let max_offset = row_count.saturating_sub(view_height);
             let mut offset = state.offset();
@@ -1295,9 +1548,7 @@ fn draw(frame: &mut Frame<'_>, app: &mut App) {
         let table_area = Rect {
             x: table_chunks[0].x,
             y: table_chunks[0].y,
-            width: table_chunks[0]
-                .width
-                .saturating_add(table_chunks[1].width),
+            width: table_chunks[0].width.saturating_add(table_chunks[1].width),
             height: table_chunks[0].height,
         };
         extend_table_stripes(
@@ -1364,8 +1615,9 @@ fn draw(frame: &mut Frame<'_>, app: &mut App) {
     let details_area = lower_chunks[0];
     frame.render_widget(details_fill, details_area);
     let details_inner = details_block.inner(details_area);
-    let details_content_width =
-        details_inner.width.saturating_sub(SUBPANEL_PAD_X.saturating_mul(2)) as usize;
+    let details_content_width = details_inner
+        .width
+        .saturating_sub(SUBPANEL_PAD_X.saturating_mul(2)) as usize;
     let details_lines = build_details(app, &theme, details_content_width);
     let details_lines = pad_lines(
         details_lines,
@@ -1412,109 +1664,45 @@ fn draw(frame: &mut Frame<'_>, app: &mut App) {
     let context_block = theme
         .block("Context")
         .style(Style::default().bg(theme.subpanel_bg));
-    let context_inner = context_block.inner(left_chunks[1]);
-    frame.render_widget(context_block, left_chunks[1]);
+    let context_inner = context_block.inner(context_area);
+    frame.render_widget(context_block, context_area);
 
-    let min_context_lines = 8u16;
-    let legend_height = details_area.height.min(
-        context_inner
-            .height
-            .saturating_sub(min_context_lines)
-            .max(3),
-    );
+    let available_context = context_inner.height as usize;
+    let context_line_count = context_rows.len().saturating_add(1);
+    let legend_required = legend_line_count(&legend_rows, &hotkey_rows);
+    let mut context_slots = context_line_count.min(available_context);
+    let mut legend_slots = available_context.saturating_sub(context_slots);
+    if legend_slots < legend_required {
+        let reduce = legend_required
+            .saturating_sub(legend_slots)
+            .min(context_slots);
+        context_slots = context_slots.saturating_sub(reduce);
+        legend_slots = available_context.saturating_sub(context_slots);
+    }
     let context_chunks = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Min(min_context_lines), Constraint::Length(legend_height)])
+        .constraints([
+            Constraint::Length(context_slots as u16),
+            Constraint::Length(legend_slots as u16),
+        ])
         .split(context_inner);
-
-    let overrides_total = app.conflicts.len();
-    let overrides_manual = app
-        .conflicts
-        .iter()
-        .filter(|entry| entry.overridden)
-        .count();
-    let overrides_auto = overrides_total.saturating_sub(overrides_manual);
-    let label_style = Style::default().fg(theme.muted);
-    let mut rows = Vec::new();
-    rows.push(KvRow {
-        label: "Game".to_string(),
-        value: app.game_id.display_name().to_string(),
-        label_style,
-        value_style: Style::default().fg(theme.text),
-    });
-    rows.push(KvRow {
-        label: "Profile".to_string(),
-        value: app.active_profile_label(),
-        label_style,
-        value_style: Style::default().fg(if app.is_renaming_active_profile() {
-            theme.warning
-        } else {
-            theme.text
-        }),
-    });
-    rows.push(KvRow {
-        label: "Mods".to_string(),
-        value: mods_label.clone(),
-        label_style,
-        value_style: Style::default().fg(theme.text),
-    });
-    rows.push(KvRow {
-        label: "Enabled".to_string(),
-        value: enabled_label.clone(),
-        label_style,
-        value_style: Style::default().fg(theme.text),
-    });
-    rows.push(KvRow {
-        label: "Overrides".to_string(),
-        value: format!("Auto ({overrides_auto})"),
-        label_style,
-        value_style: Style::default().fg(theme.success),
-    });
-    rows.push(KvRow {
-        label: "".to_string(),
-        value: format!("Manual ({overrides_manual})"),
-        label_style,
-        value_style: Style::default().fg(if overrides_manual > 0 {
-            theme.warning
-        } else {
-            theme.muted
-        }),
-    });
-    rows.push(KvRow {
-        label: "Auto-deploy".to_string(),
-        value: "On".to_string(),
-        label_style,
-        value_style: Style::default().fg(theme.muted),
-    });
-    if !app.paths_ready() {
-        rows.push(KvRow {
-            label: "Setup".to_string(),
-            value: "Open Menu (Esc) to configure".to_string(),
-            label_style,
-            value_style: Style::default().fg(theme.warning),
-        });
-    }
-    let legend_block = theme.subpanel("Legend");
+    let legend_block = theme.subpanel("");
     let legend_fill = Block::default().style(Style::default().bg(theme.subpanel_bg));
     frame.render_widget(legend_fill, context_chunks[1]);
     let legend_inner = legend_block.inner(context_chunks[1]);
-    let legend_content_width =
-        legend_inner.width.saturating_sub(SUBPANEL_PAD_X.saturating_mul(2)) as usize;
+    let legend_content_width = legend_inner
+        .width
+        .saturating_sub(SUBPANEL_PAD_X.saturating_mul(2)) as usize;
     let legend_content_height = legend_inner.height.saturating_sub(SUBPANEL_PAD_TOP) as usize;
-    let legend_rows = legend_rows(app);
-    let legend_key_width = legend_key_width(&legend_rows, legend_content_width);
-    let context_label_width = rows
+    let context_label_width = context_rows
         .iter()
         .map(|row| row.label.chars().count())
         .max()
-        .unwrap_or(0);
-    let max_context_label = context_chunks[0]
-        .width
-        .saturating_sub(2) as usize;
-    let shared_label_width = legend_key_width
-        .max(context_label_width)
-        .min(legend_content_width)
-        .min(max_context_label);
+        .unwrap_or(0)
+        .saturating_add(1);
+    let max_context_label = context_chunks[0].width.saturating_sub(2) as usize;
+    let context_label_width = context_label_width.min(max_context_label);
+    let legend_key_width = context_label_width.min(legend_content_width);
 
     let mut context_lines = Vec::new();
     context_lines.push(Line::from(Span::styled(
@@ -1522,21 +1710,22 @@ fn draw(frame: &mut Frame<'_>, app: &mut App) {
         Style::default().fg(theme.accent),
     )));
     context_lines.extend(format_kv_lines_aligned(
-        &rows,
+        &context_rows,
         context_chunks[0].width as usize,
-        shared_label_width,
+        context_label_width,
     ));
-    context_lines.push(Line::from(""));
     let context_widget =
         Paragraph::new(context_lines).style(Style::default().fg(theme.text).bg(theme.subpanel_bg));
     frame.render_widget(context_widget, context_chunks[0]);
 
     let legend_lines = build_legend_lines(
         &legend_rows,
+        &hotkey_rows,
         &theme,
         legend_content_width,
         legend_content_height,
-        shared_label_width,
+        legend_key_width,
+        app.hotkey_fade_active(),
     );
     let legend_lines = pad_lines(
         legend_lines,
@@ -1712,6 +1901,9 @@ fn draw(frame: &mut Frame<'_>, app: &mut App) {
     if app.settings_menu.is_some() {
         draw_settings_menu(frame, app, &theme);
     }
+    if app.help_open {
+        draw_help_menu(frame, app, &theme);
+    }
 }
 
 fn current_filter_value(app: &App) -> (String, bool) {
@@ -1742,7 +1934,11 @@ fn render_filter_bar(
     let (filter_value, editing) = current_filter_value(app);
     let trimmed = filter_value.trim();
     let filter_active = !trimmed.is_empty();
-    let placeholder = if editing { "<type to filter>" } else { "<all>" };
+    let placeholder = if editing {
+        "Type to search..."
+    } else {
+        "Search mods..."
+    };
     let value_text = if filter_active { trimmed } else { placeholder };
     let value_style = if editing {
         Style::default()
@@ -1753,32 +1949,93 @@ fn render_filter_bar(
     } else {
         Style::default().fg(theme.muted)
     };
-    let right_label = if app.mod_filter_active() {
+    let counts_label = if app.mod_filter_active() {
         format!("Showing: {}/{}", counts.visible_total, counts.total)
     } else {
         format!("Total: {}", counts.total)
     };
-    let right_width = right_label.chars().count() as u16;
-    let right_width = right_width.min(area.width);
-    let filter_chunks = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([Constraint::Min(10), Constraint::Length(right_width)])
+    let search_hint = if editing {
+        "Enter search | Esc cancel"
+    } else {
+        "Ctrl+F or /"
+    };
+    let hint_style = if editing {
+        Style::default().fg(theme.warning)
+    } else {
+        Style::default().fg(theme.muted)
+    };
+    let bar_chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(1), Constraint::Min(0)])
         .split(area);
+    let search_area = bar_chunks[0];
+    let sort_label = format!(
+        "Sort: {} {}",
+        app.mod_sort.column_label(),
+        app.mod_sort.direction_arrow()
+    );
+    let sort_label = format!(" {sort_label} ");
+    let search_right_width = sort_label.chars().count() as u16;
+    let search_right_width = search_right_width.min(search_area.width);
+    let sort_style = if app.mod_sort.is_order_default() {
+        Style::default().fg(theme.muted)
+    } else {
+        Style::default()
+            .fg(theme.header_bg)
+            .bg(theme.section_bg)
+            .add_modifier(Modifier::BOLD)
+    };
+    let min_search_width = 12u16;
+    let search_chunks = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Min(min_search_width),
+            Constraint::Length(search_right_width),
+        ])
+        .split(search_area);
     let left_line = Line::from(vec![
-        Span::styled("Filter: ", Style::default().fg(theme.muted)),
+        Span::styled(
+            "Search",
+            Style::default()
+                .fg(theme.accent)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(" | ", Style::default().fg(theme.border)),
         Span::styled(value_text.to_string(), value_style),
+        Span::styled(" | ", Style::default().fg(theme.border)),
+        Span::styled(search_hint, hint_style),
     ]);
     let left = Paragraph::new(left_line)
         .style(Style::default().bg(theme.header_bg))
         .alignment(Alignment::Left);
-    frame.render_widget(left, filter_chunks[0]);
-    let right = Paragraph::new(Line::from(Span::styled(
-        right_label,
-        Style::default().fg(theme.muted),
-    )))
-    .style(Style::default().bg(theme.header_bg))
-    .alignment(Alignment::Right);
-    frame.render_widget(right, filter_chunks[1]);
+    frame.render_widget(left, search_chunks[0]);
+    let right_label = truncate_text(&sort_label, search_chunks[1].width as usize);
+    let right = Paragraph::new(Line::from(Span::styled(right_label, sort_style)))
+        .style(Style::default().bg(theme.header_bg))
+        .alignment(Alignment::Right);
+    frame.render_widget(right, search_chunks[1]);
+
+    if bar_chunks[1].height > 0 {
+        let meta_area = bar_chunks[1];
+        let mut meta_spans = vec![Span::styled(
+            counts_label.clone(),
+            Style::default().fg(theme.muted),
+        )];
+        if app.mod_filter_active() {
+            meta_spans.push(Span::styled(" | ", Style::default().fg(theme.muted)));
+            meta_spans.push(Span::styled(
+                "Clear search: Ctrl+L",
+                Style::default()
+                    .fg(theme.header_bg)
+                    .bg(theme.accent_soft)
+                    .add_modifier(Modifier::BOLD),
+            ));
+        }
+        let meta_left = Paragraph::new(Line::from(meta_spans))
+            .style(Style::default().bg(theme.header_bg))
+            .alignment(Alignment::Left);
+        frame.render_widget(meta_left, meta_area);
+    }
 }
 
 fn build_focus_tabs_line(app: &App, theme: &Theme) -> Line<'static> {
@@ -1882,7 +2139,10 @@ fn build_log_lines(app: &App, theme: &Theme, height: usize) -> Vec<Line<'static>
                 LogLevel::Error => ("[x]", theme.error),
             };
             Line::from(vec![
-                Span::styled(label, Style::default().fg(color).add_modifier(Modifier::BOLD)),
+                Span::styled(
+                    label,
+                    Style::default().fg(color).add_modifier(Modifier::BOLD),
+                ),
                 Span::raw(" "),
                 Span::styled(entry.message.clone(), Style::default().fg(theme.text)),
             ])
@@ -1981,20 +2241,29 @@ fn build_conflict_banner(app: &App, theme: &Theme, width: usize) -> Line<'static
     let total = app.conflicts.len();
     let selected_index = app.conflict_selected.min(total.saturating_sub(1));
     let conflict = &app.conflicts[selected_index];
-    let manual_count = app.conflicts.iter().filter(|entry| entry.overridden).count();
+    let manual_count = app
+        .conflicts
+        .iter()
+        .filter(|entry| entry.overridden)
+        .count();
     let auto_count = total.saturating_sub(manual_count);
     let auto_text = format!("Auto ({auto_count})");
     let manual_text = format!("Manual ({manual_count})");
 
-    let auto_style = Style::default()
-        .fg(theme.success)
-        .add_modifier(if focused && !conflict.overridden {
-            Modifier::BOLD
-        } else {
-            Modifier::empty()
-        });
+    let auto_style =
+        Style::default()
+            .fg(theme.success)
+            .add_modifier(if focused && !conflict.overridden {
+                Modifier::BOLD
+            } else {
+                Modifier::empty()
+            });
     let manual_style = Style::default()
-        .fg(if manual_count > 0 { theme.warning } else { theme.muted })
+        .fg(if manual_count > 0 {
+            theme.warning
+        } else {
+            theme.muted
+        })
         .add_modifier(if focused && conflict.overridden {
             Modifier::BOLD
         } else {
@@ -2097,7 +2366,11 @@ fn conflict_line_width(app: &App, _theme: &Theme, width: usize) -> u16 {
     }
     let total = app.conflicts.len();
     let selected_index = app.conflict_selected.min(total.saturating_sub(1));
-    let manual_count = app.conflicts.iter().filter(|entry| entry.overridden).count();
+    let manual_count = app
+        .conflicts
+        .iter()
+        .filter(|entry| entry.overridden)
+        .count();
     let auto_count = total.saturating_sub(manual_count);
     let auto_text = format!("Auto ({auto_count})");
     let manual_text = format!("Manual ({manual_count})");
@@ -2110,9 +2383,8 @@ fn conflict_line_width(app: &App, _theme: &Theme, width: usize) -> u16 {
         } else {
             String::new()
         };
-        let mut total_len = short_auto.len()
-            + if short_manual.is_empty() { 0 } else { 3 }
-            + short_manual.len();
+        let mut total_len =
+            short_auto.len() + if short_manual.is_empty() { 0 } else { 3 } + short_manual.len();
         if total_len > available {
             short_auto = format!("A({auto_count})");
             if !short_manual.is_empty() {
@@ -2200,7 +2472,9 @@ fn draw_dialog(frame: &mut Frame<'_>, app: &App, theme: &Theme) {
     let mut lines = Vec::new();
     lines.push(Line::from(Span::styled(
         dialog.title.clone(),
-        Style::default().fg(theme.accent).add_modifier(Modifier::BOLD),
+        Style::default()
+            .fg(theme.accent)
+            .add_modifier(Modifier::BOLD),
     )));
     lines.push(Line::from(""));
     lines.extend(message_lines);
@@ -2282,12 +2556,10 @@ fn build_dialog_message_lines(dialog: &crate::app::Dialog, theme: &Theme) -> Vec
                     Span::styled(name.clone(), Style::default().fg(theme.text)),
                     Span::styled("\"?", Style::default().fg(theme.text)),
                 ]);
-                let line2 = Line::from(vec![
-                    Span::styled(
-                        "Unsubscribe in-game to stop updates.",
-                        Style::default().fg(theme.muted),
-                    ),
-                ]);
+                let line2 = Line::from(vec![Span::styled(
+                    "Unsubscribe in-game to stop updates.",
+                    Style::default().fg(theme.muted),
+                )]);
                 vec![line1, line2]
             } else {
                 let line1 = Line::from(vec![
@@ -2319,6 +2591,21 @@ fn build_dialog_message_lines(dialog: &crate::app::Dialog, theme: &Theme) -> Vec
     }
 }
 
+fn padded_modal(area: Rect, width: u16, height: u16, pad: u16) -> (Rect, Rect) {
+    let outer_width = width.saturating_add(pad.saturating_mul(2)).min(area.width);
+    let outer_height = height
+        .saturating_add(pad.saturating_mul(2))
+        .min(area.height);
+    let x = area.x + (area.width.saturating_sub(outer_width)) / 2;
+    let y = area.y + (area.height.saturating_sub(outer_height)) / 2;
+    let outer = Rect::new(x, y, outer_width, outer_height);
+    let pad = pad.min(outer_width / 2).min(outer_height / 2);
+    let inner_width = outer_width.saturating_sub(pad.saturating_mul(2)).max(1);
+    let inner_height = outer_height.saturating_sub(pad.saturating_mul(2)).max(1);
+    let inner = Rect::new(outer.x + pad, outer.y + pad, inner_width, inner_height);
+    (outer, inner)
+}
+
 fn draw_settings_menu(frame: &mut Frame<'_>, app: &App, theme: &Theme) {
     let Some(menu) = &app.settings_menu else {
         return;
@@ -2343,11 +2630,13 @@ fn draw_settings_menu(frame: &mut Frame<'_>, app: &App, theme: &Theme) {
     }
     let max_width = area.width.saturating_sub(2).max(1);
     let width = (max_line as u16 + 6).clamp(34, max_width.min(58));
-    let x = area.x + (area.width.saturating_sub(width)) / 2;
-    let y = area.y + (area.height.saturating_sub(height)) / 2;
-    let menu_area = Rect::new(x, y, width, height);
+    let (outer_area, menu_area) = padded_modal(area, width, height, 1);
 
-    frame.render_widget(Clear, menu_area);
+    frame.render_widget(Clear, outer_area);
+    frame.render_widget(
+        Block::default().style(Style::default().bg(theme.header_bg)),
+        outer_area,
+    );
     let menu_block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
@@ -2363,6 +2652,92 @@ fn draw_settings_menu(frame: &mut Frame<'_>, app: &App, theme: &Theme) {
         .block(menu_block)
         .style(Style::default().fg(theme.text));
     frame.render_widget(menu_widget, menu_area);
+}
+
+fn draw_help_menu(frame: &mut Frame<'_>, app: &mut App, theme: &Theme) {
+    if !app.help_open {
+        return;
+    }
+
+    let area = frame.size();
+    let max_width = area.width.saturating_sub(4).max(1);
+    let width = max_width.clamp(52, 96);
+    let mut height = 14;
+    let content_width = width.saturating_sub(2) as usize;
+    let mut lines = build_help_lines(theme, content_width);
+    let content_height = lines.len().max(1) as u16;
+    height = height.max(content_height + 2);
+    if height < 14 {
+        height = 14;
+    }
+    let max_height = area.height.saturating_sub(2).max(1);
+    if height > max_height {
+        height = max_height;
+    }
+    let (outer_area, modal) = padded_modal(area, width, height, 1);
+
+    let view_height = modal.height.saturating_sub(2) as usize;
+    let max_scroll = lines.len().saturating_sub(view_height);
+    if app.help_scroll > max_scroll {
+        app.help_scroll = max_scroll;
+    }
+
+    let show_scroll = max_scroll > 0;
+    if show_scroll && content_width > 1 {
+        let adjusted_width = content_width.saturating_sub(1);
+        if adjusted_width != content_width {
+            lines = build_help_lines(theme, adjusted_width);
+        }
+    }
+
+    frame.render_widget(Clear, outer_area);
+    frame.render_widget(
+        Block::default().style(Style::default().bg(theme.header_bg)),
+        outer_area,
+    );
+    let help_block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(theme.accent_soft))
+        .style(Style::default().bg(theme.header_bg))
+        .title(Span::styled(
+            "Help",
+            Style::default()
+                .fg(theme.accent)
+                .add_modifier(Modifier::BOLD),
+        ));
+    let help_inner = help_block.inner(modal);
+    frame.render_widget(help_block, modal);
+
+    let help_chunks = if show_scroll {
+        Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Min(1), Constraint::Length(1)])
+            .split(help_inner)
+    } else {
+        Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Min(1), Constraint::Length(0)])
+            .split(help_inner)
+    };
+    let help_widget = Paragraph::new(lines)
+        .scroll((app.help_scroll as u16, 0))
+        .style(Style::default().fg(theme.text).bg(theme.header_bg));
+    frame.render_widget(help_widget, help_chunks[0]);
+    if show_scroll && help_chunks[1].width > 0 {
+        let scroll_len = max_scroll.saturating_add(1);
+        let mut scroll_state = ScrollbarState::new(scroll_len)
+            .position(app.help_scroll)
+            .viewport_content_length(view_height);
+        let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
+            .track_symbol(Some("░"))
+            .thumb_symbol("▓")
+            .begin_symbol(Some("▲"))
+            .end_symbol(Some("▼"))
+            .track_style(Style::default().fg(theme.border))
+            .thumb_style(Style::default().fg(theme.accent));
+        frame.render_stateful_widget(scrollbar, help_chunks[1], &mut scroll_state);
+    }
 }
 
 fn draw_path_browser(frame: &mut Frame<'_>, _app: &App, theme: &Theme, browser: &PathBrowser) {
@@ -2395,7 +2770,11 @@ fn draw_path_browser(frame: &mut Frame<'_>, _app: &App, theme: &Theme, browser: 
 
     let chunks = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Length(3), Constraint::Min(5), Constraint::Length(2)])
+        .constraints([
+            Constraint::Length(3),
+            Constraint::Min(5),
+            Constraint::Length(2),
+        ])
         .split(inner);
 
     let path_focus = browser.focus == PathBrowserFocus::PathInput;
@@ -2419,7 +2798,10 @@ fn draw_path_browser(frame: &mut Frame<'_>, _app: &App, theme: &Theme, browser: 
     ]);
     let current_label = format!(
         "Current: {}",
-        truncate_text(&browser.current.display().to_string(), chunks[0].width as usize)
+        truncate_text(
+            &browser.current.display().to_string(),
+            chunks[0].width as usize
+        )
     );
     let current_line = Line::from(Span::styled(
         current_label,
@@ -2495,8 +2877,7 @@ fn draw_path_browser(frame: &mut Frame<'_>, _app: &App, theme: &Theme, browser: 
         .direction(Direction::Vertical)
         .constraints([Constraint::Length(1), Constraint::Min(1)])
         .split(chunks[1]);
-    let spacer = Paragraph::new(Line::from(""))
-        .style(Style::default().bg(theme.header_bg));
+    let spacer = Paragraph::new(Line::from("")).style(Style::default().bg(theme.header_bg));
     frame.render_widget(spacer, list_chunks[0]);
 
     let mut state = ListState::default();
@@ -2541,7 +2922,7 @@ fn draw_path_browser(frame: &mut Frame<'_>, _app: &App, theme: &Theme, browser: 
     }
 
     let footer_plain =
-        "[Tab] Switch  [Enter] Open/Select  [Backspace] Up  [S] Select  [Esc] Cancel";
+        "[Tab] Switch  [Enter] Open/Select  [Backspace] Parent  [S] Select  [Esc] Cancel";
     let footer_widget = if footer_plain.chars().count() > chunks[2].width as usize {
         let footer_line = truncate_text(footer_plain, chunks[2].width as usize);
         Paragraph::new(Line::from(Span::styled(
@@ -2560,7 +2941,7 @@ fn draw_path_browser(frame: &mut Frame<'_>, _app: &App, theme: &Theme, browser: 
             Span::styled("[Enter]", key_style),
             Span::styled(" Open/Select  ", text_style),
             Span::styled("[Backspace]", key_style),
-            Span::styled(" Up  ", text_style),
+            Span::styled(" Parent  ", text_style),
             Span::styled("[S]", key_style),
             Span::styled(" Select  ", text_style),
             Span::styled("[Esc]", key_style),
@@ -2749,13 +3130,16 @@ fn build_smart_rank_preview_render(
         let shrink_right = deficit / 2;
         current_width = current_width.saturating_sub(shrink_left).max(3);
         proposed_width = proposed_width.saturating_sub(shrink_right).max(3);
-        mod_width = width
-            .saturating_sub(current_width + proposed_width + created_width + added_width + sep_width);
+        mod_width = width.saturating_sub(
+            current_width + proposed_width + created_width + added_width + sep_width,
+        );
         if mod_width < min_mod_width {
             let deficit = min_mod_width.saturating_sub(mod_width);
             let shrink_created = deficit / 2 + deficit % 2;
             let shrink_added = deficit / 2;
-            created_width = created_width.saturating_sub(shrink_created).max(min_date_width);
+            created_width = created_width
+                .saturating_sub(shrink_created)
+                .max(min_date_width);
             added_width = added_width.saturating_sub(shrink_added).max(min_date_width);
             mod_width = width.saturating_sub(
                 current_width + proposed_width + created_width + added_width + sep_width,
@@ -2769,13 +3153,11 @@ fn build_smart_rank_preview_render(
         let mod_header = truncate_text("Mod", mod_width);
         let mod_pad = " ".repeat(mod_width.saturating_sub(mod_header.chars().count()));
         let created_header = truncate_text("Created", created_width);
-        let created_pad =
-            " ".repeat(created_width.saturating_sub(created_header.chars().count()));
+        let created_pad = " ".repeat(created_width.saturating_sub(created_header.chars().count()));
         let added_header = truncate_text("Added", added_width);
         let added_pad = " ".repeat(added_width.saturating_sub(added_header.chars().count()));
         let current_header = truncate_text("Current", current_width);
-        let current_pad =
-            " ".repeat(current_width.saturating_sub(current_header.chars().count()));
+        let current_pad = " ".repeat(current_width.saturating_sub(current_header.chars().count()));
         let proposed_header = truncate_text("Proposed", proposed_width);
         let proposed_pad =
             " ".repeat(proposed_width.saturating_sub(proposed_header.chars().count()));
@@ -2853,7 +3235,8 @@ fn build_smart_rank_preview_render(
                 };
                 let is_major = highlight_delta > 0 && delta == highlight_delta;
                 let mod_text = format_padded_cell(&entry.name, mod_width);
-                let created_text = format_padded_cell(&format_date_cell(entry.created_at), created_width);
+                let created_text =
+                    format_padded_cell(&format_date_cell(entry.created_at), created_width);
                 let added_text =
                     format_padded_cell(&format_date_cell(Some(entry.added_at)), added_width);
                 let current_text = format!("{:>width$}", entry.from + 1, width = current_width);
@@ -2863,26 +3246,18 @@ fn build_smart_rank_preview_render(
                 } else {
                     None
                 };
-                let mut mod_style = Style::default().fg(if is_major {
-                    theme.accent
-                } else {
-                    theme.text
-                });
+                let mut mod_style =
+                    Style::default().fg(if is_major { theme.accent } else { theme.text });
                 if is_major {
-                    mod_style = mod_style
-                        .add_modifier(Modifier::BOLD)
-                        .bg(theme.accent_soft);
+                    mod_style = mod_style.add_modifier(Modifier::BOLD).bg(theme.accent_soft);
                 }
                 let mut date_style = Style::default().fg(theme.muted);
                 let mut current_style = Style::default().fg(theme.muted);
                 let mut proposed_style =
                     Style::default().fg(theme.text).add_modifier(Modifier::BOLD);
                 let mut sep_style = Style::default().fg(theme.muted);
-                let mut arrow_style = Style::default().fg(if is_major {
-                    theme.success
-                } else {
-                    theme.muted
-                });
+                let mut arrow_style =
+                    Style::default().fg(if is_major { theme.success } else { theme.muted });
                 if let Some(bg) = row_bg {
                     if !is_major {
                         mod_style = mod_style.bg(bg);
@@ -3003,7 +3378,9 @@ fn build_settings_menu_lines(app: &App, theme: &Theme, selected: usize) -> Vec<L
     for (index, item) in items.iter().enumerate() {
         let prefix = if index == selected { ">" } else { " " };
         let style = if index == selected {
-            Style::default().fg(theme.accent).add_modifier(Modifier::BOLD)
+            Style::default()
+                .fg(theme.accent)
+                .add_modifier(Modifier::BOLD)
         } else {
             Style::default().fg(theme.text)
         };
@@ -3037,7 +3414,7 @@ fn build_settings_menu_lines(app: &App, theme: &Theme, selected: usize) -> Vec<L
 
     lines.push(Line::from(""));
     lines.push(Line::from(Span::styled(
-        "Keybinds",
+        "Hotkeys",
         Style::default()
             .fg(theme.accent)
             .add_modifier(Modifier::BOLD),
@@ -3047,7 +3424,7 @@ fn build_settings_menu_lines(app: &App, theme: &Theme, selected: usize) -> Vec<L
         Style::default().fg(theme.muted),
     )));
     lines.push(Line::from(Span::styled(
-        "Ctrl+F: filter    Ctrl+L: clear",
+        "/ or Ctrl+F: search  Ctrl+L: clear",
         Style::default().fg(theme.muted),
     )));
     lines.push(Line::from(Span::styled(
@@ -3137,8 +3514,16 @@ fn mode_toast(app: &App) -> Option<(String, ToastLevel)> {
             ..
         } => {
             let default_hint = "Enter confirm | Esc cancel";
-            let auto_hint = "Pause/Enter to import | Esc cancel";
-            let hint = if *auto_submit { auto_hint } else { default_hint };
+            let hint = if *auto_submit {
+                match purpose {
+                    InputPurpose::FilterMods => "Pause/Enter to search | Esc cancel",
+                    _ => "Pause/Enter to apply | Esc cancel",
+                }
+            } else if matches!(purpose, InputPurpose::FilterMods) {
+                "Enter search | Esc cancel"
+            } else {
+                default_hint
+            };
             let value = |placeholder: &str| {
                 let trimmed = buffer.trim();
                 if trimmed.is_empty() {
@@ -3170,12 +3555,11 @@ fn mode_toast(app: &App) -> Option<(String, ToastLevel)> {
                 }
                 InputPurpose::ImportPath => {
                     let path = value("<path>");
-                    let hint = if *auto_submit { auto_hint } else { default_hint };
                     format!("Import mod: {path} | {hint}")
                 }
                 InputPurpose::FilterMods => {
                     let filter = value("<all>");
-                    format!("Filter mods: {filter} | {hint}")
+                    format!("Search mods: {filter} | {hint}")
                 }
             };
             Some((message, ToastLevel::Info))
@@ -3205,8 +3589,7 @@ fn render_toast(
     let padding_x = 2u16;
     let padding_y = 1u16;
     let max_width = body_area.width.saturating_sub(4).max(24);
-    let max_text = max_width
-        .saturating_sub(2 + padding_x.saturating_mul(2)) as usize;
+    let max_text = max_width.saturating_sub(2 + padding_x.saturating_mul(2)) as usize;
     if message.len() > max_text {
         message.truncate(max_text.saturating_sub(3));
         message.push_str("...");
@@ -3319,9 +3702,7 @@ fn explorer_line(
 
     let mut label_style = if item.disabled { disabled } else { normal };
     if item.renaming {
-        label_style = label_style
-            .fg(theme.warning)
-            .add_modifier(Modifier::BOLD);
+        label_style = label_style.fg(theme.warning).add_modifier(Modifier::BOLD);
     }
     let mut spans = Vec::new();
     if !prefix.is_empty() {
@@ -3347,7 +3728,10 @@ fn explorer_line(
             let expander = if item.expanded { "▾" } else { "▸" };
             spans.push(Span::styled(expander, muted));
             spans.push(Span::raw(" "));
-            spans.push(Span::styled(item.label.clone(), label_style.fg(theme.accent)));
+            spans.push(Span::styled(
+                item.label.clone(),
+                label_style.fg(theme.accent),
+            ));
         }
         ExplorerItemKind::Profile { .. } => {
             let marker_style = if item.active {
@@ -3418,6 +3802,27 @@ fn build_rows(app: &App, theme: &Theme) -> (Vec<Row<'static>>, ModCounts, usize)
         },
         target_width,
     )
+}
+
+fn mod_header_cell(
+    label: &str,
+    column: ModSortColumn,
+    sort: ModSort,
+    theme: &Theme,
+) -> Cell<'static> {
+    let is_sorted = sort.column == column;
+    let style = if is_sorted {
+        Style::default()
+            .fg(theme.header_bg)
+            .bg(theme.section_bg)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default()
+            .fg(theme.accent)
+            .bg(theme.header_bg)
+            .add_modifier(Modifier::BOLD)
+    };
+    Cell::from(label.to_string()).style(style)
 }
 
 fn row_for_entry(
@@ -3523,14 +3928,24 @@ fn prefers_ymd(locale: &str) -> bool {
 }
 
 fn format_date_cell(value: Option<i64>) -> String {
-    format_short_date(value.unwrap_or_default()).unwrap_or_else(|| "---- -- --".to_string())
+    if let Some(value) = value {
+        if let Some(formatted) = format_short_date(value) {
+            return formatted;
+        }
+    }
+    format_blank_date()
 }
 
-fn pad_lines(
-    lines: Vec<Line<'static>>,
-    left_pad: usize,
-    top_pad: usize,
-) -> Vec<Line<'static>> {
+fn format_blank_date() -> String {
+    let locale = locale_hint();
+    if prefers_ymd(&locale) {
+        "---- -- --".to_string()
+    } else {
+        "-- -- ----".to_string()
+    }
+}
+
+fn pad_lines(lines: Vec<Line<'static>>, left_pad: usize, top_pad: usize) -> Vec<Line<'static>> {
     if left_pad == 0 && top_pad == 0 {
         return lines;
     }
@@ -3658,8 +4073,11 @@ fn build_details(app: &App, theme: &Theme, width: usize) -> Vec<Line<'static>> {
         }
     }
     let enabled_label = if entry.enabled { "Yes" } else { "No" };
-    let enabled_style =
-        Style::default().fg(if entry.enabled { theme.success } else { theme.muted });
+    let enabled_style = Style::default().fg(if entry.enabled {
+        theme.success
+    } else {
+        theme.muted
+    });
     rows.push(KvRow {
         label: "Enabled".to_string(),
         value: enabled_label.to_string(),
@@ -3770,12 +4188,20 @@ fn build_explorer_details(app: &App, theme: &Theme, width: usize) -> Vec<Line<'s
                 });
                 rows.push(KvRow {
                     label: "Config".to_string(),
-                    value: app.config.data_dir.join("config.json").display().to_string(),
+                    value: app
+                        .config
+                        .data_dir
+                        .join("config.json")
+                        .display()
+                        .to_string(),
                     label_style,
                     value_style,
                 });
-                let status_style =
-                    Style::default().fg(if app.paths_ready() { theme.success } else { theme.warning });
+                let status_style = Style::default().fg(if app.paths_ready() {
+                    theme.success
+                } else {
+                    theme.warning
+                });
                 let status_label = if app.paths_ready() {
                     "Ready"
                 } else {
@@ -3934,7 +4360,14 @@ fn build_conflict_details(app: &App, theme: &Theme, width: usize) -> Vec<Line<'s
             Style::default().fg(theme.muted)
         };
         let prefix = format!("{marker} ");
-        push_truncated_prefixed(&mut lines, &prefix, style, &candidate.mod_name, style, width);
+        push_truncated_prefixed(
+            &mut lines,
+            &prefix,
+            style,
+            &candidate.mod_name,
+            style,
+            width,
+        );
     }
 
     lines
@@ -3983,7 +4416,12 @@ fn target_kind_path_label(kind: TargetKind) -> &'static str {
     }
 }
 
-fn mod_path_label(app: &App, mod_entry: &ModEntry, theme: &Theme, _compact: bool) -> (String, Style) {
+fn mod_path_label(
+    app: &App,
+    mod_entry: &ModEntry,
+    theme: &Theme,
+    _compact: bool,
+) -> (String, Style) {
     if mod_entry.targets.is_empty() {
         return ("Invalid".to_string(), Style::default().fg(theme.warning));
     }
@@ -4032,7 +4470,9 @@ fn mod_path_label(app: &App, mod_entry: &ModEntry, theme: &Theme, _compact: bool
     }
 
     let style = if has_overrides {
-        Style::default().fg(theme.accent).add_modifier(Modifier::BOLD)
+        Style::default()
+            .fg(theme.accent)
+            .add_modifier(Modifier::BOLD)
     } else {
         Style::default().fg(theme.muted)
     };
@@ -4070,14 +4510,12 @@ fn mod_override_label(mod_entry: &ModEntry, theme: &Theme, compact: bool) -> (St
         } else {
             target_kind_path_label(enabled[0])
         };
-        let label = format!(
-            "{} [{}]",
-            kind_label,
-            override_key_label(Some(enabled[0]))
-        );
+        let label = format!("{} [{}]", kind_label, override_key_label(Some(enabled[0])));
         return (
             label,
-            Style::default().fg(theme.accent).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(theme.accent)
+                .add_modifier(Modifier::BOLD),
         );
     }
 
@@ -4137,9 +4575,20 @@ fn override_key_label(kind: Option<TargetKind>) -> &'static str {
     }
 }
 
+#[derive(Clone)]
 struct LegendRow {
     key: String,
     action: String,
+}
+
+struct HotkeyRows {
+    global: Vec<LegendRow>,
+    context: Vec<LegendRow>,
+}
+
+struct HelpSection {
+    title: &'static str,
+    rows: Vec<LegendRow>,
 }
 
 struct KvRow {
@@ -4149,15 +4598,12 @@ struct KvRow {
     value_style: Style,
 }
 
-fn legend_rows(app: &App) -> Vec<LegendRow> {
-    let mut rows = Vec::new();
-    match app.focus {
+fn legend_rows_for_focus(focus: Focus) -> Vec<LegendRow> {
+    let mut legend = Vec::new();
+
+    match focus {
         Focus::Explorer => {
-            rows.extend([
-                LegendRow {
-                    key: "Enter".to_string(),
-                    action: "Select or expand".to_string(),
-                },
+            legend.extend([
                 LegendRow {
                     key: "[x]".to_string(),
                     action: "Active profile".to_string(),
@@ -4165,6 +4611,34 @@ fn legend_rows(app: &App) -> Vec<LegendRow> {
                 LegendRow {
                     key: "[ ]".to_string(),
                     action: "Inactive profile".to_string(),
+                },
+            ]);
+        }
+        Focus::Mods => {
+            legend.push(LegendRow {
+                key: "N".to_string(),
+                action: "Native mod (mod.io)".to_string(),
+            });
+        }
+        Focus::Conflicts | Focus::Log => {}
+    }
+
+    legend
+}
+
+fn legend_rows(app: &App) -> Vec<LegendRow> {
+    legend_rows_for_focus(app.hotkey_focus)
+}
+
+fn hotkey_rows_for_focus(focus: Focus) -> HotkeyRows {
+    let mut context = Vec::new();
+
+    match focus {
+        Focus::Explorer => {
+            context.extend([
+                LegendRow {
+                    key: "Enter".to_string(),
+                    action: "Select or expand".to_string(),
                 },
                 LegendRow {
                     key: "a".to_string(),
@@ -4190,14 +4664,10 @@ fn legend_rows(app: &App) -> Vec<LegendRow> {
                     key: "p".to_string(),
                     action: "Import profile".to_string(),
                 },
-                LegendRow {
-                    key: "Tab".to_string(),
-                    action: "Cycle focus".to_string(),
-                },
             ]);
         }
         Focus::Conflicts => {
-            rows.extend([
+            context.extend([
                 LegendRow {
                     key: "←/→".to_string(),
                     action: "Select override".to_string(),
@@ -4214,21 +4684,13 @@ fn legend_rows(app: &App) -> Vec<LegendRow> {
                     key: "Backspace".to_string(),
                     action: "Clear override".to_string(),
                 },
-                LegendRow {
-                    key: "Tab".to_string(),
-                    action: "Cycle focus".to_string(),
-                },
             ]);
         }
         Focus::Mods => {
-            rows.extend([
+            context.extend([
                 LegendRow {
                     key: "Space".to_string(),
                     action: "Toggle enable".to_string(),
-                },
-                LegendRow {
-                    key: "N".to_string(),
-                    action: "Native mod (mod.io)".to_string(),
                 },
                 LegendRow {
                     key: "m".to_string(),
@@ -4237,6 +4699,26 @@ fn legend_rows(app: &App) -> Vec<LegendRow> {
                 LegendRow {
                     key: "u/n".to_string(),
                     action: "Move order".to_string(),
+                },
+                LegendRow {
+                    key: "PgUp/PgDn".to_string(),
+                    action: "Page scroll".to_string(),
+                },
+                LegendRow {
+                    key: "/ or Ctrl+F".to_string(),
+                    action: "Search".to_string(),
+                },
+                LegendRow {
+                    key: "Ctrl+←/→".to_string(),
+                    action: "Sort column".to_string(),
+                },
+                LegendRow {
+                    key: "Ctrl+↑/↓".to_string(),
+                    action: "Invert sort".to_string(),
+                },
+                LegendRow {
+                    key: "Ctrl+L".to_string(),
+                    action: "Clear search".to_string(),
                 },
                 LegendRow {
                     key: "Del".to_string(),
@@ -4254,18 +4736,10 @@ fn legend_rows(app: &App) -> Vec<LegendRow> {
                     key: "c".to_string(),
                     action: "Clear overrides".to_string(),
                 },
-                LegendRow {
-                    key: "Ctrl+F/Ctrl+L".to_string(),
-                    action: "Filter/Clear".to_string(),
-                },
-                LegendRow {
-                    key: "Tab".to_string(),
-                    action: "Cycle focus".to_string(),
-                },
             ]);
         }
         Focus::Log => {
-            rows.extend([
+            context.extend([
                 LegendRow {
                     key: "↑/↓".to_string(),
                     action: "Scroll log".to_string(),
@@ -4274,44 +4748,164 @@ fn legend_rows(app: &App) -> Vec<LegendRow> {
                     key: "PgUp/PgDn".to_string(),
                     action: "Page scroll".to_string(),
                 },
-                LegendRow {
-                    key: "Tab".to_string(),
-                    action: "Cycle focus".to_string(),
-                },
             ]);
         }
     }
-    rows.push(LegendRow {
+
+    let mut global = Vec::new();
+    global.push(LegendRow {
+        key: "i".to_string(),
+        action: "Import mod".to_string(),
+    });
+    global.push(LegendRow {
+        key: "Tab".to_string(),
+        action: "Cycle focus".to_string(),
+    });
+    global.push(LegendRow {
+        key: "?".to_string(),
+        action: "Help".to_string(),
+    });
+    global.push(LegendRow {
         key: "Esc".to_string(),
         action: "Menu".to_string(),
     });
-    rows
+
+    HotkeyRows { global, context }
 }
 
-fn legend_key_width(rows: &[LegendRow], width: usize) -> usize {
-    rows.iter()
-        .map(|row| row.key.chars().count())
-        .max()
-        .unwrap_or(0)
-        .min(width)
+fn hotkey_rows(app: &App) -> HotkeyRows {
+    hotkey_rows_for_focus(app.hotkey_focus)
+}
+
+fn legend_line_count(legend: &[LegendRow], hotkeys: &HotkeyRows) -> usize {
+    let mut count = 0usize;
+    let legend_rows = legend.len().max(2);
+    count = count.saturating_add(1 + legend_rows);
+    let hotkey_rows = hotkeys.global.len().saturating_add(hotkeys.context.len());
+    if hotkey_rows > 0 {
+        count = count.saturating_add(1 + hotkey_rows);
+    }
+    count
 }
 
 fn build_legend_lines(
-    rows: &[LegendRow],
+    legend: &[LegendRow],
+    hotkeys: &HotkeyRows,
     theme: &Theme,
     width: usize,
     height: usize,
     key_width: usize,
+    hotkey_fade: bool,
 ) -> Vec<Line<'static>> {
     if width == 0 || height == 0 {
         return Vec::new();
     }
 
-    let mut lines = format_legend_rows(rows, width, key_width, theme);
+    let mut lines = Vec::new();
+    lines.push(context_header_line("Legend", width, theme));
+    let mut legend_rows = legend.to_vec();
+    if legend_rows.is_empty() {
+        legend_rows.push(LegendRow {
+            key: "N/A".to_string(),
+            action: "None".to_string(),
+        });
+    }
+    while legend_rows.len() < 2 {
+        legend_rows.push(LegendRow {
+            key: String::new(),
+            action: String::new(),
+        });
+    }
+    lines.extend(format_context_rows(
+        &legend_rows,
+        width,
+        key_width,
+        theme,
+        false,
+    ));
+    let hotkey_rows = hotkeys.global.len().saturating_add(hotkeys.context.len());
+    if hotkey_rows > 0 {
+        lines.push(context_header_line("Hotkeys", width, theme));
+        lines.extend(format_context_rows(
+            &hotkeys.global,
+            width,
+            key_width,
+            theme,
+            false,
+        ));
+        lines.extend(format_context_rows(
+            &hotkeys.context,
+            width,
+            key_width,
+            theme,
+            hotkey_fade,
+        ));
+    }
     if lines.len() > height {
         lines.truncate(height);
     }
     lines
+}
+
+fn section_header_line(title: &str, width: usize, theme: &Theme) -> Line<'static> {
+    let width = width.max(1);
+    let title = truncate_text(title, width);
+    let padded = format!("{title:<width$}", width = width);
+    Line::from(Span::styled(
+        padded,
+        Style::default()
+            .fg(theme.header_bg)
+            .bg(theme.section_bg)
+            .add_modifier(Modifier::BOLD),
+    ))
+}
+
+fn context_header_line(title: &str, width: usize, theme: &Theme) -> Line<'static> {
+    let width = width.max(1);
+    let title = truncate_text(title, width);
+    let padded = format!("{title:<width$}", width = width);
+    Line::from(Span::styled(
+        padded,
+        Style::default()
+            .fg(theme.section_bg)
+            .bg(theme.header_bg)
+            .add_modifier(Modifier::BOLD),
+    ))
+}
+
+fn format_context_rows(
+    rows: &[LegendRow],
+    width: usize,
+    key_width: usize,
+    theme: &Theme,
+    dim: bool,
+) -> Vec<Line<'static>> {
+    if width == 0 {
+        return Vec::new();
+    }
+    let key_width = key_width.min(width);
+    let spacing = 2usize;
+    let action_width = width.saturating_sub(key_width + spacing);
+    let mut key_style = Style::default().fg(theme.accent_soft);
+    let mut action_style = Style::default().fg(theme.muted);
+    if dim {
+        key_style = key_style.add_modifier(Modifier::DIM);
+        action_style = action_style.add_modifier(Modifier::DIM);
+    }
+
+    rows.iter()
+        .map(|row| {
+            let key_text = truncate_text(&row.key, key_width);
+            let key_len = key_text.chars().count();
+            let pad = " ".repeat(key_width.saturating_sub(key_len) + spacing);
+            let action_text = truncate_text(&row.action, action_width);
+            Line::from(vec![
+                Span::styled(key_text, key_style),
+                Span::raw(pad),
+                Span::styled(action_text, action_style),
+            ])
+        })
+        .collect()
 }
 
 fn format_legend_rows(
@@ -4347,6 +4941,333 @@ fn format_legend_rows(
         .collect()
 }
 
+fn help_sections() -> Vec<HelpSection> {
+    vec![
+        HelpSection {
+            title: "Global",
+            rows: vec![
+                LegendRow {
+                    key: "Tab".to_string(),
+                    action: "Cycle focus".to_string(),
+                },
+                LegendRow {
+                    key: "?".to_string(),
+                    action: "Toggle help".to_string(),
+                },
+                LegendRow {
+                    key: "Esc".to_string(),
+                    action: "Menu".to_string(),
+                },
+                LegendRow {
+                    key: "i".to_string(),
+                    action: "Import mod".to_string(),
+                },
+                LegendRow {
+                    key: "d".to_string(),
+                    action: "Deploy".to_string(),
+                },
+                LegendRow {
+                    key: "b".to_string(),
+                    action: "Rollback last backup".to_string(),
+                },
+                LegendRow {
+                    key: "q".to_string(),
+                    action: "Quit".to_string(),
+                },
+            ],
+        },
+        HelpSection {
+            title: "Explorer",
+            rows: vec![
+                LegendRow {
+                    key: "↑/↓ or j/k".to_string(),
+                    action: "Move selection".to_string(),
+                },
+                LegendRow {
+                    key: "←/→ or h/l".to_string(),
+                    action: "Collapse/expand".to_string(),
+                },
+                LegendRow {
+                    key: "Enter".to_string(),
+                    action: "Select/activate".to_string(),
+                },
+                LegendRow {
+                    key: "a".to_string(),
+                    action: "New profile".to_string(),
+                },
+                LegendRow {
+                    key: "r/F2".to_string(),
+                    action: "Rename profile".to_string(),
+                },
+                LegendRow {
+                    key: "c".to_string(),
+                    action: "Duplicate profile".to_string(),
+                },
+                LegendRow {
+                    key: "e".to_string(),
+                    action: "Export profile".to_string(),
+                },
+                LegendRow {
+                    key: "p".to_string(),
+                    action: "Import profile".to_string(),
+                },
+                LegendRow {
+                    key: "Del".to_string(),
+                    action: "Delete profile".to_string(),
+                },
+            ],
+        },
+        HelpSection {
+            title: "Mods",
+            rows: vec![
+                LegendRow {
+                    key: "↑/↓ or j/k".to_string(),
+                    action: "Move selection".to_string(),
+                },
+                LegendRow {
+                    key: "PgUp/PgDn".to_string(),
+                    action: "Page scroll".to_string(),
+                },
+                LegendRow {
+                    key: "Space".to_string(),
+                    action: "Toggle enable".to_string(),
+                },
+                LegendRow {
+                    key: "m".to_string(),
+                    action: "Move mode".to_string(),
+                },
+                LegendRow {
+                    key: "u/n".to_string(),
+                    action: "Move order".to_string(),
+                },
+                LegendRow {
+                    key: "Enter/Esc".to_string(),
+                    action: "Exit move mode".to_string(),
+                },
+                LegendRow {
+                    key: "1-5".to_string(),
+                    action: "Target override (Auto/Mods/Gen/Data/Bin)".to_string(),
+                },
+                LegendRow {
+                    key: "a/s/x".to_string(),
+                    action: "Enable/Disable/Invert visible".to_string(),
+                },
+                LegendRow {
+                    key: "c".to_string(),
+                    action: "Clear overrides".to_string(),
+                },
+                LegendRow {
+                    key: "/ or Ctrl+F".to_string(),
+                    action: "Search mods".to_string(),
+                },
+                LegendRow {
+                    key: "Ctrl+←/→".to_string(),
+                    action: "Sort column".to_string(),
+                },
+                LegendRow {
+                    key: "Ctrl+↑/↓".to_string(),
+                    action: "Invert sort".to_string(),
+                },
+                LegendRow {
+                    key: "Ctrl+L".to_string(),
+                    action: "Clear search".to_string(),
+                },
+                LegendRow {
+                    key: "Del".to_string(),
+                    action: "Remove mod".to_string(),
+                },
+            ],
+        },
+        HelpSection {
+            title: "Conflicts",
+            rows: vec![
+                LegendRow {
+                    key: "←/→".to_string(),
+                    action: "Select override".to_string(),
+                },
+                LegendRow {
+                    key: "↑/↓".to_string(),
+                    action: "Choose winner".to_string(),
+                },
+                LegendRow {
+                    key: "Enter".to_string(),
+                    action: "Cycle winner".to_string(),
+                },
+                LegendRow {
+                    key: "Backspace/Del".to_string(),
+                    action: "Clear override".to_string(),
+                },
+            ],
+        },
+        HelpSection {
+            title: "Log",
+            rows: vec![
+                LegendRow {
+                    key: "↑/↓".to_string(),
+                    action: "Scroll log".to_string(),
+                },
+                LegendRow {
+                    key: "PgUp/PgDn".to_string(),
+                    action: "Page scroll".to_string(),
+                },
+            ],
+        },
+        HelpSection {
+            title: "Smart Rank Preview",
+            rows: vec![
+                LegendRow {
+                    key: "Enter/Y".to_string(),
+                    action: "Apply ranking".to_string(),
+                },
+                LegendRow {
+                    key: "Esc/N".to_string(),
+                    action: "Cancel".to_string(),
+                },
+                LegendRow {
+                    key: "Tab".to_string(),
+                    action: "Toggle view".to_string(),
+                },
+                LegendRow {
+                    key: "↑/↓".to_string(),
+                    action: "Scroll".to_string(),
+                },
+                LegendRow {
+                    key: "PgUp/PgDn".to_string(),
+                    action: "Page scroll".to_string(),
+                },
+                LegendRow {
+                    key: "Home/End".to_string(),
+                    action: "Top/Bottom".to_string(),
+                },
+            ],
+        },
+        HelpSection {
+            title: "Dialogs",
+            rows: vec![
+                LegendRow {
+                    key: "←/→ or Tab".to_string(),
+                    action: "Change choice".to_string(),
+                },
+                LegendRow {
+                    key: "Y/N".to_string(),
+                    action: "Pick choice".to_string(),
+                },
+                LegendRow {
+                    key: "D".to_string(),
+                    action: "Toggle checkbox".to_string(),
+                },
+                LegendRow {
+                    key: "Enter/Space".to_string(),
+                    action: "Confirm".to_string(),
+                },
+                LegendRow {
+                    key: "Esc".to_string(),
+                    action: "Cancel".to_string(),
+                },
+            ],
+        },
+        HelpSection {
+            title: "Path Browser",
+            rows: vec![
+                LegendRow {
+                    key: "Tab".to_string(),
+                    action: "Switch focus".to_string(),
+                },
+                LegendRow {
+                    key: "Enter".to_string(),
+                    action: "Open/select".to_string(),
+                },
+                LegendRow {
+                    key: "S".to_string(),
+                    action: "Select current folder".to_string(),
+                },
+                LegendRow {
+                    key: "↑/↓ or j/k".to_string(),
+                    action: "Move selection".to_string(),
+                },
+                LegendRow {
+                    key: "PgUp/PgDn".to_string(),
+                    action: "Page".to_string(),
+                },
+                LegendRow {
+                    key: "Home/End".to_string(),
+                    action: "Top/Bottom".to_string(),
+                },
+                LegendRow {
+                    key: "←/Backspace".to_string(),
+                    action: "Parent folder".to_string(),
+                },
+                LegendRow {
+                    key: "Ctrl+U".to_string(),
+                    action: "Clear path input".to_string(),
+                },
+                LegendRow {
+                    key: "Ctrl+Alt+V".to_string(),
+                    action: "Paste path".to_string(),
+                },
+                LegendRow {
+                    key: "Esc".to_string(),
+                    action: "Cancel".to_string(),
+                },
+            ],
+        },
+        HelpSection {
+            title: "Input Fields",
+            rows: vec![
+                LegendRow {
+                    key: "Enter".to_string(),
+                    action: "Submit".to_string(),
+                },
+                LegendRow {
+                    key: "Esc".to_string(),
+                    action: "Cancel".to_string(),
+                },
+                LegendRow {
+                    key: "Ctrl+Alt+V".to_string(),
+                    action: "Paste".to_string(),
+                },
+            ],
+        },
+    ]
+}
+
+fn help_key_width(sections: &[HelpSection], width: usize) -> usize {
+    sections
+        .iter()
+        .flat_map(|section| section.rows.iter())
+        .map(|row| row.key.chars().count())
+        .max()
+        .unwrap_or(0)
+        .min(width)
+}
+
+fn build_help_lines(theme: &Theme, width: usize) -> Vec<Line<'static>> {
+    if width == 0 {
+        return Vec::new();
+    }
+    let sections = help_sections();
+    let key_width = help_key_width(&sections, width);
+
+    let mut lines = Vec::new();
+    lines.push(Line::from(Span::styled(
+        "Esc/? close | ↑/↓ PgUp/PgDn scroll | Home/End jump",
+        Style::default().fg(theme.muted),
+    )));
+    lines.push(Line::from(""));
+
+    for section in sections {
+        lines.push(section_header_line(section.title, width, theme));
+        lines.extend(format_legend_rows(&section.rows, width, key_width, theme));
+        lines.push(Line::from(""));
+    }
+
+    while matches!(lines.last(), Some(line) if line.to_string().is_empty()) {
+        lines.pop();
+    }
+
+    lines
+}
+
 fn format_kv_lines(rows: &[KvRow], width: usize) -> Vec<Line<'static>> {
     if width == 0 || rows.is_empty() {
         return Vec::new();
@@ -4380,32 +5301,28 @@ fn format_kv_lines(rows: &[KvRow], width: usize) -> Vec<Line<'static>> {
                     row.label_style,
                 ));
             }
-        let label_text = truncate_text(&row.label, label_width);
-        let label_len = label_text.chars().count();
-        let pad = " ".repeat(label_width.saturating_sub(label_len));
-        let value_text = truncate_text(&row.value, value_width);
-        if row.label.trim().is_empty() {
-            let indent = " ".repeat(label_width + 2);
-            return Line::from(vec![
-                Span::raw(indent),
+            let label_text = truncate_text(&row.label, label_width);
+            let label_len = label_text.chars().count();
+            let pad = " ".repeat(label_width.saturating_sub(label_len));
+            let value_text = truncate_text(&row.value, value_width);
+            if row.label.trim().is_empty() {
+                let indent = " ".repeat(label_width + 2);
+                return Line::from(vec![
+                    Span::raw(indent),
+                    Span::styled(value_text, row.value_style),
+                ]);
+            }
+            Line::from(vec![
+                Span::styled(label_text, row.label_style),
+                Span::raw(pad),
+                Span::styled(": ", row.label_style),
                 Span::styled(value_text, row.value_style),
-            ]);
-        }
-        Line::from(vec![
-            Span::styled(label_text, row.label_style),
-            Span::raw(pad),
-            Span::styled(": ", row.label_style),
-            Span::styled(value_text, row.value_style),
-        ])
-    })
-    .collect()
+            ])
+        })
+        .collect()
 }
 
-fn format_kv_lines_aligned(
-    rows: &[KvRow],
-    width: usize,
-    label_width: usize,
-) -> Vec<Line<'static>> {
+fn format_kv_lines_aligned(rows: &[KvRow], width: usize, label_width: usize) -> Vec<Line<'static>> {
     if width == 0 || rows.is_empty() {
         return Vec::new();
     }

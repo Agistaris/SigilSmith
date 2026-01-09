@@ -4,6 +4,7 @@ use crate::{
     config::GameConfig,
     game,
     library::{FileOverride, InstallTarget, Library, ModEntry, PakInfo, TargetKind},
+    metadata,
 };
 use anyhow::{Context, Result};
 use larian_formats::bg3::raw::{
@@ -97,8 +98,14 @@ struct LooseFileCandidate {
 }
 
 #[derive(Debug, Clone)]
+pub struct ModSettingsModule {
+    pub info: PakInfo,
+    pub created_at: Option<i64>,
+}
+
+#[derive(Debug, Clone)]
 pub struct ModSettingsSnapshot {
-    pub modules: Vec<PakInfo>,
+    pub modules: Vec<ModSettingsModule>,
     pub order: Vec<String>,
 }
 
@@ -113,9 +120,7 @@ pub fn deploy_with_options(
         Some(&config.larian_dir),
     )?;
 
-    let active_profile = library
-        .active_profile()
-        .context("active profile not set")?;
+    let active_profile = library.active_profile().context("active profile not set")?;
     let mod_map = library.index_by_id();
     let file_overrides = active_profile.file_overrides.clone();
 
@@ -225,9 +230,7 @@ pub fn scan_conflicts(config: &GameConfig, library: &Library) -> Result<Vec<Conf
         Some(&config.larian_dir),
     )?;
 
-    let active_profile = library
-        .active_profile()
-        .context("active profile not set")?;
+    let active_profile = library.active_profile().context("active profile not set")?;
     let mod_map = library.index_by_id();
     let ordered_mods: Vec<ModEntry> = active_profile
         .order
@@ -268,20 +271,27 @@ pub fn read_modsettings_snapshot(path: &Path) -> Result<ModSettingsSnapshot> {
         let version = module_attr(&node, "Version64")
             .and_then(|value| value.parse::<u64>().ok())
             .unwrap_or(0);
-        let publish_handle = module_attr(&node, "PublishHandle")
-            .and_then(|value| value.parse::<u64>().ok());
+        let publish_handle =
+            module_attr(&node, "PublishHandle").and_then(|value| value.parse::<u64>().ok());
         let md5 = module_attr(&node, "MD5");
 
-        modules.push(PakInfo {
-            uuid,
-            name,
-            folder,
-            version,
-            md5,
-            publish_handle,
-            author: None,
-            description: None,
-            module_type: None,
+        let created_at = module_attr(&node, "Created")
+            .or_else(|| module_attr(&node, "CreatedOn"))
+            .and_then(|value| metadata::parse_created_at_value(&value));
+
+        modules.push(ModSettingsModule {
+            info: PakInfo {
+                uuid,
+                name,
+                folder,
+                version,
+                md5,
+                publish_handle,
+                author: None,
+                description: None,
+                module_type: None,
+            },
+            created_at,
         });
     }
 
@@ -396,8 +406,10 @@ fn update_modsettings(
         mods_list.push_back(node.clone());
     }
 
-    let installed_uuid_set: HashSet<String> =
-        installed_paks.iter().map(|info| info.uuid.clone()).collect();
+    let installed_uuid_set: HashSet<String> = installed_paks
+        .iter()
+        .map(|info| info.uuid.clone())
+        .collect();
 
     for (uuid, node) in existing_by_uuid.iter() {
         if base_uuids.contains(uuid) || installed_uuid_set.contains(uuid) {
@@ -496,11 +508,8 @@ fn write_modsettings(path: &Path, save: &Save) -> Result<()> {
     save.serialize(ser).context("serialize modsettings")?;
     xml.push('\n');
     let xml = xml.replace("/>\n", " />\n");
-    fs::create_dir_all(
-        path.parent()
-            .context("modsettings parent")?,
-    )
-    .context("create modsettings dir")?;
+    fs::create_dir_all(path.parent().context("modsettings parent")?)
+        .context("create modsettings dir")?;
     fs::write(path, xml).context("write modsettings")?;
     Ok(())
 }
@@ -609,14 +618,8 @@ fn build_loose_plan(
     let mut overridden = 0usize;
 
     for (dest, mut candidates) in map {
-        candidates.sort_by(|a, b| {
-            a.order
-                .cmp(&b.order)
-                .then_with(|| a.mod_id.cmp(&b.mod_id))
-        });
-        let default = candidates
-            .last()
-            .context("loose plan candidate missing")?;
+        candidates.sort_by(|a, b| a.order.cmp(&b.order).then_with(|| a.mod_id.cmp(&b.mod_id)));
+        let default = candidates.last().context("loose plan candidate missing")?;
         let key = (default.kind, default.relative_path.clone());
         let mut winner = default;
         let mut overridden_flag = false;
@@ -683,7 +686,11 @@ fn collect_target_files(
     order: usize,
     map: &mut HashMap<PathBuf, Vec<LooseFileCandidate>>,
 ) -> Result<()> {
-    for entry in WalkDir::new(source_root).follow_links(false) {
+    for entry in WalkDir::new(source_root)
+        .follow_links(false)
+        .into_iter()
+        .filter_entry(|entry| !is_ignored_deploy_path(entry.path()))
+    {
         let entry = entry?;
         if !entry.file_type().is_file() {
             continue;
@@ -707,9 +714,7 @@ fn collect_target_files(
     Ok(())
 }
 
-fn build_override_map(
-    file_overrides: &[FileOverride],
-) -> HashMap<(TargetKind, PathBuf), String> {
+fn build_override_map(file_overrides: &[FileOverride]) -> HashMap<(TargetKind, PathBuf), String> {
     let mut map = HashMap::new();
     for override_entry in file_overrides {
         map.insert(
@@ -721,6 +726,16 @@ fn build_override_map(
         );
     }
     map
+}
+
+fn is_ignored_deploy_path(path: &Path) -> bool {
+    path.components().any(|component| {
+        let part = component.as_os_str().to_string_lossy();
+        part.eq_ignore_ascii_case("__MACOSX")
+            || part == ".git"
+            || part == ".svn"
+            || part == ".vscode"
+    })
 }
 
 fn remove_previous_deploy(paths: &GamePaths, manifest: &mut DeployManifest) -> Result<usize> {

@@ -8,9 +8,7 @@ use std::{
     io::{Read, Seek, SeekFrom},
     path::{Path, PathBuf},
 };
-use time::{
-    format_description::well_known::Rfc3339, Date, OffsetDateTime, PrimitiveDateTime,
-};
+use time::{format_description::well_known::Rfc3339, Date, OffsetDateTime, PrimitiveDateTime};
 use walkdir::WalkDir;
 use zstd::bulk::decompress as zstd_decompress;
 
@@ -217,14 +215,24 @@ fn parse_json_mod(value: &Value) -> Option<JsonModInfo> {
         return None;
     }
     Some(JsonModInfo {
-        uuid: obj.get("UUID").and_then(|v| v.as_str()).map(|s| s.to_string()),
+        uuid: obj
+            .get("UUID")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string()),
         folder: obj
             .get("Folder")
             .and_then(|v| v.as_str())
             .map(|s| s.to_string()),
-        name: obj.get("Name").and_then(|v| v.as_str()).map(|s| s.to_string()),
+        name: obj
+            .get("Name")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string()),
         created_at,
     })
+}
+
+pub fn parse_created_at_value(value: &str) -> Option<i64> {
+    parse_created_at(value)
 }
 
 fn parse_created_at(value: &str) -> Option<i64> {
@@ -240,9 +248,17 @@ fn parse_created_at(value: &str) -> Option<i64> {
     if let Ok(dt) = PrimitiveDateTime::parse(trimmed, &naive_format) {
         return Some(dt.assume_utc().unix_timestamp());
     }
+    let spaced_format =
+        time::macros::format_description!("[year]-[month]-[day] [hour]:[minute]:[second]");
+    if let Ok(dt) = PrimitiveDateTime::parse(trimmed, &spaced_format) {
+        return Some(dt.assume_utc().unix_timestamp());
+    }
     let date_format = time::macros::format_description!("[year]-[month]-[day]");
     if let Ok(date) = Date::parse(trimmed, &date_format) {
-        return date.with_hms(0, 0, 0).ok().map(|dt| dt.assume_utc().unix_timestamp());
+        return date
+            .with_hms(0, 0, 0)
+            .ok()
+            .map(|dt| dt.assume_utc().unix_timestamp());
     }
     None
 }

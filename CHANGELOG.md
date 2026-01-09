@@ -1,5 +1,24 @@
 # Changelog
 
+## Unreleased
+
+## 0.4.8
+
+- Reconcile modsettings entries without managed storage to resolve native .pak filenames (incl. spaces) and timestamps.
+- Add a mod search bar with `/` or `Ctrl+F`, debounced preview, Enter to apply, and inline clear hint while active.
+- Add mod stack sorting with a highlighted sort indicator, column cycling, and a guard dialog when trying to move while sorted/filtered.
+- Add a `?` help overlay with full hotkeys, padded modal layout, and a visible scroll indicator.
+- Separate legend symbols from hotkeys with full-width headers, softer styling, and debounced fade-in; global hotkeys stay fixed at the top with an N/A legend placeholder and pastel text headers.
+- Keep legend height stable across views and avoid overwriting native mod Created dates with filesystem timestamps when metadata is missing.
+- Keep context label alignment consistent across views and format blank dates using the locale's date order.
+- PageUp/PageDown now page through the mod list when focused.
+- Add Ctrl+Alt+V clipboard paste support in input fields.
+- Remove implicit import mode activation on unassigned keys.
+- Import override `.pak` files without `meta.lsx` by installing them to `Data/`.
+- Detect script extender-style bin-root archives (e.g. `DWrite.dll`) during import.
+- Ignore `.vscode` folders alongside `.git` when importing/scanning/deploying loose files.
+- Fix update checks triggering from the settings menu.
+
 ## 0.4.7
 
 - Auto-restart after applying updates (AppImage/tarball).

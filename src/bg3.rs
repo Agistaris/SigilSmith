@@ -94,9 +94,7 @@ fn find_game_root() -> Option<PathBuf> {
 
 fn find_larian_dir() -> Option<PathBuf> {
     let home = dirs_home()?;
-    let native = home
-        .join(".local/share/Larian Studios")
-        .join(GAME_NAME);
+    let native = home.join(".local/share/Larian Studios").join(GAME_NAME);
     if native.exists() {
         return Some(native);
     }

@@ -82,8 +82,7 @@ pub fn load_last_backup(data_dir: &Path) -> Result<Option<PathBuf>> {
 }
 
 pub fn load_backup_library(backup_dir: &Path) -> Result<Library> {
-    let raw = fs::read_to_string(backup_dir.join("library.json"))
-        .context("read backup library")?;
+    let raw = fs::read_to_string(backup_dir.join("library.json")).context("read backup library")?;
     let library = serde_json::from_str(&raw).context("parse backup library")?;
     Ok(library)
 }

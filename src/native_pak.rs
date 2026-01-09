@@ -37,8 +37,11 @@ pub fn resolve_native_pak_filename(
     info: &PakInfo,
     native_pak_index: &[NativePakEntry],
 ) -> Option<String> {
-    resolve_native_pak_path(info, native_pak_index)
-        .and_then(|path| path.file_name().and_then(|name| name.to_str()).map(|s| s.to_string()))
+    resolve_native_pak_path(info, native_pak_index).and_then(|path| {
+        path.file_name()
+            .and_then(|name| name.to_str())
+            .map(|s| s.to_string())
+    })
 }
 
 pub fn resolve_native_pak_path(
@@ -50,50 +53,78 @@ pub fn resolve_native_pak_path(
     }
 
     let folder_key = normalize_pak_key(&info.folder);
-    if let Some(entry) = find_single_match(native_pak_index, &folder_key) {
-        return Some(entry.path.clone());
-    }
-
+    let name_key = normalize_pak_key(&info.name);
     let uuid_key = normalize_pak_key(&info.uuid);
-    if let Some(entry) = find_single_match(native_pak_index, &uuid_key) {
-        return Some(entry.path.clone());
-    }
 
-    for prefix_len in [16usize, 12, 8] {
-        if uuid_key.len() >= prefix_len {
-            if let Some(entry) = find_single_match(native_pak_index, &uuid_key[..prefix_len]) {
-                return Some(entry.path.clone());
-            }
+    let mut best: Option<&NativePakEntry> = None;
+    let mut best_score = 0i32;
+    let mut best_len_diff = usize::MAX;
+
+    for entry in native_pak_index {
+        let mut score = 0i32;
+        let mut len_diff = usize::MAX;
+
+        if let Some(detail) = match_detail(&entry.normalized, &uuid_key, 120, 110, 80) {
+            score = score.saturating_add(detail.score);
+            len_diff = len_diff.min(detail.len_diff);
+        }
+        if let Some(detail) = match_detail(&entry.normalized, &folder_key, 90, 70, 50) {
+            score = score.saturating_add(detail.score);
+            len_diff = len_diff.min(detail.len_diff);
+        }
+        if let Some(detail) = match_detail(&entry.normalized, &name_key, 85, 65, 45) {
+            score = score.saturating_add(detail.score);
+            len_diff = len_diff.min(detail.len_diff);
+        }
+
+        if score == 0 {
+            continue;
+        }
+
+        if score > best_score || (score == best_score && len_diff < best_len_diff) {
+            best = Some(entry);
+            best_score = score;
+            best_len_diff = len_diff;
         }
     }
 
-    for prefix_len in [32usize, 24, 16] {
-        if folder_key.len() >= prefix_len {
-            if let Some(entry) = find_single_match(native_pak_index, &folder_key[..prefix_len]) {
-                return Some(entry.path.clone());
-            }
-        }
-    }
-
-    None
+    best.map(|entry| entry.path.clone())
 }
 
-fn find_single_match<'a>(
-    native_pak_index: &'a [NativePakEntry],
+struct MatchDetail {
+    score: i32,
+    len_diff: usize,
+}
+
+fn match_detail(
+    haystack: &str,
     needle: &str,
-) -> Option<&'a NativePakEntry> {
+    exact: i32,
+    prefix: i32,
+    contains: i32,
+) -> Option<MatchDetail> {
     if needle.is_empty() {
         return None;
     }
-    let mut matches = native_pak_index
-        .iter()
-        .filter(|entry| entry.normalized.contains(needle));
-    let first = matches.next()?;
-    if matches.next().is_some() {
-        None
-    } else {
-        Some(first)
+    if haystack == needle {
+        return Some(MatchDetail {
+            score: exact,
+            len_diff: 0,
+        });
     }
+    if haystack.starts_with(needle) {
+        return Some(MatchDetail {
+            score: prefix,
+            len_diff: haystack.len().saturating_sub(needle.len()),
+        });
+    }
+    if haystack.contains(needle) {
+        return Some(MatchDetail {
+            score: contains,
+            len_diff: haystack.len().saturating_sub(needle.len()),
+        });
+    }
+    None
 }
 
 fn normalize_pak_key(value: &str) -> String {

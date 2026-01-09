@@ -5,18 +5,17 @@ use crate::{
     game::{self, GameId},
     importer,
     library::{
-        library_mod_root, normalize_times, path_times, resolve_times, FileOverride,
-        normalize_label, InstallTarget, Library, ModEntry, ModSource, PakInfo, ProfileEntry,
+        library_mod_root, normalize_label, normalize_times, path_times, resolve_times,
+        FileOverride, InstallTarget, Library, ModEntry, ModSource, Profile, ProfileEntry,
         TargetKind, TargetOverride,
     },
-    metadata,
-    native_pak,
-    smart_rank,
-    update,
+    metadata, native_pak, smart_rank, update,
 };
 use anyhow::{Context, Result};
+use directories::BaseDirs;
 use serde::{Deserialize, Serialize};
 use std::{
+    cmp::Ordering,
     collections::{HashMap, HashSet, VecDeque},
     fs,
     io::Write,
@@ -26,9 +25,12 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 use walkdir::WalkDir;
-use directories::BaseDirs;
 
 use blake3::Hasher;
+
+const SEARCH_DEBOUNCE_MS: u64 = 250;
+const HOTKEY_DEBOUNCE_MS: u64 = 200;
+const HOTKEY_FADE_MS: u64 = 200;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum InputPurpose {
@@ -107,9 +109,22 @@ pub struct DialogToggle {
 pub enum DialogKind {
     Overwrite,
     Similar,
-    Unrecognized { path: PathBuf, label: String },
-    DeleteProfile { name: String },
-    DeleteMod { id: String, name: String, native: bool },
+    Unrecognized {
+        path: PathBuf,
+        label: String,
+    },
+    DeleteProfile {
+        name: String,
+    },
+    DeleteMod {
+        id: String,
+        name: String,
+        native: bool,
+    },
+    MoveBlocked {
+        resume_move_mode: bool,
+        clear_filter: bool,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -140,15 +155,24 @@ pub enum LogLevel {
 pub enum UpdateStatus {
     Idle,
     Checking,
-    UpToDate { version: String },
+    UpToDate {
+        version: String,
+    },
     Available {
         info: update::UpdateInfo,
         path: PathBuf,
         instructions: String,
     },
-    Applied { info: update::UpdateInfo },
-    Skipped { version: String, reason: String },
-    Failed { error: String },
+    Applied {
+        info: update::UpdateInfo,
+    },
+    Skipped {
+        version: String,
+        reason: String,
+    },
+    Failed {
+        error: String,
+    },
 }
 
 enum ImportMessage {
@@ -163,12 +187,8 @@ enum ImportMessage {
 }
 
 enum DeployMessage {
-    Completed {
-        report: deploy::DeployReport,
-    },
-    Failed {
-        error: String,
-    },
+    Completed { report: deploy::DeployReport },
+    Failed { error: String },
 }
 
 #[derive(Debug, Clone)]
@@ -179,12 +199,8 @@ struct MetadataUpdate {
 }
 
 enum MetadataMessage {
-    Completed {
-        updates: Vec<MetadataUpdate>,
-    },
-    Failed {
-        error: String,
-    },
+    Completed { updates: Vec<MetadataUpdate> },
+    Failed { error: String },
 }
 
 enum ConflictMessage {
@@ -269,6 +285,83 @@ pub enum Focus {
     Log,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SortDirection {
+    Asc,
+    Desc,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ModSortColumn {
+    Order,
+    Name,
+    Enabled,
+    Native,
+    Kind,
+    Target,
+    Created,
+    Added,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ModSort {
+    pub column: ModSortColumn,
+    pub direction: SortDirection,
+}
+
+impl Default for ModSort {
+    fn default() -> Self {
+        Self {
+            column: ModSortColumn::Order,
+            direction: SortDirection::Asc,
+        }
+    }
+}
+
+impl ModSort {
+    pub fn column_label(&self) -> &'static str {
+        match self.column {
+            ModSortColumn::Order => "Order",
+            ModSortColumn::Name => "Mod",
+            ModSortColumn::Enabled => "Enabled",
+            ModSortColumn::Native => "Native",
+            ModSortColumn::Kind => "Kind",
+            ModSortColumn::Target => "Target",
+            ModSortColumn::Created => "Created",
+            ModSortColumn::Added => "Added",
+        }
+    }
+
+    pub fn direction_arrow(&self) -> &'static str {
+        match self.direction {
+            SortDirection::Asc => "↑",
+            SortDirection::Desc => "↓",
+        }
+    }
+
+    pub fn direction_label(&self) -> &'static str {
+        match self.direction {
+            SortDirection::Asc => "asc",
+            SortDirection::Desc => "desc",
+        }
+    }
+
+    pub fn is_order_default(&self) -> bool {
+        matches!(self.column, ModSortColumn::Order) && matches!(self.direction, SortDirection::Asc)
+    }
+}
+
+const MOD_SORT_COLUMNS: [ModSortColumn; 8] = [
+    ModSortColumn::Enabled,
+    ModSortColumn::Native,
+    ModSortColumn::Order,
+    ModSortColumn::Kind,
+    ModSortColumn::Target,
+    ModSortColumn::Created,
+    ModSortColumn::Added,
+    ModSortColumn::Name,
+];
+
 #[derive(Debug, Clone)]
 pub enum ExplorerItemKind {
     Game(GameId),
@@ -297,6 +390,8 @@ pub struct App {
     pub status: String,
     pub selected: usize,
     pub input_mode: InputMode,
+    pub help_open: bool,
+    pub help_scroll: usize,
     pub should_quit: bool,
     pub move_mode: bool,
     pub dialog: Option<Dialog>,
@@ -304,9 +399,12 @@ pub struct App {
     pub log_scroll: usize,
     pub move_dirty: bool,
     pub focus: Focus,
+    pub hotkey_focus: Focus,
     pub explorer_selected: usize,
     pub toast: Option<Toast>,
     pub mod_filter: String,
+    mod_filter_snapshot: Option<String>,
+    pub mod_sort: ModSort,
     pub settings_menu: Option<SettingsMenu>,
     pub update_status: UpdateStatus,
     pub smart_rank_preview: Option<SmartRankPreview>,
@@ -324,6 +422,9 @@ pub struct App {
     update_rx: Receiver<UpdateMessage>,
     update_active: bool,
     update_started_at: Option<Instant>,
+    hotkey_pending_focus: Option<Focus>,
+    hotkey_transition_at: Option<Instant>,
+    hotkey_fade_until: Option<Instant>,
     import_queue: VecDeque<PathBuf>,
     import_active: Option<PathBuf>,
     import_tx: Sender<ImportMessage>,
@@ -346,6 +447,7 @@ pub struct App {
     pub conflict_selected: usize,
     pub override_swap: Option<OverrideSwap>,
     pub pending_override: Option<PendingOverride>,
+    pub mods_view_height: usize,
     explorer_game_expanded: HashSet<GameId>,
     explorer_profiles_expanded: HashSet<GameId>,
 }
@@ -419,11 +521,9 @@ impl App {
         let app_config = AppConfig::load_or_create()?;
         let game_id = app_config.active_game;
         let mut config = GameConfig::load_or_create(game_id)?;
-        if let Err(err) = game::detect_paths(
-            game_id,
-            Some(&config.game_root),
-            Some(&config.larian_dir),
-        ) {
+        if let Err(err) =
+            game::detect_paths(game_id, Some(&config.game_root), Some(&config.larian_dir))
+        {
             // Retry auto-detect when stored paths are missing or stale.
             if let Ok(paths) = game::detect_paths(game_id, None, None) {
                 config.game_root = paths.game_root;
@@ -465,6 +565,8 @@ impl App {
             status: "Detecting game paths...".to_string(),
             selected: 0,
             input_mode: InputMode::Normal,
+            help_open: false,
+            help_scroll: 0,
             should_quit: false,
             move_mode: false,
             dialog: None,
@@ -472,9 +574,12 @@ impl App {
             log_scroll: 0,
             move_dirty: false,
             focus: Focus::Mods,
+            hotkey_focus: Focus::Mods,
             explorer_selected: 0,
             toast: None,
             mod_filter: String::new(),
+            mod_filter_snapshot: None,
+            mod_sort: ModSort::default(),
             settings_menu: None,
             update_status: UpdateStatus::Idle,
             smart_rank_preview: None,
@@ -492,6 +597,9 @@ impl App {
             update_rx,
             update_active: false,
             update_started_at: None,
+            hotkey_pending_focus: None,
+            hotkey_transition_at: None,
+            hotkey_fade_until: None,
             import_queue: VecDeque::new(),
             import_active: None,
             import_tx,
@@ -514,6 +622,7 @@ impl App {
             conflict_selected: 0,
             override_swap: None,
             pending_override: None,
+            mods_view_height: 0,
             explorer_game_expanded: {
                 let mut expanded = HashSet::new();
                 expanded.insert(game_id);
@@ -539,7 +648,11 @@ impl App {
                 app.config.game_root.display(),
                 app.config.larian_dir.display()
             ));
-            app.set_toast("Paths detected: BG3 + Larian data", ToastLevel::Info, Duration::from_secs(3));
+            app.set_toast(
+                "Paths detected: BG3 + Larian data",
+                ToastLevel::Info,
+                Duration::from_secs(3),
+            );
         }
         app.ensure_setup();
         app.sync_native_mods();
@@ -567,7 +680,7 @@ impl App {
         };
         let mod_map = self.library.index_by_id();
         let filter = self.mod_filter_normalized();
-        profile
+        let mut indices: Vec<usize> = profile
             .order
             .iter()
             .enumerate()
@@ -580,7 +693,9 @@ impl App {
                 }
                 Some(index)
             })
-            .collect()
+            .collect();
+        sort_mod_indices(&mut indices, profile, &mod_map, self.mod_sort);
+        indices
     }
 
     pub fn visible_profile_entries(&self) -> Vec<(usize, ProfileEntry)> {
@@ -590,7 +705,13 @@ impl App {
         let indices = self.visible_profile_indices();
         indices
             .into_iter()
-            .filter_map(|index| profile.order.get(index).cloned().map(|entry| (index, entry)))
+            .filter_map(|index| {
+                profile
+                    .order
+                    .get(index)
+                    .cloned()
+                    .map(|entry| (index, entry))
+            })
             .collect()
     }
 
@@ -618,6 +739,56 @@ impl App {
         } else {
             Some(trimmed.to_lowercase())
         }
+    }
+
+    pub fn cycle_mod_sort_column(&mut self, direction: i32) {
+        let current_id = self.selected_profile_id();
+        let next_column = mod_sort_next_column(self.mod_sort.column, direction);
+        if next_column == self.mod_sort.column {
+            return;
+        }
+        self.mod_sort.column = next_column;
+        self.move_mode = false;
+        self.reselect_mod_by_id(current_id);
+        self.status = format!(
+            "Sort: {} ({})",
+            self.mod_sort.column_label(),
+            self.mod_sort.direction_label()
+        );
+    }
+
+    pub fn toggle_mod_sort_direction(&mut self) {
+        let current_id = self.selected_profile_id();
+        self.mod_sort.direction = match self.mod_sort.direction {
+            SortDirection::Asc => SortDirection::Desc,
+            SortDirection::Desc => SortDirection::Asc,
+        };
+        self.move_mode = false;
+        self.reselect_mod_by_id(current_id);
+        self.status = format!(
+            "Sort: {} ({})",
+            self.mod_sort.column_label(),
+            self.mod_sort.direction_label()
+        );
+    }
+
+    fn reselect_mod_by_id(&mut self, id: Option<String>) {
+        self.selected = 0;
+        if let Some(id) = id {
+            if let Some(profile) = self.library.active_profile() {
+                let indices = self.visible_profile_indices();
+                if let Some(pos) = indices.iter().position(|index| {
+                    profile
+                        .order
+                        .get(*index)
+                        .map(|entry| entry.id == id)
+                        .unwrap_or(false)
+                }) {
+                    self.selected = pos;
+                }
+            }
+        }
+        self.clamp_selection();
     }
 
     pub fn rename_preview(&self) -> Option<(String, String)> {
@@ -679,6 +850,19 @@ impl App {
         } else {
             self.open_settings_menu();
         }
+    }
+
+    pub fn toggle_help(&mut self) {
+        if self.help_open {
+            self.help_open = false;
+        } else {
+            self.help_open = true;
+            self.help_scroll = 0;
+        }
+    }
+
+    pub fn close_help(&mut self) {
+        self.help_open = false;
     }
 
     pub fn toggle_confirm_profile_delete(&mut self) -> Result<()> {
@@ -802,7 +986,11 @@ impl App {
                 continue;
             }
             let (name, created_at, added_at) = if let Some(mod_entry) = mod_map.get(&id) {
-                (mod_entry.display_name(), mod_entry.created_at, mod_entry.added_at)
+                (
+                    mod_entry.display_name(),
+                    mod_entry.created_at,
+                    mod_entry.added_at,
+                )
             } else {
                 (id.clone(), None, 0)
             };
@@ -1096,19 +1284,35 @@ impl App {
     }
 
     pub fn cycle_focus(&mut self) {
-        self.focus = match self.focus {
+        let next_focus = match self.focus {
             Focus::Explorer => Focus::Mods,
             Focus::Mods => Focus::Conflicts,
             Focus::Conflicts => Focus::Log,
             Focus::Log => Focus::Explorer,
         };
-        self.move_mode = false;
+        self.set_focus(next_focus);
         self.status = match self.focus {
             Focus::Explorer => "Focus: explorer".to_string(),
             Focus::Mods => "Focus: mod stack".to_string(),
             Focus::Conflicts => "Focus: overrides".to_string(),
             Focus::Log => "Focus: log".to_string(),
         };
+    }
+
+    pub fn focus_mods(&mut self) {
+        if self.focus != Focus::Mods {
+            self.set_focus(Focus::Mods);
+        }
+    }
+
+    fn set_focus(&mut self, focus: Focus) {
+        if self.focus != focus {
+            self.hotkey_pending_focus = Some(focus);
+            self.hotkey_transition_at = Some(Instant::now());
+            self.hotkey_fade_until = None;
+        }
+        self.focus = focus;
+        self.move_mode = false;
     }
 
     pub fn set_active_game(&mut self, game_id: GameId) -> Result<()> {
@@ -1159,8 +1363,7 @@ impl App {
         self.conflict_selected = 0;
 
         self.selected = 0;
-        self.move_mode = false;
-        self.focus = Focus::Mods;
+        self.set_focus(Focus::Mods);
         self.status = format!("Active game: {}", game_id.display_name());
         self.log_info(format!("Active game: {}", game_id.display_name()));
         self.ensure_setup();
@@ -1312,11 +1515,7 @@ impl App {
         }
         if original.eq_ignore_ascii_case(&name) {
             self.status = "Profile name unchanged".to_string();
-            self.set_toast(
-                "Rename cancelled",
-                ToastLevel::Warn,
-                Duration::from_secs(3),
-            );
+            self.set_toast("Rename cancelled", ToastLevel::Warn, Duration::from_secs(3));
             return Ok(());
         }
         if self.profile_exists(&name) {
@@ -1480,6 +1679,53 @@ impl App {
         });
     }
 
+    pub fn prompt_move_blocked(&mut self, resume_move_mode: bool) {
+        if self.dialog.is_some() {
+            return;
+        }
+        let mod_name = self
+            .selected_profile_id()
+            .and_then(|id| {
+                self.library
+                    .mods
+                    .iter()
+                    .find(|entry| entry.id == id)
+                    .map(|entry| entry.display_name())
+            })
+            .unwrap_or_else(|| "mod".to_string());
+        let mut message = String::new();
+        if !self.mod_sort.is_order_default() {
+            message.push_str(&format!(
+                "Can't move while sorting by {} ({}).\n",
+                self.mod_sort.column_label(),
+                self.mod_sort.direction_label()
+            ));
+        }
+        if self.mod_filter_active() {
+            message.push_str("Can't move while search is active.\n");
+        }
+        let clear_filter = self.mod_filter_active();
+        let suffix = if clear_filter {
+            "Switch to Order view and clear search"
+        } else {
+            "Switch to Order view"
+        };
+        message.push_str(&format!("{suffix} to move \"{mod_name}\"?"));
+
+        self.open_dialog(Dialog {
+            title: "Move requires Order".to_string(),
+            message,
+            yes_label: "Switch".to_string(),
+            no_label: "Cancel".to_string(),
+            choice: DialogChoice::Yes,
+            kind: DialogKind::MoveBlocked {
+                resume_move_mode,
+                clear_filter,
+            },
+            toggle: None,
+        });
+    }
+
     pub fn delete_profile(&mut self, name: String) -> Result<()> {
         if self.library.profiles.len() <= 1 {
             self.status = "Cannot delete the last profile".to_string();
@@ -1490,7 +1736,12 @@ impl App {
             );
             return Ok(());
         }
-        if !self.library.profiles.iter().any(|profile| profile.name == name) {
+        if !self
+            .library
+            .profiles
+            .iter()
+            .any(|profile| profile.name == name)
+        {
             self.status = "Profile not found".to_string();
             self.set_toast(
                 "Profile not found",
@@ -1621,8 +1872,7 @@ impl App {
         let rel_path = conflict.relative_path.to_string_lossy().to_string();
         if winner_id == conflict.default_winner_id {
             profile.file_overrides.retain(|override_entry| {
-                override_entry.kind != conflict.target
-                    || override_entry.relative_path != rel_path
+                override_entry.kind != conflict.target || override_entry.relative_path != rel_path
             });
         } else if let Some(existing) = profile.file_overrides.iter_mut().find(|override_entry| {
             override_entry.kind == conflict.target && override_entry.relative_path == rel_path
@@ -1766,7 +2016,12 @@ impl App {
 
         for entry in export.entries {
             let mut found_id = None;
-            if self.library.mods.iter().any(|mod_entry| mod_entry.id == entry.id) {
+            if self
+                .library
+                .mods
+                .iter()
+                .any(|mod_entry| mod_entry.id == entry.id)
+            {
                 found_id = Some(entry.id);
             } else {
                 for mod_entry in &self.library.mods {
@@ -1816,10 +2071,7 @@ impl App {
                 missing.len()
             ));
             toast_level = ToastLevel::Warn;
-            toast_message = format!(
-                "Profile imported: {name} (missing {} mods)",
-                missing.len()
-            );
+            toast_message = format!("Profile imported: {name} (missing {} mods)", missing.len());
         } else if mismatch {
             toast_level = ToastLevel::Warn;
             toast_message = format!("Profile imported: {name} (game mismatch)");
@@ -1852,22 +2104,70 @@ impl App {
             }
         }
 
+        self.maybe_debounce_mod_filter();
+        self.update_hotkey_transition();
+
         if self.update_active {
             if let Some(started_at) = self.update_started_at {
                 if started_at.elapsed() >= Duration::from_secs(15) {
                     self.update_active = false;
                     self.update_started_at = None;
-                    self.update_status =
-                        UpdateStatus::Failed { error: "timeout".to_string() };
+                    self.update_status = UpdateStatus::Failed {
+                        error: "timeout".to_string(),
+                    };
                     self.log_warn("Update check timed out".to_string());
                 }
             }
         }
     }
 
+    fn maybe_debounce_mod_filter(&mut self) {
+        let (buffer, last_edit_at) = match &self.input_mode {
+            InputMode::Editing {
+                purpose: InputPurpose::FilterMods,
+                buffer,
+                last_edit_at,
+                ..
+            } => (buffer.clone(), *last_edit_at),
+            _ => return,
+        };
+
+        if last_edit_at.elapsed() < Duration::from_millis(SEARCH_DEBOUNCE_MS) {
+            return;
+        }
+
+        let value = buffer.trim().to_string();
+        if value == self.mod_filter {
+            return;
+        }
+        self.apply_mod_filter(value, false);
+    }
+
+    fn update_hotkey_transition(&mut self) {
+        let Some(pending) = self.hotkey_pending_focus else {
+            return;
+        };
+        let Some(started_at) = self.hotkey_transition_at else {
+            return;
+        };
+        if started_at.elapsed() < Duration::from_millis(HOTKEY_DEBOUNCE_MS) {
+            return;
+        }
+        self.hotkey_focus = pending;
+        self.hotkey_pending_focus = None;
+        self.hotkey_transition_at = None;
+        self.hotkey_fade_until = Some(Instant::now() + Duration::from_millis(HOTKEY_FADE_MS));
+    }
+
     pub fn paths_ready(&self) -> bool {
         game::looks_like_game_root(self.game_id, &self.config.game_root)
             && game::looks_like_user_dir(self.game_id, &self.config.larian_dir)
+    }
+
+    pub fn hotkey_fade_active(&self) -> bool {
+        self.hotkey_fade_until
+            .map(|until| until > Instant::now())
+            .unwrap_or(false)
     }
 
     fn ensure_setup(&mut self) {
@@ -2000,7 +2300,11 @@ impl App {
         entries
     }
 
-    pub(crate) fn apply_path_browser_selection(&mut self, step: SetupStep, path: PathBuf) -> Result<()> {
+    pub(crate) fn apply_path_browser_selection(
+        &mut self,
+        step: SetupStep,
+        path: PathBuf,
+    ) -> Result<()> {
         self.input_mode = InputMode::Normal;
         match step {
             SetupStep::GameRoot => self.submit_game_root_path(path),
@@ -2020,40 +2324,26 @@ impl App {
         self.status = "Import: paste a file or folder path, then press Enter".to_string();
     }
 
-    pub fn enter_import_with(&mut self, seed: String) {
-        if self.dialog.is_some() {
-            self.log_warn("Drop ignored: dialog active".to_string());
-            return;
-        }
-        self.move_mode = false;
-        self.input_mode = InputMode::Editing {
-            prompt: "Import path".to_string(),
-            buffer: seed,
-            purpose: InputPurpose::ImportPath,
-            auto_submit: true,
-            last_edit_at: Instant::now(),
-        };
-        self.status = "Drop detected: importing after pause".to_string();
-    }
-
     pub fn enter_mod_filter(&mut self) {
         self.move_mode = false;
+        self.mod_filter_snapshot = Some(self.mod_filter.clone());
         self.input_mode = InputMode::Editing {
-            prompt: "Filter mods".to_string(),
+            prompt: "Search mods".to_string(),
             buffer: self.mod_filter.clone(),
             purpose: InputPurpose::FilterMods,
             auto_submit: false,
             last_edit_at: Instant::now(),
         };
-        self.status = "Filter mods: type to match, Enter to apply".to_string();
+        self.status = "Search mods: type (updates after pause, Enter to apply)".to_string();
     }
 
     pub fn clear_mod_filter(&mut self) {
         if self.mod_filter.trim().is_empty() {
-            self.status = "Filter already cleared".to_string();
+            self.status = "Search already cleared".to_string();
             return;
         }
-        self.set_mod_filter(String::new());
+        self.mod_filter_snapshot = None;
+        self.apply_mod_filter(String::new(), true);
     }
 
     pub fn handle_submit(&mut self, purpose: InputPurpose, value: String) -> Result<()> {
@@ -2065,13 +2355,14 @@ impl App {
             InputPurpose::ExportProfile { profile } => self.export_profile(profile, value),
             InputPurpose::ImportProfile => self.import_profile(value),
             InputPurpose::FilterMods => {
-                self.set_mod_filter(value);
+                self.apply_mod_filter(value, true);
+                self.mod_filter_snapshot = None;
                 Ok(())
             }
         }
     }
 
-    fn set_mod_filter(&mut self, value: String) {
+    fn apply_mod_filter(&mut self, value: String, announce: bool) {
         let trimmed = value.trim();
         let previous = self.selected_profile_id();
         self.mod_filter = trimmed.to_string();
@@ -2090,14 +2381,24 @@ impl App {
                 }
             }
         }
-        if self.mod_filter.is_empty() {
-            self.status = "Filter cleared".to_string();
-            self.log_info("Filter cleared".to_string());
-        } else {
-            self.status = format!("Filter set: \"{}\"", self.mod_filter);
-            self.log_info(format!("Filter set: \"{}\"", self.mod_filter));
+        if announce {
+            if self.mod_filter.is_empty() {
+                self.status = "Search cleared".to_string();
+                self.log_info("Search cleared".to_string());
+            } else {
+                self.status = format!("Search set: \"{}\"", self.mod_filter);
+                self.log_info(format!("Search set: \"{}\"", self.mod_filter));
+            }
         }
         self.clamp_selection();
+    }
+
+    pub fn cancel_mod_filter(&mut self) {
+        if let Some(snapshot) = self.mod_filter_snapshot.take() {
+            if snapshot != self.mod_filter {
+                self.apply_mod_filter(snapshot, false);
+            }
+        }
     }
 
     pub fn import_mod(&mut self, raw_path: String) -> Result<()> {
@@ -2118,11 +2419,7 @@ impl App {
         self.log_info(format!("Queued import: {}", path.display()));
         if let Some(active) = &self.import_active {
             let queued = self.import_queue.len();
-            self.status = format!(
-                "Importing {} (queued {})",
-                display_path(active),
-                queued
-            );
+            self.status = format!("Importing {} (queued {})", display_path(active), queued);
         } else {
             self.status = format!("Queued import: {}", display_path(&path));
         }
@@ -2279,13 +2576,10 @@ impl App {
                         if progress.total > 0 {
                             self.status = format!(
                                 "Smart ranking: {label} {}/{} ({})",
-                                progress.scanned,
-                                progress.total,
-                                progress.name
+                                progress.scanned, progress.total, progress.name
                             );
                         } else {
-                            self.status =
-                                format!("Smart ranking: {label} ({})", progress.name);
+                            self.status = format!("Smart ranking: {label} ({})", progress.name);
                         }
                     }
                     SmartRankMessage::Finished(result) => {
@@ -2348,9 +2642,6 @@ impl App {
     }
 
     fn start_update_check(&mut self) {
-        if cfg!(debug_assertions) {
-            return;
-        }
         if self.update_active {
             return;
         }
@@ -2371,12 +2662,19 @@ impl App {
     }
 
     pub fn request_update_check(&mut self) {
-        if let UpdateStatus::Available { path, instructions, .. } = &self.update_status {
+        if let UpdateStatus::Available {
+            path, instructions, ..
+        } = &self.update_status
+        {
             let path = path.clone();
             let instructions = instructions.clone();
             self.log_info(format!("Update package ready: {}", path.display()));
             self.log_info(instructions);
-            self.set_toast("Update ready: see log", ToastLevel::Info, Duration::from_secs(3));
+            self.set_toast(
+                "Update ready: see log",
+                ToastLevel::Info,
+                Duration::from_secs(3),
+            );
         }
         self.start_update_check();
         if self.update_active {
@@ -2405,7 +2703,11 @@ impl App {
             }
             Ok(update::ApplyOutcome::Manual { instructions }) => {
                 self.log_info(instructions.clone());
-                self.set_toast("Update ready: see log", ToastLevel::Info, Duration::from_secs(3));
+                self.set_toast(
+                    "Update ready: see log",
+                    ToastLevel::Info,
+                    Duration::from_secs(3),
+                );
             }
             Err(err) => {
                 self.update_status = UpdateStatus::Failed {
@@ -2537,8 +2839,10 @@ impl App {
                                 );
                             }
                             update::UpdateResult::Skipped { version, reason } => {
-                                self.update_status =
-                                    UpdateStatus::Skipped { version: version.clone(), reason: reason.clone() };
+                                self.update_status = UpdateStatus::Skipped {
+                                    version: version.clone(),
+                                    reason: reason.clone(),
+                                };
                                 self.log_warn(format!(
                                     "Update available (v{version}) skipped: {reason}"
                                 ));
@@ -2546,7 +2850,9 @@ impl App {
                         },
                         UpdateMessage::Failed { error } => {
                             self.update_active = false;
-                            self.update_status = UpdateStatus::Failed { error: error.clone() };
+                            self.update_status = UpdateStatus::Failed {
+                                error: error.clone(),
+                            };
                             self.log_warn(format!("Update check failed: {error}"));
                         }
                     }
@@ -2572,7 +2878,12 @@ impl App {
                 auto_submit,
                 last_edit_at,
                 ..
-            } => (*auto_submit, *last_edit_at, buffer.trim().to_string(), purpose.clone()),
+            } => (
+                *auto_submit,
+                *last_edit_at,
+                buffer.trim().to_string(),
+                purpose.clone(),
+            ),
             _ => return None,
         };
 
@@ -2580,7 +2891,7 @@ impl App {
             return None;
         }
 
-        if value.is_empty() {
+        if value.is_empty() && !matches!(purpose, InputPurpose::FilterMods) {
             return None;
         }
 
@@ -2598,6 +2909,22 @@ impl App {
 
     pub fn scroll_log_down(&mut self, lines: usize) {
         self.log_scroll = self.log_scroll.saturating_sub(lines);
+    }
+
+    pub fn page_mods_up(&mut self) {
+        if self.move_mode {
+            return;
+        }
+        let page = self.mods_view_height.saturating_sub(1).max(1);
+        self.selected = self.selected.saturating_sub(page);
+    }
+
+    pub fn page_mods_down(&mut self) {
+        if self.move_mode {
+            return;
+        }
+        let page = self.mods_view_height.saturating_sub(1).max(1);
+        self.selected = self.selected.saturating_add(page);
     }
 
     pub fn log_info(&mut self, message: String) {
@@ -2635,7 +2962,9 @@ impl App {
         if self.import_active.is_some() {
             return;
         }
-        if self.dialog.is_some() || self.pending_duplicate.is_some() || !self.duplicate_queue.is_empty()
+        if self.dialog.is_some()
+            || self.pending_duplicate.is_some()
+            || !self.duplicate_queue.is_empty()
         {
             return;
         }
@@ -2651,8 +2980,8 @@ impl App {
         let tx = self.import_tx.clone();
         let data_dir = self.config.data_dir.clone();
         thread::spawn(move || {
-            let result = importer::import_path(&path, &data_dir)
-                .with_context(|| format!("import {path:?}"));
+            let result =
+                importer::import_path(&path, &data_dir).with_context(|| format!("import {path:?}"));
             let message = match result {
                 Ok(result) => ImportMessage::Completed { path, result },
                 Err(err) => ImportMessage::Failed {
@@ -3001,6 +3330,25 @@ impl App {
                     self.queue_auto_deploy("mod removed");
                 }
             }
+            DialogKind::MoveBlocked {
+                resume_move_mode,
+                clear_filter,
+            } => {
+                if matches!(choice, DialogChoice::Yes) {
+                    let previous_id = self.selected_profile_id();
+                    if clear_filter {
+                        self.mod_filter_snapshot = None;
+                        self.apply_mod_filter(String::new(), false);
+                    }
+                    self.mod_sort = ModSort::default();
+                    self.reselect_mod_by_id(previous_id);
+                    if resume_move_mode {
+                        self.toggle_move_mode();
+                    } else {
+                        self.status = "Order view restored".to_string();
+                    }
+                }
+            }
         }
     }
 
@@ -3013,9 +3361,7 @@ impl App {
     }
 
     fn find_similar_by_label(&self, mod_entry: &ModEntry) -> Option<SimilarMatch> {
-        let new_raw = mod_entry
-            .source_label()
-            .unwrap_or(mod_entry.name.as_str());
+        let new_raw = mod_entry.source_label().unwrap_or(mod_entry.name.as_str());
         let new_normalized = normalize_label(new_raw);
         if new_normalized.len() < 6 {
             return None;
@@ -3023,9 +3369,7 @@ impl App {
 
         let mut best: Option<SimilarMatch> = None;
         for existing in &self.library.mods {
-            let existing_raw = existing
-                .source_label()
-                .unwrap_or(existing.name.as_str());
+            let existing_raw = existing.source_label().unwrap_or(existing.name.as_str());
             let existing_normalized = normalize_label(existing_raw);
             if existing_normalized.len() < 6 {
                 continue;
@@ -3075,7 +3419,9 @@ impl App {
 
         for profile in &mut self.library.profiles {
             profile.order.retain(|entry| entry.id != id);
-            profile.file_overrides.retain(|override_entry| override_entry.mod_id != id);
+            profile
+                .file_overrides
+                .retain(|override_entry| override_entry.mod_id != id);
         }
 
         let _ = fs::remove_dir_all(&mod_root);
@@ -3104,16 +3450,27 @@ impl App {
             self.log_warn("Native mod file remove skipped: missing pak info".to_string());
             return;
         };
-        let file_name = format!("{}.pak", info.folder);
-        let pak_path = paths.larian_mods_dir.join(file_name);
+        let native_pak_index = native_pak::build_native_pak_index(&paths.larian_mods_dir);
+        let file_name = mod_entry
+            .targets
+            .iter()
+            .find_map(|target| match target {
+                crate::library::InstallTarget::Pak { file, .. } => Some(file.clone()),
+                _ => None,
+            })
+            .or_else(|| native_pak::resolve_native_pak_filename(&info, &native_pak_index))
+            .unwrap_or_else(|| format!("{}.pak", info.folder));
+        let pak_path = paths.larian_mods_dir.join(&file_name);
         if !pak_path.exists() {
-            self.log_warn("Native mod file not found in Mods folder".to_string());
+            self.log_warn(format!(
+                "Native mod file not found in Mods folder: {file_name}"
+            ));
             return;
         }
         if let Err(err) = fs::remove_file(&pak_path) {
             self.log_warn(format!("Native mod file remove failed: {err}"));
         } else {
-            self.log_info(format!("Native mod file removed: {}", info.folder));
+            self.log_info(format!("Native mod file removed: {file_name}"));
         }
     }
 
@@ -3145,26 +3502,42 @@ impl App {
             }
         };
         let deploy::ModSettingsSnapshot { modules, order } = snapshot;
-        let modules_set: HashSet<String> = modules.iter().map(|info| info.uuid.clone()).collect();
-
-        let mut existing_ids: HashSet<String> =
-            self.library.mods.iter().map(|entry| entry.id.clone()).collect();
-        let order_set: HashSet<String> = order.iter().cloned().collect();
-        let mut modules_by_uuid: HashMap<String, PakInfo> = modules
-            .into_iter()
-            .map(|info| (info.uuid.clone(), info))
+        let modules_set: HashSet<String> = modules
+            .iter()
+            .map(|module| module.info.uuid.clone())
+            .collect();
+        let module_created_by_uuid: HashMap<String, Option<i64>> = modules
+            .iter()
+            .map(|module| (module.info.uuid.clone(), module.created_at))
             .collect();
 
+        let mut existing_ids: HashSet<String> = self
+            .library
+            .mods
+            .iter()
+            .map(|entry| entry.id.clone())
+            .collect();
+        let order_set: HashSet<String> = order.iter().cloned().collect();
+        let mut modules_by_uuid: HashMap<String, deploy::ModSettingsModule> = modules
+            .into_iter()
+            .map(|module| (module.info.uuid.clone(), module))
+            .collect();
+
+        let mods_root = self.config.data_dir.join("mods");
         let mut updated_native_files = 0usize;
-        for mod_entry in self.library.mods.iter_mut().filter(|entry| entry.is_native()) {
+        for mod_entry in self
+            .library
+            .mods
+            .iter_mut()
+            .filter(|entry| entry.is_native())
+        {
             let Some(info) = mod_entry.targets.iter().find_map(|target| match target {
                 crate::library::InstallTarget::Pak { info, .. } => Some(info.clone()),
                 _ => None,
             }) else {
                 continue;
             };
-            let Some(filename) =
-                native_pak::resolve_native_pak_filename(&info, &native_pak_index)
+            let Some(filename) = native_pak::resolve_native_pak_filename(&info, &native_pak_index)
             else {
                 continue;
             };
@@ -3179,22 +3552,32 @@ impl App {
             }
             {
                 let pak_path = paths.larian_mods_dir.join(&filename);
-                let meta_created = metadata::read_meta_lsx_from_pak(&pak_path)
-                    .and_then(|meta| meta.created_at);
+                let modsettings_created =
+                    module_created_by_uuid.get(&mod_entry.id).copied().flatten();
+                let meta_created =
+                    metadata::read_meta_lsx_from_pak(&pak_path).and_then(|meta| meta.created_at);
                 let (raw_created, raw_modified) = path_times(&pak_path);
+                let primary_created = earliest_timestamp(&[modsettings_created, meta_created]);
                 let (created_at, modified_at) =
-                    resolve_times(meta_created, raw_created, raw_modified);
-                let should_refresh_created = meta_created.is_some()
-                    || mod_entry.created_at.is_none()
-                    || mod_entry.created_at == Some(mod_entry.added_at);
-                if should_refresh_created {
-                    if let Some(created_at) = created_at {
-                        mod_entry.created_at = Some(created_at);
+                    resolve_native_times(primary_created, raw_created, raw_modified);
+                if primary_created.is_some() {
+                    if created_at.is_some() && mod_entry.created_at != created_at {
+                        mod_entry.created_at = created_at;
                     }
+                } else if should_clear_native_created(
+                    mod_entry.created_at,
+                    raw_created,
+                    raw_modified,
+                    mod_entry.added_at,
+                ) {
+                    mod_entry.created_at = None;
                 }
                 if let Some(modified_at) = modified_at {
                     if mod_entry.modified_at.is_none()
-                        || mod_entry.modified_at.map(|value| value < modified_at).unwrap_or(true)
+                        || mod_entry
+                            .modified_at
+                            .map(|value| value < modified_at)
+                            .unwrap_or(true)
                     {
                         mod_entry.modified_at = Some(modified_at);
                     }
@@ -3205,16 +3588,61 @@ impl App {
             }
         }
 
+        let mut adopted_native = 0usize;
+        for mod_entry in self
+            .library
+            .mods
+            .iter_mut()
+            .filter(|entry| !entry.is_native())
+        {
+            if !modules_set.contains(&mod_entry.id) {
+                continue;
+            }
+            if mods_root.join(&mod_entry.id).exists() {
+                continue;
+            }
+            let Some(module) = modules_by_uuid.get(&mod_entry.id) else {
+                continue;
+            };
+            let info = &module.info;
+            let modsettings_created = module.created_at;
+            let filename = native_pak::resolve_native_pak_filename(info, &native_pak_index)
+                .unwrap_or_else(|| format!("{}.pak", info.folder));
+            mod_entry.source = ModSource::Native;
+            mod_entry.name = info.name.clone();
+            mod_entry.source_label = None;
+            mod_entry.targets = vec![crate::library::InstallTarget::Pak {
+                file: filename.clone(),
+                info: info.clone(),
+            }];
+            let pak_path = paths.larian_mods_dir.join(&filename);
+            let meta_created =
+                metadata::read_meta_lsx_from_pak(&pak_path).and_then(|meta| meta.created_at);
+            let (raw_created, raw_modified) = path_times(&pak_path);
+            let primary_created = earliest_timestamp(&[modsettings_created, meta_created]);
+            let (created_at, modified_at) =
+                resolve_native_times(primary_created, raw_created, raw_modified);
+            if primary_created.is_some() {
+                mod_entry.created_at = created_at;
+            }
+            if let Some(modified_at) = modified_at {
+                mod_entry.modified_at = Some(modified_at);
+            }
+            adopted_native += 1;
+        }
+
         let mut ordered = Vec::new();
         for uuid in &order {
-            if let Some(info) = modules_by_uuid.remove(uuid) {
-                ordered.push(info);
+            if let Some(module) = modules_by_uuid.remove(uuid) {
+                ordered.push(module);
             }
         }
         ordered.extend(modules_by_uuid.into_values());
 
         let mut added = 0usize;
-        for info in ordered {
+        for module in ordered {
+            let info = module.info;
+            let modsettings_created = module.created_at;
             let uuid = info.uuid.clone();
             if existing_ids.contains(&uuid) {
                 continue;
@@ -3222,11 +3650,12 @@ impl App {
             let filename = native_pak::resolve_native_pak_filename(&info, &native_pak_index)
                 .unwrap_or_else(|| format!("{}.pak", info.folder));
             let pak_path = paths.larian_mods_dir.join(&filename);
-            let meta_created = metadata::read_meta_lsx_from_pak(&pak_path)
-                .and_then(|meta| meta.created_at);
+            let meta_created =
+                metadata::read_meta_lsx_from_pak(&pak_path).and_then(|meta| meta.created_at);
             let (raw_created, raw_modified) = path_times(&pak_path);
+            let primary_created = earliest_timestamp(&[modsettings_created, meta_created]);
             let (created_at, modified_at) =
-                resolve_times(meta_created, raw_created, raw_modified);
+                resolve_native_times(primary_created, raw_created, raw_modified);
             let mod_entry = ModEntry {
                 id: uuid.clone(),
                 name: info.name.clone(),
@@ -3254,7 +3683,12 @@ impl App {
             .library
             .mods
             .iter()
-            .map(|mod_entry| (mod_entry.id.clone(), mod_entry.has_target_kind(TargetKind::Pak)))
+            .map(|mod_entry| {
+                (
+                    mod_entry.id.clone(),
+                    mod_entry.has_target_kind(TargetKind::Pak),
+                )
+            })
             .collect();
         let mut updated_enabled = false;
         let mut reordered = false;
@@ -3284,38 +3718,38 @@ impl App {
                         .iter()
                         .cloned()
                         .map(|entry| (entry.id.clone(), entry))
-                    .collect();
-                let mut loose_ids = Vec::new();
-                let mut pak_ids = Vec::new();
-                for entry in &profile.order {
-                    let has_pak = mod_has_pak.get(&entry.id).copied().unwrap_or(false);
-                    if has_pak {
-                        pak_ids.push(entry.id.clone());
-                    } else {
-                        loose_ids.push(entry.id.clone());
+                        .collect();
+                    let mut loose_ids = Vec::new();
+                    let mut pak_ids = Vec::new();
+                    for entry in &profile.order {
+                        let has_pak = mod_has_pak.get(&entry.id).copied().unwrap_or(false);
+                        if has_pak {
+                            pak_ids.push(entry.id.clone());
+                        } else {
+                            loose_ids.push(entry.id.clone());
+                        }
                     }
-                }
-                let mut pak_set: HashSet<String> = pak_ids.iter().cloned().collect();
-                let mut pak_ordered = Vec::new();
-                for uuid in &order {
-                    if pak_set.remove(uuid) {
-                        pak_ordered.push(uuid.clone());
+                    let mut pak_set: HashSet<String> = pak_ids.iter().cloned().collect();
+                    let mut pak_ordered = Vec::new();
+                    for uuid in &order {
+                        if pak_set.remove(uuid) {
+                            pak_ordered.push(uuid.clone());
+                        }
                     }
-                }
-                for id in pak_ids {
-                    if pak_set.contains(&id) {
-                        pak_ordered.push(id);
+                    for id in pak_ids {
+                        if pak_set.contains(&id) {
+                            pak_ordered.push(id);
+                        }
                     }
-                }
-                let mut new_order = Vec::new();
-                new_order.extend(loose_ids);
-                new_order.extend(pak_ordered);
-                let mut reordered_entries = Vec::new();
-                for id in new_order {
-                    if let Some(entry) = entry_map.get(&id) {
-                        reordered_entries.push(entry.clone());
+                    let mut new_order = Vec::new();
+                    new_order.extend(loose_ids);
+                    new_order.extend(pak_ordered);
+                    let mut reordered_entries = Vec::new();
+                    for id in new_order {
+                        if let Some(entry) = entry_map.get(&id) {
+                            reordered_entries.push(entry.clone());
+                        }
                     }
-                }
                     if reordered_entries.len() == profile.order.len()
                         && reordered_entries != profile.order
                     {
@@ -3326,7 +3760,12 @@ impl App {
             }
         }
 
-        if added > 0 || updated_enabled || reordered || updated_native_files > 0 {
+        if added > 0
+            || updated_enabled
+            || reordered
+            || updated_native_files > 0
+            || adopted_native > 0
+        {
             if let Err(err) = self.library.save(&self.config.data_dir) {
                 self.log_warn(format!("Native mod sync save failed: {err}"));
             }
@@ -3337,6 +3776,9 @@ impl App {
                 self.log_info(format!(
                     "Native mod filenames updated: {updated_native_files}"
                 ));
+            }
+            if adopted_native > 0 {
+                self.log_info(format!("Native mods reconciled: {adopted_native}"));
             }
             if reordered {
                 self.log_info("Native mod order synced".to_string());
@@ -3360,9 +3802,7 @@ impl App {
                 }
                 match target {
                     InstallTarget::Pak { file, .. } => {
-                        let source = library_mod_root(&self.config.data_dir)
-                            .join(id)
-                            .join(file);
+                        let source = library_mod_root(&self.config.data_dir).join(id).join(file);
                         if !source.exists() {
                             missing_pak = true;
                         }
@@ -3371,11 +3811,7 @@ impl App {
                 }
             }
             if missing_pak {
-                actions.push((
-                    id.clone(),
-                    mod_entry.display_name(),
-                    has_other_enabled,
-                ));
+                actions.push((id.clone(), mod_entry.display_name(), has_other_enabled));
             }
         }
 
@@ -3443,7 +3879,9 @@ impl App {
 
         let mut library = backup::load_backup_library(&backup_dir)?;
         if library.profiles.is_empty() {
-            library.profiles.push(crate::library::Profile::new("Default"));
+            library
+                .profiles
+                .push(crate::library::Profile::new("Default"));
         }
         if library.active_profile.is_empty()
             || !library
@@ -4017,6 +4455,202 @@ fn mod_matches_filter(mod_entry: &ModEntry, filter: &str) -> bool {
         .any(|value| value.to_lowercase().contains(&filter))
 }
 
+fn mod_sort_column_index(column: ModSortColumn) -> usize {
+    MOD_SORT_COLUMNS
+        .iter()
+        .position(|col| *col == column)
+        .unwrap_or(0)
+}
+
+fn mod_sort_next_column(column: ModSortColumn, direction: i32) -> ModSortColumn {
+    let total = MOD_SORT_COLUMNS.len();
+    if total == 0 {
+        return column;
+    }
+    let current = mod_sort_column_index(column) as i32;
+    let step = if direction >= 0 { 1 } else { -1 };
+    let next = (current + step).rem_euclid(total as i32) as usize;
+    MOD_SORT_COLUMNS.get(next).copied().unwrap_or(column)
+}
+
+fn sort_mod_indices(
+    indices: &mut Vec<usize>,
+    profile: &Profile,
+    mod_map: &HashMap<String, ModEntry>,
+    sort: ModSort,
+) {
+    if indices.len() < 2 {
+        return;
+    }
+    indices.sort_by(|a, b| compare_mod_indices(*a, *b, profile, mod_map, sort));
+}
+
+fn compare_mod_indices(
+    a_index: usize,
+    b_index: usize,
+    profile: &Profile,
+    mod_map: &HashMap<String, ModEntry>,
+    sort: ModSort,
+) -> Ordering {
+    let Some(a_entry) = profile.order.get(a_index) else {
+        return Ordering::Greater;
+    };
+    let Some(b_entry) = profile.order.get(b_index) else {
+        return Ordering::Less;
+    };
+    let Some(a_mod) = mod_map.get(&a_entry.id) else {
+        return Ordering::Greater;
+    };
+    let Some(b_mod) = mod_map.get(&b_entry.id) else {
+        return Ordering::Less;
+    };
+
+    let ordering = match sort.column {
+        ModSortColumn::Order => compare_usize(a_index, b_index, sort.direction),
+        ModSortColumn::Name => {
+            compare_string(&a_mod.display_name(), &b_mod.display_name(), sort.direction)
+        }
+        ModSortColumn::Enabled => compare_bool(a_entry.enabled, b_entry.enabled, sort.direction),
+        ModSortColumn::Native => compare_bool(a_mod.is_native(), b_mod.is_native(), sort.direction),
+        ModSortColumn::Kind => {
+            compare_string(mod_kind_label(a_mod), mod_kind_label(b_mod), sort.direction)
+        }
+        ModSortColumn::Target => compare_string(
+            &mod_target_sort_label(a_mod),
+            &mod_target_sort_label(b_mod),
+            sort.direction,
+        ),
+        ModSortColumn::Created => {
+            compare_option_i64(a_mod.created_at, b_mod.created_at, sort.direction)
+        }
+        ModSortColumn::Added => compare_i64(a_mod.added_at, b_mod.added_at, sort.direction),
+    };
+
+    if ordering == Ordering::Equal {
+        a_index.cmp(&b_index)
+    } else {
+        ordering
+    }
+}
+
+fn compare_usize(a: usize, b: usize, direction: SortDirection) -> Ordering {
+    match direction {
+        SortDirection::Asc => a.cmp(&b),
+        SortDirection::Desc => b.cmp(&a),
+    }
+}
+
+fn compare_i64(a: i64, b: i64, direction: SortDirection) -> Ordering {
+    match direction {
+        SortDirection::Asc => a.cmp(&b),
+        SortDirection::Desc => b.cmp(&a),
+    }
+}
+
+fn compare_option_i64(a: Option<i64>, b: Option<i64>, direction: SortDirection) -> Ordering {
+    match (a, b) {
+        (None, None) => Ordering::Equal,
+        (None, Some(_)) => Ordering::Greater,
+        (Some(_), None) => Ordering::Less,
+        (Some(a), Some(b)) => compare_i64(a, b, direction),
+    }
+}
+
+fn compare_bool(a: bool, b: bool, direction: SortDirection) -> Ordering {
+    let a = a as u8;
+    let b = b as u8;
+    match direction {
+        SortDirection::Asc => a.cmp(&b),
+        SortDirection::Desc => b.cmp(&a),
+    }
+}
+
+fn compare_string(a: &str, b: &str, direction: SortDirection) -> Ordering {
+    let a = a.to_ascii_lowercase();
+    let b = b.to_ascii_lowercase();
+    match direction {
+        SortDirection::Asc => a.cmp(&b),
+        SortDirection::Desc => b.cmp(&a),
+    }
+}
+
+fn mod_kind_label(mod_entry: &ModEntry) -> &'static str {
+    let mut has_pak = false;
+    let mut has_loose = false;
+
+    for target in &mod_entry.targets {
+        match target {
+            InstallTarget::Pak { .. } => has_pak = true,
+            _ => has_loose = true,
+        }
+    }
+
+    match (has_pak, has_loose) {
+        (true, true) => "Mixed",
+        (true, false) => "Pak",
+        (false, true) => "Loose",
+        _ => "Unknown",
+    }
+}
+
+fn mod_target_sort_label(mod_entry: &ModEntry) -> String {
+    if mod_entry.targets.is_empty() {
+        return "Invalid".to_string();
+    }
+
+    let mut kinds = Vec::new();
+    for target in &mod_entry.targets {
+        let kind = target.kind();
+        if !kinds.contains(&kind) {
+            kinds.push(kind);
+        }
+    }
+
+    let enabled: Vec<TargetKind> = kinds
+        .iter()
+        .copied()
+        .filter(|kind| mod_entry.is_target_enabled(*kind))
+        .collect();
+    let has_overrides = !mod_entry.target_overrides.is_empty();
+
+    let base_label = if has_overrides {
+        if enabled.len() == 1 {
+            target_kind_label(enabled[0]).to_string()
+        } else if enabled.is_empty() {
+            "None".to_string()
+        } else {
+            "Custom".to_string()
+        }
+    } else {
+        "Auto".to_string()
+    };
+
+    let kind_for_path = if enabled.len() == 1 {
+        Some(enabled[0])
+    } else if !has_overrides && kinds.len() == 1 {
+        Some(kinds[0])
+    } else {
+        None
+    };
+
+    if let Some(kind) = kind_for_path {
+        format!("{base_label} {}", target_kind_label(kind))
+    } else if kinds.len() > 1 {
+        format!("{base_label} Multiple")
+    } else {
+        base_label
+    }
+}
+
+fn target_kind_label(kind: TargetKind) -> &'static str {
+    match kind {
+        TargetKind::Pak => "Mods",
+        TargetKind::Generated => "Generated",
+        TargetKind::Data => "Data",
+        TargetKind::Bin => "Bin",
+    }
+}
+
 const LOG_CAPACITY: usize = 200;
 
 pub(crate) fn expand_tilde(input: &str) -> PathBuf {
@@ -4113,11 +4747,7 @@ fn display_path(path: &PathBuf) -> String {
 
 fn summarize_error(error: &str) -> String {
     let first_line = error.lines().next().unwrap_or(error).trim();
-    let last = first_line
-        .rsplit(": ")
-        .next()
-        .unwrap_or(first_line)
-        .trim();
+    let last = first_line.rsplit(": ").next().unwrap_or(first_line).trim();
     let lower = last.to_lowercase();
 
     if lower.contains("device or resource busy") || lower.contains("text file busy") {
@@ -4171,9 +4801,7 @@ fn levenshtein(a: &str, b: &str) -> usize {
         curr[0] = i + 1;
         for (j, b_ch) in b_bytes.iter().enumerate() {
             let cost = if a_ch == b_ch { 0 } else { 1 };
-            curr[j + 1] = (prev[j + 1] + 1)
-                .min(curr[j] + 1)
-                .min(prev[j] + cost);
+            curr[j + 1] = (prev[j + 1] + 1).min(curr[j] + 1).min(prev[j] + cost);
         }
         prev.clone_from_slice(&curr);
     }
@@ -4267,25 +4895,59 @@ fn set_target_override(mod_entry: &mut ModEntry, kind: TargetKind, enabled: bool
     true
 }
 
+fn earliest_timestamp(values: &[Option<i64>]) -> Option<i64> {
+    let mut out: Option<i64> = None;
+    for value in values.iter().copied().flatten() {
+        out = Some(match out {
+            Some(current) => current.min(value),
+            None => value,
+        });
+    }
+    out
+}
+
+fn resolve_native_times(
+    primary_created: Option<i64>,
+    file_created: Option<i64>,
+    file_modified: Option<i64>,
+) -> (Option<i64>, Option<i64>) {
+    if primary_created.is_some() {
+        return resolve_times(primary_created, file_created, file_modified);
+    }
+    let modified = file_modified.or(file_created);
+    (None, modified)
+}
+
+fn should_clear_native_created(
+    current_created: Option<i64>,
+    file_created: Option<i64>,
+    file_modified: Option<i64>,
+    added_at: i64,
+) -> bool {
+    let Some(current) = current_created else {
+        return false;
+    };
+    if current == added_at {
+        return true;
+    }
+    file_created.map_or(false, |value| value == current)
+        || file_modified.map_or(false, |value| value == current)
+}
+
 fn collect_metadata_updates(
     game_id: GameId,
     config: &GameConfig,
     library: &Library,
 ) -> Result<Vec<MetadataUpdate>> {
-    let paths = game::detect_paths(
-        game_id,
-        Some(&config.game_root),
-        Some(&config.larian_dir),
-    )
-    .ok();
+    let paths = game::detect_paths(game_id, Some(&config.game_root), Some(&config.larian_dir)).ok();
     let native_index = paths
         .as_ref()
         .map(|paths| native_pak::build_native_pak_index(&paths.larian_mods_dir));
 
     let mut updates = Vec::new();
     for mod_entry in &library.mods {
-        let should_refresh_created = mod_entry.created_at.is_none()
-            || mod_entry.created_at == Some(mod_entry.added_at);
+        let should_refresh_created =
+            mod_entry.created_at.is_none() || mod_entry.created_at == Some(mod_entry.added_at);
         let should_refresh_modified = mod_entry.modified_at.is_none()
             || (mod_entry.is_native()
                 && mod_entry.created_at.is_some()
@@ -4361,17 +5023,50 @@ fn collect_metadata_updates(
             }
         }
 
-        let primary_created = json_created.or(meta_created);
-        let (created_candidate, modified_candidate) =
-            resolve_times(primary_created, file_created, file_modified);
+        let (primary_created, created_candidate, modified_candidate, should_clear_created) =
+            if mod_entry.is_native() {
+                let primary_created = earliest_timestamp(&[meta_created]);
+                let (created_candidate, modified_candidate) =
+                    resolve_native_times(primary_created, file_created, file_modified);
+                let should_clear_created = primary_created.is_none()
+                    && should_clear_native_created(
+                        mod_entry.created_at,
+                        file_created,
+                        file_modified,
+                        mod_entry.added_at,
+                    );
+                (
+                    primary_created,
+                    created_candidate,
+                    modified_candidate,
+                    should_clear_created,
+                )
+            } else {
+                let primary_created = json_created.or(meta_created);
+                let (created_candidate, modified_candidate) =
+                    resolve_times(primary_created, file_created, file_modified);
+                (
+                    primary_created,
+                    created_candidate,
+                    modified_candidate,
+                    false,
+                )
+            };
 
-        let should_update_created = primary_created.is_some() || should_refresh_created;
+        let should_update_created = if mod_entry.is_native() {
+            (created_candidate.is_some() && mod_entry.created_at != created_candidate)
+                || should_clear_created
+        } else {
+            primary_created.is_some() || should_refresh_created
+        };
         let mut next_created = mod_entry.created_at;
         let mut next_modified = mod_entry.modified_at;
 
         if should_update_created {
             if let Some(created) = created_candidate {
                 next_created = Some(created);
+            } else if should_clear_created {
+                next_created = None;
             }
         }
 

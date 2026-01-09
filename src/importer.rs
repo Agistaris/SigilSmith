@@ -3,18 +3,17 @@ use crate::library::{
     ModSource, PakInfo,
 };
 use crate::metadata;
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result};
 use blake3::Hasher;
 use filetime::{set_file_mtime, FileTime};
 use larian_formats::lspk;
-use time::{Date, Month, PrimitiveDateTime, Time as TimeOfDay};
 use std::{
-    fs,
-    io,
+    fs, io,
     path::{Path, PathBuf},
     process::{Command, Stdio},
     time::{SystemTime, UNIX_EPOCH},
 };
+use time::{Date, Month, PrimitiveDateTime, Time as TimeOfDay};
 use walkdir::WalkDir;
 
 pub struct ImportResult {
@@ -147,13 +146,7 @@ fn import_archive_zip(
         let _ = fs::remove_dir_all(&temp_dir);
         return Err(err);
     }
-    let result = import_from_dir(
-        &temp_dir,
-        data_dir,
-        source_label,
-        true,
-        Some(source_times),
-    );
+    let result = import_from_dir(&temp_dir, data_dir, source_label, true, Some(source_times));
     let _ = fs::remove_dir_all(&temp_dir);
     result
 }
@@ -169,13 +162,7 @@ fn import_archive_7z(
         let _ = fs::remove_dir_all(&temp_dir);
         return Err(err);
     }
-    let result = import_from_dir(
-        &temp_dir,
-        data_dir,
-        source_label,
-        true,
-        Some(source_times),
-    );
+    let result = import_from_dir(&temp_dir, data_dir, source_label, true, Some(source_times));
     let _ = fs::remove_dir_all(&temp_dir);
     result
 }
@@ -209,9 +196,7 @@ fn import_from_dir(
         let label = if use_archive_label {
             source_label
         } else {
-            pak_path
-                .file_stem()
-                .and_then(|stem| stem.to_str())
+            pak_path.file_stem().and_then(|stem| stem.to_str())
         };
         match import_single_pak(pak_path, data_dir, label, source_times, &json_mods) {
             Ok(entry) => mods.push(entry),
@@ -249,7 +234,13 @@ fn import_from_dir(
 
 fn import_pak_file(path: &Path, data_dir: &Path) -> Result<Vec<ModEntry>> {
     let label = source_label_for_archive(path);
-    Ok(vec![import_single_pak(path, data_dir, label.as_deref(), None, &[])?])
+    Ok(vec![import_single_pak(
+        path,
+        data_dir,
+        label.as_deref(),
+        None,
+        &[],
+    )?])
 }
 
 fn import_single_pak(
@@ -264,9 +255,12 @@ fn import_single_pak(
         .context("read .pak header")?
         .read()
         .context("read .pak index")?;
-    let meta = lspk
-        .extract_meta_lsx()
-        .map_err(|_| anyhow!("missing meta.lsx"))?;
+    let meta = match lspk.extract_meta_lsx() {
+        Ok(meta) => meta,
+        Err(_) => {
+            return import_override_pak(path, data_dir, source_label, source_times);
+        }
+    };
     let meta_info = metadata::parse_meta_lsx(&meta.decompressed_bytes);
     let module_info = meta
         .deserialize_as_mod_pak()
@@ -320,6 +314,55 @@ fn import_single_pak(
         targets: vec![InstallTarget::Pak {
             file: filename,
             info: pak_info,
+        }],
+        target_overrides: Vec::new(),
+        source_label: source_label.map(|label| label.to_string()),
+        source: ModSource::Managed,
+    })
+}
+
+fn import_override_pak(
+    path: &Path,
+    data_dir: &Path,
+    source_label: Option<&str>,
+    source_times: Option<SourceTimes>,
+) -> Result<ModEntry> {
+    let filename = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("override.pak");
+    let mod_id = hash_path_with_prefix(path, "pak");
+    let mod_root = library_mod_root(data_dir).join(&mod_id);
+    let data_root = mod_root.join("Data");
+    fs::create_dir_all(&data_root).context("create override pak storage")?;
+    let dest = data_root.join(filename);
+    fs::copy(path, &dest).context("copy override .pak")?;
+
+    let mut times = source_times_for(path);
+    if times.created_at.is_none() && times.modified_at.is_none() {
+        if let Some(fallback) = source_times {
+            times = fallback;
+        }
+    }
+    let (created_at, modified_at) = resolve_times(None, times.created_at, times.modified_at);
+    let name = if let Some(label) = source_label {
+        format!("Override Pak: {label}")
+    } else {
+        let stem = path
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .unwrap_or("Override Pak");
+        format!("Override Pak: {stem}")
+    };
+
+    Ok(ModEntry {
+        id: mod_id,
+        name,
+        created_at,
+        modified_at,
+        added_at: now_timestamp(),
+        targets: vec![InstallTarget::Data {
+            dir: "Data".to_string(),
         }],
         target_overrides: Vec::new(),
         source_label: source_label.map(|label| label.to_string()),
@@ -460,6 +503,7 @@ fn scan_payload(root: &Path) -> Result<PayloadScan> {
     let mut public_candidates = Vec::new();
     let mut meta_candidates = Vec::new();
     let mut json_candidates = Vec::new();
+    let mut root_bin_marker = false;
 
     for entry in WalkDir::new(root).follow_links(false) {
         let entry = entry?;
@@ -479,12 +523,14 @@ fn scan_payload(root: &Path) -> Result<PayloadScan> {
                 pak_files.push(path.to_path_buf());
             }
             let name = entry.file_name().to_string_lossy();
+            let depth = relative_depth(root, path);
+            if depth == 1 && is_bin_root_file(&name) {
+                root_bin_marker = true;
+            }
             if name.eq_ignore_ascii_case("meta.lsx") {
-                let depth = relative_depth(root, path);
                 meta_candidates.push((path.to_path_buf(), depth));
             }
             if name.to_ascii_lowercase().ends_with(".json") {
-                let depth = relative_depth(root, path);
                 let lower = name.to_ascii_lowercase();
                 let priority = match lower.as_str() {
                     "info.json" => 0,
@@ -518,10 +564,19 @@ fn scan_payload(root: &Path) -> Result<PayloadScan> {
 
     let data_dir = pick_shallowest(data_candidates);
     let generated_dir = pick_shallowest(generated_candidates);
-    let bin_dir = pick_shallowest(bin_candidates);
+    let mut bin_dir = pick_shallowest(bin_candidates);
     let public_dir = pick_shallowest(public_candidates);
     let meta_file = pick_meta_lsx(meta_candidates);
     let info_json = pick_info_json(json_candidates);
+    if bin_dir.is_none()
+        && root_bin_marker
+        && pak_files.is_empty()
+        && data_dir.is_none()
+        && generated_dir.is_none()
+        && public_dir.is_none()
+    {
+        bin_dir = Some(root.to_path_buf());
+    }
 
     Ok(PayloadScan {
         pak_files,
@@ -532,6 +587,17 @@ fn scan_payload(root: &Path) -> Result<PayloadScan> {
         meta_file,
         info_json,
     })
+}
+
+fn is_bin_root_file(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    if matches!(
+        lower.as_str(),
+        "dwrite.dll" | "bink2w64.dll" | "scriptendersettings.json"
+    ) {
+        return true;
+    }
+    lower.contains("scriptextender") || lower.contains("bg3se")
 }
 
 fn pick_shallowest(mut candidates: Vec<(PathBuf, usize)>) -> Option<PathBuf> {
@@ -565,7 +631,10 @@ fn relative_depth(root: &Path, path: &Path) -> usize {
 fn is_ignored_path(path: &Path) -> bool {
     path.components().any(|component| {
         let part = component.as_os_str().to_string_lossy();
-        part.eq_ignore_ascii_case("__MACOSX") || part == ".git" || part == ".svn"
+        part.eq_ignore_ascii_case("__MACOSX")
+            || part == ".git"
+            || part == ".svn"
+            || part == ".vscode"
     })
 }
 
@@ -654,7 +723,11 @@ fn extract_with_7z(path: &Path, dest: &Path) -> Result<Option<()>> {
 }
 
 fn copy_dir(source: &Path, dest: &Path) -> Result<()> {
-    for entry in WalkDir::new(source) {
+    for entry in WalkDir::new(source)
+        .follow_links(false)
+        .into_iter()
+        .filter_entry(|entry| !is_ignored_path(entry.path()))
+    {
         let entry = entry?;
         let rel = entry.path().strip_prefix(source).context("rel path")?;
         let target = dest.join(rel);
@@ -692,10 +765,26 @@ fn move_or_copy_dir(source: &Path, dest: &Path) -> Result<()> {
     if let Some(parent) = dest.parent() {
         fs::create_dir_all(parent).context("create target parent")?;
     }
+    if contains_ignored_path(source) {
+        return copy_dir(source, dest);
+    }
     match fs::rename(source, dest) {
         Ok(_) => Ok(()),
         Err(_) => copy_dir(source, dest),
     }
+}
+
+fn contains_ignored_path(source: &Path) -> bool {
+    for entry in WalkDir::new(source).follow_links(false).into_iter() {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(_) => continue,
+        };
+        if is_ignored_path(entry.path()) {
+            return true;
+        }
+    }
+    false
 }
 
 fn make_temp_dir(data_dir: &Path, suffix: &str) -> Result<PathBuf> {
@@ -709,6 +798,10 @@ fn make_temp_dir(data_dir: &Path, suffix: &str) -> Result<PathBuf> {
 }
 
 fn hash_path(path: &Path) -> String {
+    hash_path_with_prefix(path, "loose")
+}
+
+fn hash_path_with_prefix(path: &Path, prefix: &str) -> String {
     let mut hasher = Hasher::new();
     hasher.update(path.to_string_lossy().as_bytes());
     if let Ok(meta) = fs::metadata(path) {
@@ -720,7 +813,7 @@ fn hash_path(path: &Path) -> String {
     }
 
     let hash = hasher.finalize();
-    format!("loose-{}", hash.to_hex())
+    format!("{prefix}-{}", hash.to_hex())
 }
 
 fn now_timestamp() -> i64 {

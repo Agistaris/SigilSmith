@@ -226,7 +226,6 @@ impl ModEntry {
             .map(|override_entry| override_entry.enabled)
             .unwrap_or(true)
     }
-
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -325,10 +324,9 @@ pub fn path_times(path: &Path) -> (Option<i64>, Option<i64>) {
 
 pub fn normalize_times(created: Option<i64>, modified: Option<i64>) -> (Option<i64>, Option<i64>) {
     match (created, modified) {
-        (Some(created), Some(modified)) => (
-            Some(created.min(modified)),
-            Some(created.max(modified)),
-        ),
+        (Some(created), Some(modified)) => {
+            (Some(created.min(modified)), Some(created.max(modified)))
+        }
         (Some(created), None) => (Some(created), Some(created)),
         (None, Some(modified)) => (Some(modified), Some(modified)),
         (None, None) => (None, None),
