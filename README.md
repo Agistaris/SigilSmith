@@ -12,10 +12,11 @@ Multi-game support is coming next via an open adapter template (BG3-first today,
 
 ![Overview](docs/01-hero-overview.png)
 ![Profiles](docs/02-explorer-profiles.png)
+![Search](docs/02.5-search-names.png)
+![Sort](docs/02.8_sort_by_name.png)
 ![Overrides](docs/03-overrides-mode.png)
 ![Smart Ranking](docs/04-smart-ranking.png)
 ![Settings](docs/05-settings-menu.png)
-![Import Toast](docs/06-import-toast.png)
 ![Directory Select](docs/07_directory_select.png)
 
 ## Highlights
