@@ -502,6 +502,7 @@ pub struct App {
     pub smart_rank_scroll: usize,
     pub smart_rank_view: SmartRankView,
     pub smart_rank_progress: Option<smart_rank::SmartRankProgress>,
+    smart_rank_cache: Option<SmartRankCache>,
     smart_rank_active: bool,
     smart_rank_mode: Option<SmartRankMode>,
     smart_rank_interrupt: bool,
@@ -637,6 +638,12 @@ pub struct SmartRankPreview {
     pub moves: Vec<SmartRankMove>,
     pub warnings: Vec<String>,
     pub explain: smart_rank::SmartRankExplain,
+}
+
+#[derive(Debug, Clone)]
+struct SmartRankCache {
+    fingerprint: String,
+    result: smart_rank::SmartRankResult,
 }
 
 #[derive(Debug, Clone)]
@@ -786,6 +793,7 @@ impl App {
             smart_rank_progress: None,
             smart_rank_active: false,
             smart_rank_mode: None,
+            smart_rank_cache: None,
             smart_rank_interrupt: false,
             smart_rank_refresh_pending: false,
             smart_rank_tx,
@@ -894,6 +902,9 @@ impl App {
     }
 
     fn run_post_sync_tasks(&mut self) {
+        if self.normalize_mod_sources() {
+            let _ = self.library.save(&self.config.data_dir);
+        }
         self.start_metadata_refresh();
         self.queue_conflict_scan("startup");
         if self.paths_ready() {
@@ -1171,8 +1182,24 @@ impl App {
         self.start_smart_rank_scan(SmartRankMode::Preview);
     }
 
+    pub fn clear_smart_rank_cache(&mut self) {
+        self.smart_rank_cache = None;
+        if self.smart_rank_active {
+            self.status = "Smart rank cache cleared; warming up after scan".to_string();
+            self.smart_rank_refresh_pending = true;
+            return;
+        }
+        if !self.paths_ready() {
+            self.status = "Smart rank cache cleared".to_string();
+            return;
+        }
+        self.status = "Smart rank cache cleared; warming up".to_string();
+        self.start_smart_rank_scan(SmartRankMode::Warmup);
+    }
+
     fn interrupt_smart_rank(&mut self, reason: &str) {
         self.smart_rank_refresh_pending = true;
+        self.smart_rank_cache = None;
         if !self.smart_rank_active {
             return;
         }
@@ -1199,6 +1226,23 @@ impl App {
     fn start_smart_rank_scan(&mut self, mode: SmartRankMode) {
         if self.smart_rank_active {
             return;
+        }
+        if let Some(cache) = &self.smart_rank_cache {
+            if cache.fingerprint == self.smart_rank_fingerprint() {
+                self.smart_rank_progress = None;
+                self.smart_rank_mode = None;
+                self.smart_rank_active = false;
+                match mode {
+                    SmartRankMode::Preview => {
+                        self.finalize_smart_rank_preview(cache.result.clone());
+                    }
+                    SmartRankMode::Warmup => {
+                        self.log_info("Smart rank warmup: cache hit".to_string());
+                        self.status = "Smart ranking warmup cached".to_string();
+                    }
+                }
+                return;
+            }
         }
         self.smart_rank_mode = Some(mode);
         self.smart_rank_active = true;
@@ -1939,15 +1983,17 @@ impl App {
             .find(|entry| entry.id == id)
             .map(|entry| entry.is_native())
             .unwrap_or(false);
-        let message = build_dependent_message(&dependents);
+        let mut message = build_dependent_message(&dependents);
         let (title, yes_label, toggle) = if is_native {
+            if !message.is_empty() {
+                message.push('\n');
+                message.push('\n');
+            }
+            message.push_str("This will delete the local mod file from the Larian Mods folder.");
             (
                 "Remove Native Mod".to_string(),
                 "Remove".to_string(),
-                Some(DialogToggle {
-                    label: "Also delete local mod file".to_string(),
-                    checked: false,
-                }),
+                None,
             )
         } else {
             (
@@ -3423,6 +3469,10 @@ impl App {
                             self.log_info("Smart rank result ignored (stale)".to_string());
                             continue;
                         }
+                        self.smart_rank_cache = Some(SmartRankCache {
+                            fingerprint: self.smart_rank_fingerprint(),
+                            result: result.clone(),
+                        });
                         match self.smart_rank_mode.unwrap_or(SmartRankMode::Preview) {
                             SmartRankMode::Preview => {
                                 self.finalize_smart_rank_preview(result);
@@ -3488,6 +3538,51 @@ impl App {
             };
             let _ = tx.send(message);
         });
+    }
+
+    fn smart_rank_fingerprint(&self) -> String {
+        let mut hasher = Hasher::new();
+        if let Some(profile) = self.library.active_profile() {
+            hasher.update(profile.name.as_bytes());
+            for entry in &profile.order {
+                hasher.update(entry.id.as_bytes());
+                hasher.update(&[entry.enabled as u8]);
+                if let Some(mod_entry) = self.library.mods.iter().find(|m| m.id == entry.id) {
+                    let created = mod_entry.created_at.unwrap_or(0);
+                    let modified = mod_entry.modified_at.unwrap_or(mod_entry.added_at);
+                    hasher.update(&created.to_le_bytes());
+                    hasher.update(&modified.to_le_bytes());
+                    let source_tag = match mod_entry.source {
+                        ModSource::Managed => 0u8,
+                        ModSource::Native => 1u8,
+                    };
+                    hasher.update(&[source_tag]);
+                    for target in &mod_entry.targets {
+                        match target {
+                            InstallTarget::Pak { file, info } => {
+                                hasher.update(b"pak");
+                                hasher.update(file.as_bytes());
+                                hasher.update(info.uuid.as_bytes());
+                                hasher.update(info.folder.as_bytes());
+                            }
+                            InstallTarget::Generated { dir } => {
+                                hasher.update(b"gen");
+                                hasher.update(dir.as_bytes());
+                            }
+                            InstallTarget::Data { dir } => {
+                                hasher.update(b"data");
+                                hasher.update(dir.as_bytes());
+                            }
+                            InstallTarget::Bin { dir } => {
+                                hasher.update(b"bin");
+                                hasher.update(dir.as_bytes());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        hasher.finalize().to_hex().to_string()
     }
 
     fn start_native_sync(&mut self) {
@@ -4217,9 +4312,10 @@ impl App {
 
     fn collect_mod_dependencies(&self, mod_entry: &ModEntry) -> Vec<String> {
         let mod_root = library_mod_root(&self.config.data_dir).join(&mod_entry.id);
+        let use_managed_root = mod_root.exists();
         let mut native_paths = None;
         let mut native_index = None;
-        if mod_entry.is_native() {
+        if mod_entry.is_native() && !use_managed_root {
             if let Ok(paths) = game::detect_paths(
                 self.game_id,
                 Some(&self.config.game_root),
@@ -4235,7 +4331,7 @@ impl App {
         for target in &mod_entry.targets {
             if let InstallTarget::Pak { file, .. } = target {
                 let mut pak_path = mod_root.join(file);
-                if mod_entry.is_native() {
+                if mod_entry.is_native() && !use_managed_root {
                     if let Some(paths) = &native_paths {
                         pak_path = paths.larian_mods_dir.join(file);
                         if !pak_path.exists() {
@@ -4299,6 +4395,20 @@ impl App {
             let deps = self.collect_mod_dependencies(mod_entry);
             self.dependency_cache.insert(mod_entry.id.clone(), deps);
         }
+    }
+
+    fn normalize_mod_sources(&mut self) -> bool {
+        let mods_root = library_mod_root(&self.config.data_dir);
+        let mut changed = false;
+        for mod_entry in &mut self.library.mods {
+            if mods_root.join(&mod_entry.id).exists() {
+                if mod_entry.source != ModSource::Managed {
+                    mod_entry.source = ModSource::Managed;
+                    changed = true;
+                }
+            }
+        }
+        changed
     }
 
     fn poll_dependency_downloads(&mut self) {
@@ -4524,6 +4634,9 @@ impl App {
         self.library.ensure_mods_in_profiles();
         self.library.save(&self.config.data_dir)?;
         self.update_dependency_cache_for_entries(&added);
+        if self.normalize_mod_sources() {
+            let _ = self.library.save(&self.config.data_dir);
+        }
         self.queue_conflict_scan("library update");
         Ok(count)
     }
@@ -4779,10 +4892,10 @@ impl App {
             } => {
                 if matches!(choice, DialogChoice::Yes) {
                     let mut remove_native_files = false;
-                    if let Some(toggle) = dialog.toggle {
-                        if native {
-                            remove_native_files = toggle.checked;
-                        } else if toggle.checked {
+                    if native {
+                        remove_native_files = true;
+                    } else if let Some(toggle) = dialog.toggle {
+                        if toggle.checked {
                             self.app_config.confirm_mod_delete = false;
                             let _ = self.app_config.save();
                         }
@@ -5167,6 +5280,10 @@ impl App {
             }
         }
 
+        if self.normalize_mod_sources() {
+            changed = true;
+        }
+
         if added > 0
             || updated_enabled
             || reordered
@@ -5174,6 +5291,9 @@ impl App {
             || adopted_native > 0
             || changed
         {
+            if changed {
+                self.smart_rank_cache = None;
+            }
             if let Err(err) = self.library.save(&self.config.data_dir) {
                 self.log_warn(format!("Native mod sync save failed: {err}"));
             }

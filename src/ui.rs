@@ -388,6 +388,7 @@ enum SettingsItemKind {
     ToggleDependencyDownloads,
     ToggleDependencyWarnings,
     ActionSmartRank,
+    ActionClearSmartRankCache,
     ActionCheckUpdates,
 }
 
@@ -431,13 +432,18 @@ fn settings_items(app: &App) -> Vec<SettingsItem> {
             checked: None,
         },
         SettingsItem {
-            label: update_menu_label(app),
-            kind: SettingsItemKind::ActionCheckUpdates,
+            label: "AI Smart Ranking".to_string(),
+            kind: SettingsItemKind::ActionSmartRank,
             checked: None,
         },
         SettingsItem {
-            label: "AI Smart Ranking".to_string(),
-            kind: SettingsItemKind::ActionSmartRank,
+            label: "Clear smart rank cache".to_string(),
+            kind: SettingsItemKind::ActionClearSmartRankCache,
+            checked: None,
+        },
+        SettingsItem {
+            label: update_menu_label(app),
+            kind: SettingsItemKind::ActionCheckUpdates,
             checked: None,
         },
     ]
@@ -511,6 +517,9 @@ fn handle_settings_menu(app: &mut App, key: KeyEvent) -> Result<()> {
                     SettingsItemKind::ActionSmartRank => {
                         app.close_settings_menu();
                         app.open_smart_rank_preview();
+                    }
+                    SettingsItemKind::ActionClearSmartRankCache => {
+                        app.clear_smart_rank_cache();
                     }
                     SettingsItemKind::ActionCheckUpdates => {
                         if matches!(app.update_status, UpdateStatus::Available { .. }) {
@@ -3753,6 +3762,7 @@ fn build_settings_menu_lines(app: &App, theme: &Theme, selected: usize) -> Vec<L
             SettingsItemKind::ActionSetupPaths
             | SettingsItemKind::ActionSetupDownloads
             | SettingsItemKind::ActionSmartRank
+            | SettingsItemKind::ActionClearSmartRankCache
             | SettingsItemKind::ActionCheckUpdates => vec![
                 Span::styled(prefix.to_string(), style),
                 Span::raw(" "),
