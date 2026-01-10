@@ -5033,6 +5033,18 @@ impl App {
             else {
                 continue;
             };
+            let managed_root = self
+                .config
+                .data_dir
+                .join("mods")
+                .join(&update.id);
+            if update.source == ModSource::Native && managed_root.exists() {
+                if entry.source != ModSource::Managed {
+                    entry.source = ModSource::Managed;
+                    changed = true;
+                }
+                continue;
+            }
             if entry.source != update.source {
                 entry.source = update.source;
                 changed = true;
@@ -6459,6 +6471,12 @@ fn dependency_match_keys(value: &str) -> Vec<String> {
     if !normalized.is_empty() {
         keys.push(normalized);
     }
+    for candidate in extract_uuid_candidates(value) {
+        let normalized = normalize_label(&candidate);
+        if !normalized.is_empty() {
+            keys.push(normalized);
+        }
+    }
     for token in value.split(|ch: char| !ch.is_ascii_alphanumeric()) {
         let normalized = normalize_label(token);
         if !normalized.is_empty() {
@@ -6468,6 +6486,48 @@ fn dependency_match_keys(value: &str) -> Vec<String> {
     keys.sort();
     keys.dedup();
     keys
+}
+
+fn extract_uuid_candidates(value: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut current = String::new();
+    for ch in value.chars() {
+        if ch.is_ascii_hexdigit() || ch == '-' {
+            current.push(ch);
+        } else {
+            if is_uuid_like(&current) {
+                out.push(current.clone());
+            }
+            current.clear();
+        }
+    }
+    if is_uuid_like(&current) {
+        out.push(current);
+    }
+    out
+}
+
+fn is_uuid_like(value: &str) -> bool {
+    if value.len() != 36 {
+        return false;
+    }
+    let bytes = value.as_bytes();
+    for (idx, byte) in bytes.iter().enumerate() {
+        match idx {
+            8 | 13 | 18 | 23 => {
+                if *byte != b'-' {
+                    return false;
+                }
+            }
+            _ => {
+                let ch = *byte as char;
+                if !ch.is_ascii_hexdigit() {
+                    return false;
+                }
+            }
+        }
+    }
+    true
 }
 
 fn mod_dependency_keys(mod_entry: &ModEntry) -> Vec<String> {
