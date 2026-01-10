@@ -8,6 +8,7 @@ use blake3::Hasher;
 use filetime::{set_file_mtime, FileTime};
 use larian_formats::lspk;
 use std::{
+    collections::HashSet,
     fs, io,
     path::{Path, PathBuf},
     process::{Command, Stdio},
@@ -33,6 +34,8 @@ struct DirImportResult {
     mods: Vec<ModEntry>,
     unrecognized: bool,
 }
+
+const NESTED_ARCHIVE_SCAN_DEPTH: usize = 4;
 
 #[derive(Clone, Copy)]
 enum CandidateKind {
@@ -331,7 +334,9 @@ pub fn import_path_with_progress(
                 }
             }
             "zip" | "ZIP" => import_archive_zip(path, data_dir, source_label.as_deref(), progress)?,
-            "7z" | "7Z" => import_archive_7z(path, data_dir, source_label.as_deref(), progress)?,
+            "7z" | "7Z" | "rar" | "RAR" => {
+                import_archive_7z(path, data_dir, source_label.as_deref(), progress)?
+            }
             _ => ImportResult {
                 batches: Vec::new(),
                 unrecognized: true,
@@ -507,7 +512,7 @@ fn import_batch_from_dir(
                     "zip" | "ZIP" => {
                         import_archive_zip(&candidate.path, data_dir, source_label, progress.clone())
                     }
-                    "7z" | "7Z" => {
+                    "7z" | "7Z" | "rar" | "RAR" => {
                         import_archive_7z(&candidate.path, data_dir, source_label, progress.clone())
                     }
                     _ => Ok(ImportResult {
@@ -1122,6 +1127,8 @@ fn collect_import_candidates(root: &Path) -> Result<Vec<ImportCandidate>> {
     let mut candidates = Vec::new();
     let mut top_level_dirs = Vec::new();
     let mut mods_dir: Option<PathBuf> = None;
+    let mut candidate_dirs: Vec<PathBuf> = Vec::new();
+    let mut seen: HashSet<PathBuf> = HashSet::new();
 
     for entry in fs::read_dir(root).context("read import dir")? {
         let entry = match entry {
@@ -1138,17 +1145,25 @@ fn collect_import_candidates(root: &Path) -> Result<Vec<ImportCandidate>> {
         };
         if file_type.is_file() {
             if is_archive_file(&path) {
-                candidates.push(ImportCandidate {
-                    label: display_path_label(&path),
+                let label = display_path_label(&path);
+                push_candidate(
+                    &mut candidates,
+                    &mut candidate_dirs,
+                    &mut seen,
                     path,
-                    kind: CandidateKind::ArchiveFile,
-                });
+                    label,
+                    CandidateKind::ArchiveFile,
+                );
             } else if is_pak_file(&path) {
-                candidates.push(ImportCandidate {
-                    label: display_pak_label(&path),
+                let label = display_pak_label(&path);
+                push_candidate(
+                    &mut candidates,
+                    &mut candidate_dirs,
+                    &mut seen,
                     path,
-                    kind: CandidateKind::PakFile,
-                });
+                    label,
+                    CandidateKind::PakFile,
+                );
             }
         } else if file_type.is_dir() {
             let name = entry.file_name().to_string_lossy().to_lowercase();
@@ -1175,18 +1190,26 @@ fn collect_import_candidates(root: &Path) -> Result<Vec<ImportCandidate>> {
                 Err(_) => continue,
             };
             if file_type.is_file() && is_pak_file(&path) {
-                candidates.push(ImportCandidate {
-                    label: display_pak_label(&path),
+                let label = display_pak_label(&path);
+                push_candidate(
+                    &mut candidates,
+                    &mut candidate_dirs,
+                    &mut seen,
                     path,
-                    kind: CandidateKind::PakFile,
-                });
+                    label,
+                    CandidateKind::PakFile,
+                );
             } else if file_type.is_dir() {
                 if let Ok(true) = is_mod_candidate_dir(&path) {
-                    candidates.push(ImportCandidate {
-                        label: display_path_label(&path),
+                    let label = display_path_label(&path);
+                    push_candidate(
+                        &mut candidates,
+                        &mut candidate_dirs,
+                        &mut seen,
                         path,
-                        kind: CandidateKind::Directory,
-                    });
+                        label,
+                        CandidateKind::Directory,
+                    );
                 }
             }
         }
@@ -1194,16 +1217,79 @@ fn collect_import_candidates(root: &Path) -> Result<Vec<ImportCandidate>> {
 
     for dir in top_level_dirs {
         if let Ok(true) = is_mod_candidate_dir(&dir) {
-            candidates.push(ImportCandidate {
-                label: display_path_label(&dir),
-                path: dir,
-                kind: CandidateKind::Directory,
-            });
+            let label = display_path_label(&dir);
+            push_candidate(
+                &mut candidates,
+                &mut candidate_dirs,
+                &mut seen,
+                dir,
+                label,
+                CandidateKind::Directory,
+            );
+        }
+    }
+
+    if root.is_dir() {
+        let walker = WalkDir::new(root)
+            .follow_links(false)
+            .min_depth(2)
+            .max_depth(NESTED_ARCHIVE_SCAN_DEPTH);
+        for entry in walker.into_iter().filter_map(Result::ok) {
+            let path = entry.path();
+            if is_ignored_path(path) {
+                continue;
+            }
+            if !entry.file_type().is_file() {
+                continue;
+            }
+            if is_archive_file(path) {
+                let label = display_path_label(path);
+                push_candidate(
+                    &mut candidates,
+                    &mut candidate_dirs,
+                    &mut seen,
+                    path.to_path_buf(),
+                    label,
+                    CandidateKind::ArchiveFile,
+                );
+                continue;
+            }
+            if is_pak_file(path) && !has_candidate_dir_ancestor(path, &candidate_dirs) {
+                let label = display_pak_label(path);
+                push_candidate(
+                    &mut candidates,
+                    &mut candidate_dirs,
+                    &mut seen,
+                    path.to_path_buf(),
+                    label,
+                    CandidateKind::PakFile,
+                );
+            }
         }
     }
 
     candidates.sort_by(|a, b| a.label.cmp(&b.label));
     Ok(candidates)
+}
+
+fn has_candidate_dir_ancestor(path: &Path, candidates: &[PathBuf]) -> bool {
+    candidates.iter().any(|dir| path.starts_with(dir))
+}
+
+fn push_candidate(
+    candidates: &mut Vec<ImportCandidate>,
+    candidate_dirs: &mut Vec<PathBuf>,
+    seen: &mut HashSet<PathBuf>,
+    path: PathBuf,
+    label: String,
+    kind: CandidateKind,
+) {
+    if seen.insert(path.clone()) {
+        if matches!(kind, CandidateKind::Directory) {
+            candidate_dirs.push(path.clone());
+        }
+        candidates.push(ImportCandidate { label, path, kind });
+    }
 }
 
 fn is_mod_candidate_dir(path: &Path) -> Result<bool> {
@@ -1214,7 +1300,7 @@ fn is_mod_candidate_dir(path: &Path) -> Result<bool> {
 fn is_archive_file(path: &Path) -> bool {
     matches!(
         path.extension().and_then(|ext| ext.to_str()).unwrap_or(""),
-        "zip" | "ZIP" | "7z" | "7Z"
+        "zip" | "ZIP" | "7z" | "7Z" | "rar" | "RAR"
     )
 }
 
