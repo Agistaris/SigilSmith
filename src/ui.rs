@@ -365,6 +365,7 @@ enum SettingsItemKind {
     ToggleModDelete,
     ToggleDependencyDownloads,
     ToggleDependencyWarnings,
+    ToggleStartupDependencyNotice,
     ActionSmartRank,
     ActionClearSmartRankCache,
     ActionCheckUpdates,
@@ -389,15 +390,20 @@ fn settings_items(app: &App) -> Vec<SettingsItem> {
             kind: SettingsItemKind::ToggleModDelete,
             checked: Some(app.app_config.confirm_mod_delete),
         },
-            SettingsItem {
-                label: "Auto dependency downloads".to_string(),
-                kind: SettingsItemKind::ToggleDependencyDownloads,
-                checked: Some(app.app_config.offer_dependency_downloads),
-            },
+        SettingsItem {
+            label: "Auto dependency downloads".to_string(),
+            kind: SettingsItemKind::ToggleDependencyDownloads,
+            checked: Some(app.app_config.offer_dependency_downloads),
+        },
         SettingsItem {
             label: "Warn on missing dependencies".to_string(),
             kind: SettingsItemKind::ToggleDependencyWarnings,
             checked: Some(app.app_config.warn_missing_dependencies),
+        },
+        SettingsItem {
+            label: "Startup dependency notice".to_string(),
+            kind: SettingsItemKind::ToggleStartupDependencyNotice,
+            checked: Some(app.app_config.show_startup_dependency_notice),
         },
         SettingsItem {
             label: "Configure game paths".to_string(),
@@ -488,6 +494,12 @@ fn handle_settings_menu(app: &mut App, key: KeyEvent) -> Result<()> {
                     }
                     SettingsItemKind::ToggleDependencyWarnings => {
                         if let Err(err) = app.toggle_dependency_warnings() {
+                            app.status = format!("Settings update failed: {err}");
+                            app.log_error(format!("Settings update failed: {err}"));
+                        }
+                    }
+                    SettingsItemKind::ToggleStartupDependencyNotice => {
+                        if let Err(err) = app.toggle_startup_dependency_notice() {
                             app.status = format!("Settings update failed: {err}");
                             app.log_error(format!("Settings update failed: {err}"));
                         }
@@ -1565,7 +1577,8 @@ fn draw(frame: &mut Frame<'_>, app: &mut App) {
         let spacing = 1u16;
         let min_mod = 16u16;
         let date_width = 10u16;
-        let fixed_without_target = 3 + 2 + 5 + 6 + date_width + date_width + min_mod + spacing * 7;
+        let fixed_without_target =
+            3 + 2 + 3 + 5 + 6 + date_width + date_width + min_mod + spacing * 8;
         let max_target = table_width.saturating_sub(fixed_without_target);
         let mut target_col = target_width as u16;
         if max_target > 0 {
@@ -1580,6 +1593,7 @@ fn draw(frame: &mut Frame<'_>, app: &mut App) {
         let header = Row::new(vec![
             mod_header_cell("On", ModSortColumn::Enabled, app.mod_sort, &theme),
             mod_header_cell("N", ModSortColumn::Native, app.mod_sort, &theme),
+            mod_header_cell_static("D", &theme),
             mod_header_cell("Order", ModSortColumn::Order, app.mod_sort, &theme),
             mod_header_cell("Kind", ModSortColumn::Kind, app.mod_sort, &theme),
             mod_header_cell("Target", ModSortColumn::Target, app.mod_sort, &theme),
@@ -1593,6 +1607,7 @@ fn draw(frame: &mut Frame<'_>, app: &mut App) {
             [
                 Constraint::Length(3),
                 Constraint::Length(2),
+                Constraint::Length(3),
                 Constraint::Length(5),
                 Constraint::Length(6),
                 Constraint::Length(target_col),
@@ -3784,7 +3799,8 @@ fn build_settings_menu_lines(app: &App, theme: &Theme, selected: usize) -> Vec<L
             SettingsItemKind::ToggleProfileDelete
             | SettingsItemKind::ToggleModDelete
             | SettingsItemKind::ToggleDependencyDownloads
-            | SettingsItemKind::ToggleDependencyWarnings => {
+            | SettingsItemKind::ToggleDependencyWarnings
+            | SettingsItemKind::ToggleStartupDependencyNotice => {
                 let marker = if item.checked.unwrap_or(false) {
                     "[x]"
                 } else {
@@ -4364,6 +4380,15 @@ fn mod_header_cell(
     Cell::from(label.to_string()).style(style)
 }
 
+fn mod_header_cell_static(label: &str, theme: &Theme) -> Cell<'static> {
+    Cell::from(label.to_string()).style(
+        Style::default()
+            .fg(theme.accent)
+            .bg(theme.header_bg)
+            .add_modifier(Modifier::BOLD),
+    )
+}
+
 fn row_for_entry(
     app: &App,
     row_index: usize,
@@ -4394,35 +4419,29 @@ fn row_for_entry(
     };
     let created_text = format_date_cell(mod_entry.created_at);
     let added_text = format_date_cell(Some(mod_entry.added_at));
-    let mut name_spans = Vec::new();
-    name_spans.push(Span::styled(
-        mod_entry.display_name(),
-        Style::default().fg(theme.text),
-    ));
-    if let Some(lookup) = dep_lookup {
-        let missing = app.missing_dependency_count_for_mod(mod_entry, lookup);
-        if missing > 0 {
-            let label = if missing == 1 {
-                "Missing 1 Dependency".to_string()
-            } else {
-                format!("Missing {missing} Dependencies")
-            };
-            name_spans.push(Span::raw(" "));
-            name_spans.push(Span::styled(
-                format!("[{label}]"),
-                Style::default().fg(theme.muted).add_modifier(Modifier::DIM),
-            ));
-        }
-    }
+    let missing = dep_lookup
+        .map(|lookup| app.missing_dependency_count_for_mod(mod_entry, lookup))
+        .unwrap_or(0);
+    let dep_text = if missing == 0 {
+        String::new()
+    } else {
+        missing.to_string()
+    };
+    let dep_style = if missing == 0 {
+        Style::default().fg(theme.muted)
+    } else {
+        Style::default().fg(theme.warning)
+    };
     let mut row = Row::new(vec![
         Cell::from(enabled_text.to_string()).style(enabled_style),
         Cell::from(native_marker.to_string()).style(native_style),
+        Cell::from(dep_text).style(dep_style),
         Cell::from((order_index + 1).to_string()),
         Cell::from(kind.to_string()).style(kind_style),
         Cell::from(state_label).style(state_style),
         Cell::from(created_text).style(Style::default().fg(theme.muted)),
         Cell::from(added_text).style(Style::default().fg(theme.muted)),
-        Cell::from(Line::from(name_spans)),
+        Cell::from(mod_entry.display_name()),
     ]);
     if row_index % 2 == 1 {
         row = row.style(Style::default().bg(theme.row_alt_bg));
@@ -5178,6 +5197,10 @@ fn legend_rows_for_focus(focus: Focus) -> Vec<LegendRow> {
             legend.push(LegendRow {
                 key: "N".to_string(),
                 action: "Native mod (mod.io)".to_string(),
+            });
+            legend.push(LegendRow {
+                key: "D".to_string(),
+                action: "Missing dependencies".to_string(),
             });
         }
         Focus::Conflicts | Focus::Log => {}

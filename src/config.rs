@@ -19,6 +19,8 @@ pub struct AppConfig {
     pub warn_missing_dependencies: bool,
     #[serde(default)]
     pub dependency_search_copy_preference: Option<bool>,
+    #[serde(default = "default_true")]
+    pub show_startup_dependency_notice: bool,
 }
 
 impl AppConfig {
@@ -44,6 +46,7 @@ impl AppConfig {
             offer_dependency_downloads: true,
             warn_missing_dependencies: true,
             dependency_search_copy_preference: None,
+            show_startup_dependency_notice: true,
         };
         config.save()?;
         Ok(config)

@@ -135,6 +135,7 @@ pub enum DialogKind {
     CancelImport,
     ImportSummary,
     CopyDependencySearchLink { link: String },
+    StartupDependencyNotice,
 }
 
 #[derive(Debug, Clone)]
@@ -507,6 +508,7 @@ pub struct App {
     smart_rank_mode: Option<SmartRankMode>,
     smart_rank_interrupt: bool,
     smart_rank_refresh_pending: bool,
+    startup_dependency_check_pending: bool,
     smart_rank_tx: Sender<SmartRankMessage>,
     smart_rank_rx: Receiver<SmartRankMessage>,
     native_sync_tx: Sender<NativeSyncMessage>,
@@ -663,9 +665,9 @@ pub enum NativeSyncStage {
 impl NativeSyncStage {
     fn label(self) -> &'static str {
         match self {
-            NativeSyncStage::NativeFiles => "Native mods",
-            NativeSyncStage::AdoptNative => "Adopting native",
-            NativeSyncStage::AddMissing => "Adding missing",
+            NativeSyncStage::NativeFiles => "Native mods prepass",
+            NativeSyncStage::AdoptNative => "Native mods adopt",
+            NativeSyncStage::AddMissing => "Native mods add",
         }
     }
 }
@@ -796,6 +798,7 @@ impl App {
             smart_rank_cache: None,
             smart_rank_interrupt: false,
             smart_rank_refresh_pending: false,
+            startup_dependency_check_pending: matches!(mode, StartupMode::Ui),
             smart_rank_tx,
             smart_rank_rx,
             native_sync_tx,
@@ -909,7 +912,7 @@ impl App {
         self.start_metadata_refresh();
         self.queue_conflict_scan("startup");
         if self.paths_ready() {
-            self.start_smart_rank_scan(SmartRankMode::Warmup);
+            self.smart_rank_refresh_pending = true;
         }
         self.start_update_check();
     }
@@ -1164,6 +1167,19 @@ impl App {
         Ok(())
     }
 
+    pub fn toggle_startup_dependency_notice(&mut self) -> Result<()> {
+        self.app_config.show_startup_dependency_notice =
+            !self.app_config.show_startup_dependency_notice;
+        self.app_config.save()?;
+        let state = if self.app_config.show_startup_dependency_notice {
+            "enabled"
+        } else {
+            "disabled"
+        };
+        self.status = format!("Startup dependency notice {state}");
+        Ok(())
+    }
+
     pub fn open_smart_rank_preview(&mut self) {
         if self.smart_rank_active {
             self.status = "Smart ranking already running".to_string();
@@ -1197,6 +1213,79 @@ impl App {
         }
         self.status = "Smart rank cache cleared; warming up".to_string();
         self.start_smart_rank_scan(SmartRankMode::Warmup);
+    }
+
+    fn run_startup_dependency_check(&mut self) {
+        if !self.startup_dependency_check_pending {
+            return;
+        }
+        if !self.dependency_cache_ready {
+            return;
+        }
+        self.startup_dependency_check_pending = false;
+        let Some(profile) = self.library.active_profile() else {
+            return;
+        };
+        let lookup = DependencyLookup::new(&self.library.mods);
+        let mut to_disable = Vec::new();
+        let mut disabled_names = Vec::new();
+        for entry in &profile.order {
+            if !entry.enabled {
+                continue;
+            }
+            let Some(mod_entry) = self.library.mods.iter().find(|mod_entry| mod_entry.id == entry.id) else {
+                continue;
+            };
+            let missing = self.missing_dependency_count_for_mod(mod_entry, &lookup);
+            if missing > 0 {
+                to_disable.push(entry.id.clone());
+                disabled_names.push(mod_entry.display_name());
+            }
+        }
+        if to_disable.is_empty() {
+            return;
+        }
+        let changed = self.set_mods_enabled_in_active(&to_disable, false);
+        if changed == 0 {
+            return;
+        }
+        self.status = format!(
+            "Startup: disabled {changed} mod(s) missing dependencies"
+        );
+        self.log_warn(format!(
+            "Startup: disabled {changed} mod(s) missing dependencies"
+        ));
+        self.smart_rank_refresh_pending = true;
+        self.queue_auto_deploy("startup dependency disable");
+        if self.app_config.show_startup_dependency_notice {
+            self.prompt_startup_dependency_notice(disabled_names);
+        }
+    }
+
+    fn prompt_startup_dependency_notice(&mut self, disabled: Vec<String>) {
+        if disabled.is_empty() || self.dialog.is_some() {
+            return;
+        }
+        let total = disabled.len();
+        let mut lines = Vec::new();
+        lines.push(format!(
+            "Disabled {total} mod(s) missing dependencies."
+        ));
+        for name in disabled.iter().take(6) {
+            lines.push(format!("- {name}"));
+        }
+        if total > 6 {
+            lines.push(format!("...and {} more", total - 6));
+        }
+        self.open_dialog(Dialog {
+            title: "Dependencies missing".to_string(),
+            message: lines.join("\n"),
+            yes_label: "OK".to_string(),
+            no_label: "Close".to_string(),
+            choice: DialogChoice::Yes,
+            kind: DialogKind::StartupDependencyNotice,
+            toggle: None,
+        });
     }
 
     fn interrupt_smart_rank(&mut self, reason: &str, restart: bool) {
@@ -3912,6 +4001,8 @@ impl App {
                         self.metadata_active = false;
                         if updates.is_empty() {
                             self.dependency_cache_ready = !self.dependency_cache.is_empty();
+                            self.run_startup_dependency_check();
+                            self.maybe_restart_smart_rank();
                             self.maybe_prompt_pending_delete();
                             continue;
                         }
@@ -3944,11 +4035,14 @@ impl App {
                             let _ = self.library.save(&self.config.data_dir);
                             self.log_info("Metadata refresh applied".to_string());
                         }
+                        self.run_startup_dependency_check();
+                        self.maybe_restart_smart_rank();
                         self.maybe_prompt_pending_delete();
                     }
                     MetadataMessage::Failed { error } => {
                         self.metadata_active = false;
                         self.log_warn(format!("Metadata refresh failed: {error}"));
+                        self.maybe_restart_smart_rank();
                     }
                 },
                 Err(TryRecvError::Empty) => break,
@@ -5148,6 +5242,7 @@ impl App {
                     self.status = "Search link skipped".to_string();
                 }
             }
+            DialogKind::StartupDependencyNotice => {}
             DialogKind::ImportSummary => {}
         }
     }
