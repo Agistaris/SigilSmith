@@ -83,7 +83,7 @@ impl Theme {
             log_bg: Color::Rgb(13, 18, 26),
             subpanel_bg: Color::Rgb(13, 18, 26),
             swap_bg: Color::Rgb(20, 90, 74),
-            overlay_bg: Color::Rgb(16, 30, 48),
+            overlay_bg: Color::Rgb(8, 12, 18),
             overlay_panel_bg: Color::Rgb(12, 20, 32),
             overlay_border: Color::Rgb(90, 140, 190),
             overlay_bar: Color::Rgb(120, 198, 255),
@@ -343,35 +343,15 @@ fn handle_dependency_queue(app: &mut App, key: KeyEvent) -> Result<()> {
     match key.code {
         KeyCode::Up | KeyCode::Char('k') | KeyCode::Char('K') => app.dependency_queue_move(-1),
         KeyCode::Down | KeyCode::Char('j') | KeyCode::Char('J') => app.dependency_queue_move(1),
-        KeyCode::Enter => {
-            if let Some(link) = app.dependency_queue_link() {
-                app.open_link(&link);
-            } else {
-                app.open_downloads_dir();
-            }
-        }
-        KeyCode::Char('y') | KeyCode::Char('Y') => {
-            app.dependency_queue_mark_waiting();
-        }
+        KeyCode::Enter => app.dependency_queue_open_selected(),
         KeyCode::Char('i') | KeyCode::Char('I') => {
             app.dependency_queue_ignore();
-        }
-        KeyCode::Char('d') | KeyCode::Char('D') => {
-            app.open_downloads_dir();
         }
         KeyCode::Char('g') | KeyCode::Char('G') => {
             app.dependency_queue_continue();
         }
         KeyCode::Char('c') | KeyCode::Char('C') => {
-            if let Some(link) = app.dependency_queue_link() {
-                if copy_to_clipboard(app, &link) {
-                    app.status = "Link copied".to_string();
-                }
-            } else if let Some(label) = app.dependency_queue_label() {
-                if copy_to_clipboard(app, &label) {
-                    app.status = "Dependency id copied".to_string();
-                }
-            }
+            app.dependency_queue_copy_selected();
         }
         KeyCode::Esc => app.dependency_queue_cancel(),
         _ => {}
@@ -411,11 +391,11 @@ fn settings_items(app: &App) -> Vec<SettingsItem> {
             kind: SettingsItemKind::ToggleModDelete,
             checked: Some(app.app_config.confirm_mod_delete),
         },
-        SettingsItem {
-            label: "Offer dependency downloads".to_string(),
-            kind: SettingsItemKind::ToggleDependencyDownloads,
-            checked: Some(app.app_config.offer_dependency_downloads),
-        },
+            SettingsItem {
+                label: "Auto dependency downloads".to_string(),
+                kind: SettingsItemKind::ToggleDependencyDownloads,
+                checked: Some(app.app_config.offer_dependency_downloads),
+            },
         SettingsItem {
             label: "Warn on missing dependencies".to_string(),
             kind: SettingsItemKind::ToggleDependencyWarnings,
@@ -955,23 +935,6 @@ fn paste_clipboard_into(app: &mut App, target: &mut String) -> bool {
         return false;
     }
     target.push_str(&cleaned);
-    true
-}
-
-fn copy_to_clipboard(app: &mut App, text: &str) -> bool {
-    let mut clipboard = match Clipboard::new() {
-        Ok(clipboard) => clipboard,
-        Err(err) => {
-            app.status = format!("Clipboard unavailable: {err}");
-            app.log_warn(format!("Clipboard unavailable: {err}"));
-            return false;
-        }
-    };
-    if let Err(err) = clipboard.set_text(text.to_string()) {
-        app.status = format!("Clipboard copy failed: {err}");
-        app.log_warn(format!("Clipboard copy failed: {err}"));
-        return false;
-    }
     true
 }
 
@@ -3006,20 +2969,10 @@ fn draw_dependency_queue(frame: &mut Frame<'_>, app: &App, theme: &Theme) {
         truncate_text(&summary, inner.width as usize),
         Style::default().fg(theme.muted),
     )));
-    let downloads_label = format!(
-        "Downloads: {}",
-        queue.downloads_dir.display().to_string()
-    );
     header_lines.push(Line::from(Span::styled(
-        truncate_text(&downloads_label, inner.width as usize),
-        Style::default().fg(theme.text),
+        "Download the dependency and drag it into SigilSmith to continue.",
+        Style::default().fg(theme.muted),
     )));
-    if !app.app_config.offer_dependency_downloads {
-        header_lines.push(Line::from(Span::styled(
-            "Dependency downloads are disabled in Settings.",
-            Style::default().fg(theme.warning),
-        )));
-    }
 
     let header_height = header_lines.len() as u16 + 1;
     let footer_height = 2u16;
@@ -3044,22 +2997,43 @@ fn draw_dependency_queue(frame: &mut Frame<'_>, app: &App, theme: &Theme) {
         let status_text = format!("{status_label:<9}");
         let status_style = dependency_status_style(theme, item.status);
         let label_width = list_width.saturating_sub(status_text.chars().count() + 1);
-        let label_text = truncate_text(&item.label, label_width);
+        let label_value = if item.display_label.trim().is_empty() {
+            item.label.clone()
+        } else {
+            item.display_label.clone()
+        };
+        let label_text = truncate_text(&label_value, label_width);
         let label_line = Line::from(vec![
             Span::styled(status_text, status_style),
             Span::raw(" "),
             Span::styled(label_text, Style::default().fg(theme.text)),
         ]);
+        let uuid_text = item
+            .uuid
+            .as_ref()
+            .map(|uuid| format!("UUID: {uuid}"))
+            .unwrap_or_else(|| "UUID: unknown".to_string());
+        let uuid_line = Line::from(Span::styled(
+            truncate_text(&uuid_text, list_width),
+            Style::default().fg(theme.muted),
+        ));
         let required_by = if item.required_by.is_empty() {
             "Required by: Unknown".to_string()
         } else {
             format!("Required by: {}", item.required_by.join(", "))
         };
+        let details = if let Some(link) = &item.link {
+            format!("{required_by} | Link: {link}")
+        } else if let Some(search) = &item.search_link {
+            format!("{required_by} | Link: none | Search: {search}")
+        } else {
+            format!("{required_by} | Link: none")
+        };
         let required_line = Line::from(Span::styled(
-            truncate_text(&required_by, list_width),
+            truncate_text(&details, list_width),
             Style::default().fg(theme.muted),
         ));
-        items.push(ListItem::new(vec![label_line, required_line]));
+        items.push(ListItem::new(vec![label_line, uuid_line, required_line]));
     }
 
     let highlight_style = Style::default()
@@ -3073,7 +3047,7 @@ fn draw_dependency_queue(frame: &mut Frame<'_>, app: &App, theme: &Theme) {
 
     let mut state = ListState::default();
     let total_items = queue.items.len();
-    let item_height = 2usize;
+    let item_height = 3usize;
     let view_items = (list_area.height as usize / item_height).max(1);
     let mut offset = 0usize;
     if total_items > view_items {
@@ -3127,20 +3101,11 @@ fn draw_dependency_queue(frame: &mut Frame<'_>, app: &App, theme: &Theme) {
         Span::styled("↑/↓", key_style),
         Span::styled(" Move  ", text_style),
         Span::styled("[Enter]", key_style),
-        Span::styled(" Open link/folder  ", text_style),
-        Span::styled("[D]", key_style),
-        Span::styled(" Downloads  ", text_style),
+        Span::styled(" Open link/search  ", text_style),
         Span::styled("[C]", key_style),
-        Span::styled(" Copy id", text_style),
+        Span::styled(" Copy link/id", text_style),
     ]);
-    let mut footer_line_two = vec![];
-    if app.app_config.offer_dependency_downloads {
-        footer_line_two.extend([
-            Span::styled("[Y]", key_style),
-            Span::styled(" Watch downloads  ", text_style),
-        ]);
-    }
-    footer_line_two.extend([
+    let footer_line_two = vec![
         Span::styled("[I]", key_style),
         Span::styled(" Skip  ", text_style),
         Span::styled("[G]", key_style),
@@ -3154,7 +3119,7 @@ fn draw_dependency_queue(frame: &mut Frame<'_>, app: &App, theme: &Theme) {
         ),
         Span::styled("[Esc]", key_style),
         Span::styled(" Cancel", text_style),
-    ]);
+    ];
     let footer_line_two = Line::from(footer_line_two);
     let footer_widget = Paragraph::new(vec![footer_line_one, footer_line_two])
         .style(Style::default().bg(theme.overlay_panel_bg))
@@ -5765,15 +5730,7 @@ fn help_sections() -> Vec<HelpSection> {
                 },
                 LegendRow {
                     key: "Enter".to_string(),
-                    action: "Open link/folder".to_string(),
-                },
-                LegendRow {
-                    key: "D".to_string(),
-                    action: "Open downloads folder".to_string(),
-                },
-                LegendRow {
-                    key: "Y".to_string(),
-                    action: "Watch downloads".to_string(),
+                    action: "Open link/search".to_string(),
                 },
                 LegendRow {
                     key: "I".to_string(),
@@ -5785,7 +5742,7 @@ fn help_sections() -> Vec<HelpSection> {
                 },
                 LegendRow {
                     key: "C".to_string(),
-                    action: "Copy dependency id".to_string(),
+                    action: "Copy link or id".to_string(),
                 },
                 LegendRow {
                     key: "Esc".to_string(),

@@ -12,6 +12,7 @@ use crate::{
     metadata, native_pak, smart_rank, update,
 };
 use anyhow::{Context, Result};
+use arboard::Clipboard;
 use directories::BaseDirs;
 use serde::{Deserialize, Serialize};
 use std::{
@@ -133,6 +134,7 @@ pub enum DialogKind {
     },
     CancelImport,
     ImportSummary,
+    CopyDependencySearchLink { link: String },
 }
 
 #[derive(Debug, Clone)]
@@ -157,21 +159,19 @@ pub enum DependencyStatus {
 #[derive(Debug, Clone)]
 pub struct DependencyItem {
     pub label: String,
+    pub display_label: String,
+    pub uuid: Option<String>,
     pub required_by: Vec<String>,
     pub status: DependencyStatus,
     pub link: Option<String>,
-    pub matched_path: Option<PathBuf>,
-    pub last_size: Option<u64>,
-    pub stable_ticks: u8,
-    pub match_keys: Vec<String>,
+    pub search_link: Option<String>,
+    pub search_label: String,
 }
 
 #[derive(Debug, Clone)]
 pub struct DependencyQueue {
     pub items: Vec<DependencyItem>,
     pub selected: usize,
-    pub downloads_dir: PathBuf,
-    pub last_scan: Instant,
 }
 
 #[derive(Debug, Clone)]
@@ -2819,21 +2819,6 @@ impl App {
         queue.selected = next as usize;
     }
 
-    pub fn dependency_queue_mark_waiting(&mut self) {
-        if !self.app_config.offer_dependency_downloads {
-            self.status = "Dependency downloads disabled in settings".to_string();
-            return;
-        }
-        let Some(item) = self.dependency_queue_selected_mut() else {
-            return;
-        };
-        if item.status == DependencyStatus::Downloaded {
-            return;
-        }
-        item.status = DependencyStatus::Waiting;
-        self.status = format!("Waiting for download: {}", item.label);
-    }
-
     pub fn dependency_queue_ignore(&mut self) {
         let Some(item) = self.dependency_queue_selected_mut() else {
             return;
@@ -2856,18 +2841,103 @@ impl App {
         self.status = "Dependency check canceled".to_string();
     }
 
-    pub fn dependency_queue_link(&self) -> Option<String> {
-        self.dependency_queue_selected()
-            .and_then(|item| item.link.clone())
-    }
-
-    pub fn dependency_queue_label(&self) -> Option<String> {
-        self.dependency_queue_selected()
-            .map(|item| item.label.clone())
-    }
-
     pub fn dependency_queue(&self) -> Option<&DependencyQueue> {
         self.dependency_queue.as_ref()
+    }
+
+    pub fn dependency_queue_open_selected(&mut self) {
+        let Some((link, search, label)) = self
+            .dependency_queue_selected()
+            .map(|item| (item.link.clone(), item.search_link.clone(), item.search_label.clone()))
+        else {
+            return;
+        };
+        if let Some(link) = link {
+            self.open_link(&link);
+            return;
+        }
+        if let Some(search) = search {
+            self.open_link(&search);
+            if label == "Unknown dependency" {
+                self.maybe_prompt_copy_search_link(&search, &label);
+            }
+            return;
+        }
+        self.status = "No links available".to_string();
+        self.set_toast("No links available", ToastLevel::Warn, Duration::from_secs(2));
+    }
+
+    pub fn dependency_queue_copy_selected(&mut self) {
+        let Some((link, search, label, uuid, raw)) = self.dependency_queue_selected().map(|item| {
+            (
+                item.link.clone(),
+                item.search_link.clone(),
+                item.search_label.clone(),
+                item.uuid.clone(),
+                item.label.clone(),
+            )
+        }) else {
+            return;
+        };
+        if let Some(link) = link {
+            if self.copy_to_clipboard(&link) {
+                self.status = "Link copied".to_string();
+            }
+            return;
+        }
+        if let Some(search) = search {
+            self.maybe_prompt_copy_search_link(&search, &label);
+            return;
+        }
+        if let Some(uuid) = uuid {
+            if self.copy_to_clipboard(&uuid) {
+                self.status = "Dependency id copied".to_string();
+            }
+            return;
+        }
+        if self.copy_to_clipboard(&raw) {
+            self.status = "Dependency id copied".to_string();
+        }
+    }
+
+    fn maybe_prompt_copy_search_link(&mut self, link: &str, label: &str) {
+        match self.app_config.dependency_search_copy_preference {
+            Some(true) => {
+                if self.copy_to_clipboard(link) {
+                    self.status = "Search link copied".to_string();
+                }
+            }
+            Some(false) => {
+                self.status = "Search link available".to_string();
+            }
+            None => {
+                if self.dialog.is_some() {
+                    return;
+                }
+                let display_label = if label.trim().is_empty() {
+                    "dependency"
+                } else {
+                    label
+                };
+                let message = format!(
+                    "No direct link found for \"{display_label}\".\nCopy Nexus search link to clipboard?"
+                );
+                self.open_dialog(Dialog {
+                    title: "Copy Search Link".to_string(),
+                    message,
+                    yes_label: "Copy".to_string(),
+                    no_label: "Skip".to_string(),
+                    choice: DialogChoice::No,
+                    kind: DialogKind::CopyDependencySearchLink {
+                        link: link.to_string(),
+                    },
+                    toggle: Some(DialogToggle {
+                        label: "Remember my choice".to_string(),
+                        checked: false,
+                    }),
+                });
+            }
+        }
     }
 
     fn open_external(&mut self, target: &str, label: &str) {
@@ -2905,20 +2975,28 @@ impl App {
         }
     }
 
+    fn copy_to_clipboard(&mut self, text: &str) -> bool {
+        let mut clipboard = match Clipboard::new() {
+            Ok(clipboard) => clipboard,
+            Err(err) => {
+                self.status = format!("Clipboard unavailable: {err}");
+                self.log_warn(format!("Clipboard unavailable: {err}"));
+                return false;
+            }
+        };
+        if let Err(err) = clipboard.set_text(text.to_string()) {
+            self.status = format!("Clipboard copy failed: {err}");
+            self.log_warn(format!("Clipboard copy failed: {err}"));
+            return false;
+        }
+        true
+    }
+
     pub fn open_link(&mut self, link: &str) {
         if link.trim().is_empty() {
             return;
         }
         self.open_external(link, "link");
-    }
-
-    pub fn open_downloads_dir(&mut self) {
-        let path = self.app_config.downloads_dir.display().to_string();
-        if path.trim().is_empty() {
-            self.status = "Downloads folder not set".to_string();
-            return;
-        }
-        self.open_external(&path, "downloads folder");
     }
 
     fn block_mod_changes(&mut self, action: &str) -> bool {
@@ -3423,7 +3501,7 @@ impl App {
             }
         }
 
-        self.poll_dependency_downloads();
+        // Manual dependency handling: no background download watching.
 
         if self.import_active.is_none() {
             self.process_next_import_batch();
@@ -4233,16 +4311,19 @@ impl App {
                     continue;
                 }
                 let entry = missing.entry(dep.clone()).or_insert_with(|| {
-                    let label = dep.clone();
+                    let display_label = dependency_display_label(&dep);
+                    let uuid = dependency_uuid(&dep);
+                    let search_label = dependency_search_label(&display_label, &uuid, &dep);
+                    let search_link = dependency_search_link(&search_label);
                     DependencyItem {
-                        label,
+                        label: dep.clone(),
+                        display_label,
+                        uuid,
                         required_by: Vec::new(),
                         status: DependencyStatus::Missing,
                         link: None,
-                        matched_path: None,
-                        last_size: None,
-                        stable_ticks: 0,
-                        match_keys: dependency_match_keys(&dep),
+                        search_link,
+                        search_label,
                     }
                 });
                 entry.required_by.push(required_by.clone());
@@ -4259,12 +4340,7 @@ impl App {
             item.required_by.dedup();
         }
         items.sort_by(|a, b| a.label.cmp(&b.label));
-        Some(DependencyQueue {
-            items,
-            selected: 0,
-            downloads_dir: self.app_config.downloads_dir.clone(),
-            last_scan: Instant::now(),
-        })
+        Some(DependencyQueue { items, selected: 0 })
     }
 
     fn build_dependency_queue_for_mods(&self, mods: &[ModEntry]) -> Option<DependencyQueue> {
@@ -4282,16 +4358,19 @@ impl App {
                     continue;
                 }
                 let entry = missing.entry(dep.clone()).or_insert_with(|| {
-                    let label = dep.clone();
+                    let display_label = dependency_display_label(&dep);
+                    let uuid = dependency_uuid(&dep);
+                    let search_label = dependency_search_label(&display_label, &uuid, &dep);
+                    let search_link = dependency_search_link(&search_label);
                     DependencyItem {
-                        label,
+                        label: dep.clone(),
+                        display_label,
+                        uuid,
                         required_by: Vec::new(),
                         status: DependencyStatus::Missing,
                         link: None,
-                        matched_path: None,
-                        last_size: None,
-                        stable_ticks: 0,
-                        match_keys: dependency_match_keys(&dep),
+                        search_link,
+                        search_label,
                     }
                 });
                 entry.required_by.push(required_by.clone());
@@ -4308,12 +4387,7 @@ impl App {
             item.required_by.dedup();
         }
         items.sort_by(|a, b| a.label.cmp(&b.label));
-        Some(DependencyQueue {
-            items,
-            selected: 0,
-            downloads_dir: self.app_config.downloads_dir.clone(),
-            last_scan: Instant::now(),
-        })
+        Some(DependencyQueue { items, selected: 0 })
     }
 
     fn collect_mod_dependencies(&self, mod_entry: &ModEntry) -> Vec<String> {
@@ -4510,94 +4584,6 @@ impl App {
         changed
     }
 
-    fn poll_dependency_downloads(&mut self) {
-        let mut detected = Vec::new();
-        {
-            let Some(queue) = self.dependency_queue.as_mut() else {
-                return;
-            };
-
-            if queue.last_scan.elapsed() < Duration::from_millis(400) {
-                return;
-            }
-            queue.last_scan = Instant::now();
-
-            let entries = match fs::read_dir(&queue.downloads_dir) {
-                Ok(entries) => entries,
-                Err(err) => {
-                    self.status = format!("Downloads folder unavailable: {err}");
-                    self.log_warn(format!("Downloads folder unavailable: {err}"));
-                    return;
-                }
-            };
-
-            let mut candidates = Vec::new();
-            for entry in entries.flatten() {
-                let path = entry.path();
-                if !path.is_file() {
-                    continue;
-                }
-                let name = path
-                    .file_name()
-                    .and_then(|name| name.to_str())
-                    .unwrap_or("")
-                    .to_string();
-                if is_partial_download(&name) {
-                    continue;
-                }
-                let metadata = match fs::metadata(&path) {
-                    Ok(meta) => meta,
-                    Err(_) => continue,
-                };
-                let size = metadata.len();
-                candidates.push((path, normalize_label(&name), size));
-            }
-
-            for item in &mut queue.items {
-                if item.status != DependencyStatus::Waiting {
-                    continue;
-                }
-                if item.matched_path.is_some() {
-                    continue;
-                }
-                let mut matched: Option<(PathBuf, u64)> = None;
-                for (path, normalized, size) in &candidates {
-                    if item
-                        .match_keys
-                        .iter()
-                        .any(|key| !key.is_empty() && normalized.contains(key))
-                    {
-                        matched = Some((path.clone(), *size));
-                        break;
-                    }
-                }
-                let Some((path, size)) = matched else {
-                    continue;
-                };
-                if let Some(previous) = item.last_size {
-                    if previous == size {
-                        item.stable_ticks = item.stable_ticks.saturating_add(1);
-                    } else {
-                        item.stable_ticks = 0;
-                    }
-                }
-                item.last_size = Some(size);
-                if item.stable_ticks >= 2 {
-                    item.status = DependencyStatus::Downloaded;
-                    item.matched_path = Some(path.clone());
-                    detected.push(item.label.clone());
-                }
-            }
-        }
-
-        if let Some(label) = detected.last() {
-            self.status = format!("Dependency ready: {}", label);
-        }
-        for label in detected {
-            self.log_info(format!("Dependency download detected: {}", label));
-        }
-    }
-
     fn resume_pending_import_batch(&mut self) {
         if self.dependency_queue.is_some() {
             return;
@@ -4635,23 +4621,9 @@ impl App {
             return;
         }
 
-        let mut paths = Vec::new();
-        for item in queue.items.drain(..) {
-            if item.status == DependencyStatus::Downloaded {
-                if let Some(path) = item.matched_path {
-                    paths.push(path);
-                }
-            }
-        }
+        queue.items.clear();
 
-        for path in paths.into_iter().rev() {
-            self.import_queue.push_front(path);
-        }
-
-        if !self.import_queue.is_empty() {
-            self.status = "Continuing import".to_string();
-            self.start_next_import();
-        } else if self.pending_dependency_enable.is_some() {
+        if self.pending_dependency_enable.is_some() {
             self.apply_pending_dependency_enable();
         }
     }
@@ -5045,6 +5017,22 @@ impl App {
                         .unwrap_or(false);
                     self.dependency_queue = None;
                     self.cancel_pending_import(keep_files);
+                }
+            }
+            DialogKind::CopyDependencySearchLink { link } => {
+                if let Some(toggle) = dialog.toggle {
+                    if toggle.checked {
+                        self.app_config.dependency_search_copy_preference =
+                            Some(matches!(choice, DialogChoice::Yes));
+                        let _ = self.app_config.save();
+                    }
+                }
+                if matches!(choice, DialogChoice::Yes) {
+                    if self.copy_to_clipboard(&link) {
+                        self.status = "Search link copied".to_string();
+                    }
+                } else {
+                    self.status = "Search link skipped".to_string();
                 }
             }
             DialogKind::ImportSummary => {}
@@ -6710,6 +6698,71 @@ fn build_dependent_message(dependents: &[DependentMod]) -> String {
     lines.join("\n")
 }
 
+fn dependency_display_label(value: &str) -> String {
+    let uuid = dependency_uuid(value);
+    let mut base = value.to_string();
+    if let Some(uuid) = uuid.as_deref() {
+        if let Some(index) = base.find(uuid) {
+            base.truncate(index);
+        }
+    }
+    let cleaned = base
+        .replace('_', " ")
+        .replace('-', " ")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    let cleaned = cleaned.trim_matches(|ch: char| ch == '.' || ch == '_').to_string();
+    if cleaned.is_empty() {
+        "Unknown dependency".to_string()
+    } else {
+        cleaned
+    }
+}
+
+fn dependency_uuid(value: &str) -> Option<String> {
+    extract_uuid_candidates(value).into_iter().next()
+}
+
+fn dependency_search_label(display_label: &str, uuid: &Option<String>, raw: &str) -> String {
+    if display_label != "Unknown dependency" {
+        return display_label.to_string();
+    }
+    if let Some(uuid) = uuid.as_ref() {
+        return uuid.clone();
+    }
+    raw.to_string()
+}
+
+fn dependency_search_link(query: &str) -> Option<String> {
+    let query = query.trim();
+    if query.is_empty() {
+        return None;
+    }
+    let encoded = encode_query(query);
+    Some(format!(
+        "https://www.nexusmods.com/baldursgate3/search/?gsearch={encoded}&gsearchtype=mods"
+    ))
+}
+
+fn encode_query(value: &str) -> String {
+    let mut out = String::new();
+    for ch in value.chars() {
+        if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' {
+            out.push(ch);
+        } else if ch == ' ' {
+            out.push('+');
+        } else {
+            let mut buf = [0u8; 4];
+            for byte in ch.encode_utf8(&mut buf).as_bytes() {
+                out.push('%');
+                out.push_str(&format!("{:02X}", byte));
+            }
+        }
+    }
+    out
+}
+
 fn dependency_match_keys(value: &str) -> Vec<String> {
     let mut keys = Vec::new();
     let normalized = normalize_label(value);
@@ -6897,14 +6950,6 @@ fn extract_timestamp(label: &str) -> Option<u64> {
     }
 
     best
-}
-
-fn is_partial_download(name: &str) -> bool {
-    let lower = name.to_ascii_lowercase();
-    lower.ends_with(".part")
-        || lower.ends_with(".crdownload")
-        || lower.ends_with(".tmp")
-        || lower.ends_with(".download")
 }
 
 fn mod_version_stamp(entry: &ModEntry) -> Option<u64> {

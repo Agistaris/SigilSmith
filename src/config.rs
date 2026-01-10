@@ -17,6 +17,8 @@ pub struct AppConfig {
     pub offer_dependency_downloads: bool,
     #[serde(default = "default_true")]
     pub warn_missing_dependencies: bool,
+    #[serde(default)]
+    pub dependency_search_copy_preference: Option<bool>,
 }
 
 impl AppConfig {
@@ -41,6 +43,7 @@ impl AppConfig {
             downloads_dir: default_downloads_dir(),
             offer_dependency_downloads: true,
             warn_missing_dependencies: true,
+            dependency_search_copy_preference: None,
         };
         config.save()?;
         Ok(config)
