@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+## 0.5.1
+
+- CLI import now accepts multiple paths per `--import`, with `--deploy`/`--no-deploy` and standard verbosity flags (`-v/-vv/-vvv`, `--verbosity`).
+- Batch import support for directories/archives containing multiple mods, including nested archives and top-level mod folders.
+- Import progress overlay with hazy background and center gauge, plus a post-import failure summary dialog.
+- Duplicate import prompts now default to newer releases and offer an “apply to all” toggle.
+- Dependency queue for missing requirements, with downloads folder setup and optional warnings.
+
 ## 0.5.0
 
 - Native mod entries resolve .pak filenames (including spaces) and stop overwriting Created dates when metadata is missing.

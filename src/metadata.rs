@@ -34,6 +34,7 @@ pub struct JsonModInfo {
     pub folder: Option<String>,
     pub name: Option<String>,
     pub created_at: Option<i64>,
+    pub dependencies: Vec<String>,
 }
 
 pub fn parse_meta_lsx(bytes: &[u8]) -> ModMeta {
@@ -259,9 +260,7 @@ fn parse_json_mod(value: &Value) -> Option<JsonModInfo> {
         .or_else(|| obj.get("created"))
         .and_then(|v| v.as_str())
         .and_then(parse_created_at);
-    if created_at.is_none() {
-        return None;
-    }
+    let dependencies = parse_json_dependencies(obj);
     Some(JsonModInfo {
         uuid: obj
             .get("UUID")
@@ -276,7 +275,46 @@ fn parse_json_mod(value: &Value) -> Option<JsonModInfo> {
             .and_then(|v| v.as_str())
             .map(|s| s.to_string()),
         created_at,
+        dependencies,
     })
+}
+
+fn parse_json_dependencies(obj: &serde_json::Map<String, Value>) -> Vec<String> {
+    let mut out = Vec::new();
+    for key in ["Dependencies", "dependencies", "RequiredMods", "requiredMods"] {
+        if let Some(value) = obj.get(key) {
+            out.extend(parse_json_dependency_list(value));
+        }
+    }
+    out.sort();
+    out.dedup();
+    out
+}
+
+fn parse_json_dependency_list(value: &Value) -> Vec<String> {
+    let mut out = Vec::new();
+    let Some(entries) = value.as_array() else {
+        return out;
+    };
+    for entry in entries {
+        if let Some(value) = entry.as_str() {
+            if !value.trim().is_empty() {
+                out.push(value.trim().to_string());
+            }
+            continue;
+        }
+        let Some(obj) = entry.as_object() else {
+            continue;
+        };
+        for key in ["UUID", "Uuid", "ModUUID", "mod_uuid", "uuid"] {
+            if let Some(value) = obj.get(key).and_then(|value| value.as_str()) {
+                if !value.trim().is_empty() {
+                    out.push(value.trim().to_string());
+                }
+            }
+        }
+    }
+    out
 }
 
 pub fn parse_created_at_value(value: &str) -> Option<i64> {

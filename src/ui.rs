@@ -1,8 +1,8 @@
 use crate::{
     app::{
-        expand_tilde, App, DialogChoice, DialogKind, ExplorerItem, ExplorerItemKind, Focus,
-        InputMode, InputPurpose, LogLevel, ModSort, ModSortColumn, PathBrowser,
-        PathBrowserEntryKind, PathBrowserFocus, SetupStep, ToastLevel, UpdateStatus,
+        expand_tilde, App, DependencyStatus, DialogChoice, DialogKind, ExplorerItem,
+        ExplorerItemKind, Focus, InputMode, InputPurpose, LogLevel, ModSort, ModSortColumn,
+        PathBrowser, PathBrowserEntryKind, PathBrowserFocus, SetupStep, ToastLevel, UpdateStatus,
     },
     library::{InstallTarget, ModEntry, TargetKind},
 };
@@ -19,8 +19,8 @@ use ratatui::{
     prelude::*,
     text::{Line, Span},
     widgets::{
-        Block, BorderType, Borders, Cell, Clear, List, ListItem, ListState, Padding, Paragraph,
-        Row, Scrollbar, ScrollbarOrientation, ScrollbarState, Table, TableState,
+        Block, BorderType, Borders, Cell, Clear, Gauge, List, ListItem, ListState, Padding,
+        Paragraph, Row, Scrollbar, ScrollbarOrientation, ScrollbarState, Table, TableState,
     },
 };
 use std::{
@@ -59,6 +59,10 @@ struct Theme {
     log_bg: Color,
     subpanel_bg: Color,
     swap_bg: Color,
+    overlay_bg: Color,
+    overlay_panel_bg: Color,
+    overlay_border: Color,
+    overlay_bar: Color,
 }
 
 impl Theme {
@@ -79,6 +83,10 @@ impl Theme {
             log_bg: Color::Rgb(13, 18, 26),
             subpanel_bg: Color::Rgb(13, 18, 26),
             swap_bg: Color::Rgb(20, 90, 74),
+            overlay_bg: Color::Rgb(16, 30, 48),
+            overlay_panel_bg: Color::Rgb(12, 20, 32),
+            overlay_border: Color::Rgb(90, 140, 190),
+            overlay_bar: Color::Rgb(120, 198, 255),
         }
     }
 
@@ -181,6 +189,9 @@ fn run_loop(terminal: &mut Terminal<impl Backend>, app: &mut App) -> Result<()> 
 }
 
 fn handle_key(app: &mut App, key: KeyEvent) -> Result<()> {
+    if app.dependency_queue_active() {
+        return handle_dependency_queue(app, key);
+    }
     if app.help_open {
         return handle_help_mode(app, key);
     }
@@ -323,11 +334,54 @@ fn handle_smart_rank_preview(app: &mut App, key: KeyEvent) -> Result<()> {
     Ok(())
 }
 
+fn handle_dependency_queue(app: &mut App, key: KeyEvent) -> Result<()> {
+    match key.code {
+        KeyCode::Up | KeyCode::Char('k') | KeyCode::Char('K') => app.dependency_queue_move(-1),
+        KeyCode::Down | KeyCode::Char('j') | KeyCode::Char('J') => app.dependency_queue_move(1),
+        KeyCode::Enter => {
+            if let Some(link) = app.dependency_queue_link() {
+                app.open_link(&link);
+            } else {
+                app.open_downloads_dir();
+            }
+        }
+        KeyCode::Char('y') | KeyCode::Char('Y') => {
+            app.dependency_queue_mark_waiting();
+        }
+        KeyCode::Char('i') | KeyCode::Char('I') => {
+            app.dependency_queue_ignore();
+        }
+        KeyCode::Char('d') | KeyCode::Char('D') => {
+            app.open_downloads_dir();
+        }
+        KeyCode::Char('g') | KeyCode::Char('G') => {
+            app.dependency_queue_continue();
+        }
+        KeyCode::Char('c') | KeyCode::Char('C') => {
+            if let Some(link) = app.dependency_queue_link() {
+                if copy_to_clipboard(app, &link) {
+                    app.status = "Link copied".to_string();
+                }
+            } else if let Some(label) = app.dependency_queue_label() {
+                if copy_to_clipboard(app, &label) {
+                    app.status = "Dependency id copied".to_string();
+                }
+            }
+        }
+        KeyCode::Esc => app.dependency_queue_cancel(),
+        _ => {}
+    }
+    Ok(())
+}
+
 #[derive(Debug, Clone, Copy)]
 enum SettingsItemKind {
     ActionSetupPaths,
+    ActionSetupDownloads,
     ToggleProfileDelete,
     ToggleModDelete,
+    ToggleDependencyDownloads,
+    ToggleDependencyWarnings,
     ActionSmartRank,
     ActionCheckUpdates,
 }
@@ -352,8 +406,23 @@ fn settings_items(app: &App) -> Vec<SettingsItem> {
             checked: Some(app.app_config.confirm_mod_delete),
         },
         SettingsItem {
+            label: "Offer dependency downloads".to_string(),
+            kind: SettingsItemKind::ToggleDependencyDownloads,
+            checked: Some(app.app_config.offer_dependency_downloads),
+        },
+        SettingsItem {
+            label: "Warn on missing dependencies".to_string(),
+            kind: SettingsItemKind::ToggleDependencyWarnings,
+            checked: Some(app.app_config.warn_missing_dependencies),
+        },
+        SettingsItem {
             label: "Configure game paths".to_string(),
             kind: SettingsItemKind::ActionSetupPaths,
+            checked: None,
+        },
+        SettingsItem {
+            label: "Configure downloads folder".to_string(),
+            kind: SettingsItemKind::ActionSetupDownloads,
             checked: None,
         },
         SettingsItem {
@@ -406,6 +475,10 @@ fn handle_settings_menu(app: &mut App, key: KeyEvent) -> Result<()> {
                         app.close_settings_menu();
                         app.enter_setup_game_root();
                     }
+                    SettingsItemKind::ActionSetupDownloads => {
+                        app.close_settings_menu();
+                        app.enter_setup_downloads_dir();
+                    }
                     SettingsItemKind::ToggleProfileDelete => {
                         if let Err(err) = app.toggle_confirm_profile_delete() {
                             app.status = format!("Settings update failed: {err}");
@@ -414,6 +487,18 @@ fn handle_settings_menu(app: &mut App, key: KeyEvent) -> Result<()> {
                     }
                     SettingsItemKind::ToggleModDelete => {
                         if let Err(err) = app.toggle_confirm_mod_delete() {
+                            app.status = format!("Settings update failed: {err}");
+                            app.log_error(format!("Settings update failed: {err}"));
+                        }
+                    }
+                    SettingsItemKind::ToggleDependencyDownloads => {
+                        if let Err(err) = app.toggle_dependency_downloads() {
+                            app.status = format!("Settings update failed: {err}");
+                            app.log_error(format!("Settings update failed: {err}"));
+                        }
+                    }
+                    SettingsItemKind::ToggleDependencyWarnings => {
+                        if let Err(err) = app.toggle_dependency_warnings() {
                             app.status = format!("Settings update failed: {err}");
                             app.log_error(format!("Settings update failed: {err}"));
                         }
@@ -695,6 +780,7 @@ fn handle_browser_mode(app: &mut App, key: KeyEvent, browser: &mut PathBrowser) 
     let invalid_hint = match browser.step {
         SetupStep::GameRoot => "Not a BG3 install root (needs Data/ + bin/).",
         SetupStep::LarianDir => "Not a Larian data dir (needs PlayerProfiles/).",
+        SetupStep::DownloadsDir => "Not a folder.",
     };
     let len = browser.entries.len();
     match browser.focus {
@@ -855,6 +941,23 @@ fn paste_clipboard_into(app: &mut App, target: &mut String) -> bool {
         return false;
     }
     target.push_str(&cleaned);
+    true
+}
+
+fn copy_to_clipboard(app: &mut App, text: &str) -> bool {
+    let mut clipboard = match Clipboard::new() {
+        Ok(clipboard) => clipboard,
+        Err(err) => {
+            app.status = format!("Clipboard unavailable: {err}");
+            app.log_warn(format!("Clipboard unavailable: {err}"));
+            return false;
+        }
+    };
+    if let Err(err) = clipboard.set_text(text.to_string()) {
+        app.status = format!("Clipboard copy failed: {err}");
+        app.log_warn(format!("Clipboard copy failed: {err}"));
+        return false;
+    }
     true
 }
 
@@ -1888,6 +1991,9 @@ fn draw(frame: &mut Frame<'_>, app: &mut App) {
         .alignment(Alignment::Center);
     frame.render_widget(status_widget, status_inner);
 
+    if app.dependency_queue_active() {
+        draw_dependency_queue(frame, app, &theme);
+    }
     if app.dialog.is_some() {
         draw_dialog(frame, app, &theme);
     }
@@ -1904,6 +2010,7 @@ fn draw(frame: &mut Frame<'_>, app: &mut App) {
     if app.help_open {
         draw_help_menu(frame, app, &theme);
     }
+    draw_import_overlay(frame, app, &theme);
 }
 
 fn current_filter_value(app: &App) -> (String, bool) {
@@ -2740,6 +2847,244 @@ fn draw_help_menu(frame: &mut Frame<'_>, app: &mut App, theme: &Theme) {
     }
 }
 
+fn dependency_status_label(status: DependencyStatus) -> &'static str {
+    match status {
+        DependencyStatus::Missing => "Missing",
+        DependencyStatus::Waiting => "Waiting",
+        DependencyStatus::Downloaded => "Ready",
+        DependencyStatus::Skipped => "Skipped",
+    }
+}
+
+fn dependency_status_style(theme: &Theme, status: DependencyStatus) -> Style {
+    match status {
+        DependencyStatus::Missing => Style::default().fg(theme.warning),
+        DependencyStatus::Waiting => Style::default().fg(theme.accent),
+        DependencyStatus::Downloaded => Style::default().fg(theme.success),
+        DependencyStatus::Skipped => Style::default().fg(theme.muted),
+    }
+}
+
+fn draw_dependency_queue(frame: &mut Frame<'_>, app: &App, theme: &Theme) {
+    let Some(queue) = app.dependency_queue() else {
+        return;
+    };
+
+    let area = frame.size();
+    frame.render_widget(Clear, area);
+    frame.render_widget(
+        Block::default().style(Style::default().bg(theme.overlay_bg)),
+        area,
+    );
+
+    let max_width = area.width.saturating_sub(4).max(1);
+    let width = max_width.clamp(60, 112);
+    let max_height = area.height.saturating_sub(4).max(1);
+    let height = max_height.clamp(16, 26);
+    let (outer_area, modal) = padded_modal(area, width, height, 1);
+
+    frame.render_widget(Clear, outer_area);
+    frame.render_widget(
+        Block::default().style(Style::default().bg(theme.overlay_bg)),
+        outer_area,
+    );
+    let panel_block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(theme.overlay_border))
+        .style(Style::default().bg(theme.overlay_panel_bg))
+        .title(Span::styled(
+            "Missing dependencies",
+            Style::default()
+                .fg(theme.accent)
+                .add_modifier(Modifier::BOLD),
+        ));
+    let inner = panel_block.inner(modal);
+    frame.render_widget(panel_block, modal);
+
+    let total = queue.items.len();
+    let missing = queue
+        .items
+        .iter()
+        .filter(|item| item.status == DependencyStatus::Missing)
+        .count();
+    let waiting = queue
+        .items
+        .iter()
+        .filter(|item| item.status == DependencyStatus::Waiting)
+        .count();
+    let ready = queue
+        .items
+        .iter()
+        .filter(|item| item.status == DependencyStatus::Downloaded)
+        .count();
+    let skipped = queue
+        .items
+        .iter()
+        .filter(|item| item.status == DependencyStatus::Skipped)
+        .count();
+
+    let mut header_lines = Vec::new();
+    header_lines.push(Line::from(Span::styled(
+        "Resolve missing dependencies before import continues.",
+        Style::default().fg(theme.text),
+    )));
+    let summary = format!(
+        "Missing {missing} of {total} (Waiting {waiting}, Ready {ready}, Skipped {skipped})"
+    );
+    header_lines.push(Line::from(Span::styled(
+        truncate_text(&summary, inner.width as usize),
+        Style::default().fg(theme.muted),
+    )));
+    let downloads_label = format!(
+        "Downloads: {}",
+        queue.downloads_dir.display().to_string()
+    );
+    header_lines.push(Line::from(Span::styled(
+        truncate_text(&downloads_label, inner.width as usize),
+        Style::default().fg(theme.text),
+    )));
+    if !app.app_config.offer_dependency_downloads {
+        header_lines.push(Line::from(Span::styled(
+            "Dependency downloads are disabled in Settings.",
+            Style::default().fg(theme.warning),
+        )));
+    }
+
+    let header_height = header_lines.len() as u16 + 1;
+    let footer_height = 2u16;
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(header_height),
+            Constraint::Min(4),
+            Constraint::Length(footer_height),
+        ])
+        .split(inner);
+
+    let header_widget = Paragraph::new(header_lines)
+        .style(Style::default().bg(theme.overlay_panel_bg));
+    frame.render_widget(header_widget, chunks[0]);
+
+    let list_area = chunks[1];
+    let list_width = list_area.width as usize;
+    let mut items = Vec::new();
+    for item in &queue.items {
+        let status_label = dependency_status_label(item.status);
+        let status_text = format!("{status_label:<9}");
+        let status_style = dependency_status_style(theme, item.status);
+        let label_width = list_width.saturating_sub(status_text.chars().count() + 1);
+        let label_text = truncate_text(&item.label, label_width);
+        let label_line = Line::from(vec![
+            Span::styled(status_text, status_style),
+            Span::raw(" "),
+            Span::styled(label_text, Style::default().fg(theme.text)),
+        ]);
+        let required_by = if item.required_by.is_empty() {
+            "Required by: Unknown".to_string()
+        } else {
+            format!("Required by: {}", item.required_by.join(", "))
+        };
+        let required_line = Line::from(Span::styled(
+            truncate_text(&required_by, list_width),
+            Style::default().fg(theme.muted),
+        ));
+        items.push(ListItem::new(vec![label_line, required_line]));
+    }
+
+    let highlight_style = Style::default()
+        .bg(theme.accent_soft)
+        .fg(Color::Black)
+        .add_modifier(Modifier::BOLD);
+    let list = List::new(items)
+        .style(Style::default().bg(theme.overlay_panel_bg))
+        .highlight_style(highlight_style)
+        .highlight_symbol("");
+
+    let mut state = ListState::default();
+    let total_items = queue.items.len();
+    let item_height = 2usize;
+    let view_items = (list_area.height as usize / item_height).max(1);
+    let mut offset = 0usize;
+    if total_items > view_items {
+        if queue.selected >= view_items {
+            offset = queue.selected + 1 - view_items;
+        }
+        let max_offset = total_items.saturating_sub(view_items);
+        if offset > max_offset {
+            offset = max_offset;
+        }
+    }
+    if total_items > 0 {
+        let selected = queue.selected.saturating_sub(offset);
+        state.select(Some(selected));
+        *state.offset_mut() = offset;
+    }
+
+    let show_scroll = total_items > view_items;
+    let list_chunks = if show_scroll {
+        Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Min(1), Constraint::Length(1)])
+            .split(list_area)
+    } else {
+        Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Min(1), Constraint::Length(0)])
+            .split(list_area)
+    };
+    frame.render_stateful_widget(list, list_chunks[0], &mut state);
+
+    if show_scroll && list_chunks[1].width > 0 {
+        let scroll_len = total_items.saturating_sub(view_items).saturating_add(1);
+        let mut scroll_state =
+            ScrollbarState::new(scroll_len).position(offset).viewport_content_length(view_items);
+        let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
+            .track_symbol(Some("░"))
+            .thumb_symbol("▓")
+            .begin_symbol(Some("▲"))
+            .end_symbol(Some("▼"))
+            .track_style(Style::default().fg(theme.border))
+            .thumb_style(Style::default().fg(theme.accent));
+        frame.render_stateful_widget(scrollbar, list_chunks[1], &mut scroll_state);
+    }
+
+    let key_style = Style::default()
+        .fg(theme.accent)
+        .add_modifier(Modifier::BOLD);
+    let text_style = Style::default().fg(theme.muted);
+    let footer_line_one = Line::from(vec![
+        Span::styled("↑/↓", key_style),
+        Span::styled(" Move  ", text_style),
+        Span::styled("[Enter]", key_style),
+        Span::styled(" Open link/folder  ", text_style),
+        Span::styled("[D]", key_style),
+        Span::styled(" Downloads  ", text_style),
+        Span::styled("[C]", key_style),
+        Span::styled(" Copy id", text_style),
+    ]);
+    let mut footer_line_two = vec![];
+    if app.app_config.offer_dependency_downloads {
+        footer_line_two.extend([
+            Span::styled("[Y]", key_style),
+            Span::styled(" Watch downloads  ", text_style),
+        ]);
+    }
+    footer_line_two.extend([
+        Span::styled("[I]", key_style),
+        Span::styled(" Skip  ", text_style),
+        Span::styled("[G]", key_style),
+        Span::styled(" Continue  ", text_style),
+        Span::styled("[Esc]", key_style),
+        Span::styled(" Cancel", text_style),
+    ]);
+    let footer_line_two = Line::from(footer_line_two);
+    let footer_widget = Paragraph::new(vec![footer_line_one, footer_line_two])
+        .style(Style::default().bg(theme.overlay_panel_bg))
+        .alignment(Alignment::Left);
+    frame.render_widget(footer_widget, chunks[2]);
+}
+
 fn draw_path_browser(frame: &mut Frame<'_>, _app: &App, theme: &Theme, browser: &PathBrowser) {
     let area = frame.size();
     let width = (area.width.saturating_sub(4)).clamp(46, 86);
@@ -2753,6 +3098,7 @@ fn draw_path_browser(frame: &mut Frame<'_>, _app: &App, theme: &Theme, browser: 
     let title = match browser.step {
         SetupStep::GameRoot => "Select BG3 install root",
         SetupStep::LarianDir => "Select Larian data dir",
+        SetupStep::DownloadsDir => "Select downloads folder",
     };
     let block = Block::default()
         .borders(Borders::ALL)
@@ -2822,6 +3168,7 @@ fn draw_path_browser(frame: &mut Frame<'_>, _app: &App, theme: &Theme, browser: 
             " Larian data dir valid ",
             "Not a Larian data dir (needs PlayerProfiles/)",
         ),
+        SetupStep::DownloadsDir => (" Folder valid ", "Not a folder."),
     };
     let status_span = if selectable {
         Span::styled(
@@ -3386,6 +3733,7 @@ fn build_settings_menu_lines(app: &App, theme: &Theme, selected: usize) -> Vec<L
         };
         let row = match item.kind {
             SettingsItemKind::ActionSetupPaths
+            | SettingsItemKind::ActionSetupDownloads
             | SettingsItemKind::ActionSmartRank
             | SettingsItemKind::ActionCheckUpdates => vec![
                 Span::styled(prefix.to_string(), style),
@@ -3394,7 +3742,10 @@ fn build_settings_menu_lines(app: &App, theme: &Theme, selected: usize) -> Vec<L
                 Span::raw(" "),
                 Span::styled(item.label.to_string(), style),
             ],
-            SettingsItemKind::ToggleProfileDelete | SettingsItemKind::ToggleModDelete => {
+            SettingsItemKind::ToggleProfileDelete
+            | SettingsItemKind::ToggleModDelete
+            | SettingsItemKind::ToggleDependencyDownloads
+            | SettingsItemKind::ToggleDependencyWarnings => {
                 let marker = if item.checked.unwrap_or(false) {
                     "[x]"
                 } else {
@@ -3642,6 +3993,113 @@ fn draw_toast(frame: &mut Frame<'_>, app: &App, theme: &Theme, body_area: Rect) 
     }
 
     render_toast(frame, theme, body_area, &toast.message, toast.level);
+}
+
+fn draw_import_overlay(frame: &mut Frame<'_>, app: &App, theme: &Theme) {
+    if app.dialog.is_some() || !app.import_overlay_active() {
+        return;
+    }
+
+    let area = frame.size();
+    frame.render_widget(Clear, area);
+    frame.render_widget(
+        Block::default().style(Style::default().bg(theme.overlay_bg)),
+        area,
+    );
+
+    let progress = app.import_progress();
+    let label = progress
+        .map(|progress| progress.label.clone())
+        .unwrap_or_else(|| "Importing mods...".to_string());
+    let mut lines = Vec::new();
+    lines.push(Line::from(Span::styled(
+        "Importing Mods",
+        Style::default()
+            .fg(theme.accent)
+            .add_modifier(Modifier::BOLD),
+    )));
+    lines.push(Line::from(Span::styled(
+        format!("Source: {label}"),
+        Style::default().fg(theme.text),
+    )));
+    if let Some(progress) = progress {
+        lines.push(Line::from(Span::styled(
+            format!("Item {}/{}", progress.unit_index, progress.unit_count),
+            Style::default().fg(theme.muted),
+        )));
+        let stage_label = progress.stage.label();
+        let stage_line = if progress.stage_total > 1 {
+            format!(
+                "Stage: {} ({}/{})",
+                stage_label, progress.stage_current, progress.stage_total
+            )
+        } else {
+            format!("Stage: {}", stage_label)
+        };
+        lines.push(Line::from(Span::styled(
+            stage_line,
+            Style::default().fg(theme.text),
+        )));
+        if let Some(detail) = &progress.detail {
+            lines.push(Line::from(Span::styled(
+                detail.clone(),
+                Style::default().fg(theme.muted),
+            )));
+        }
+    }
+    if app.import_summary_pending() {
+        lines.push(Line::from(Span::styled(
+            "Failures will be summarized after import completes.",
+            Style::default().fg(theme.muted),
+        )));
+    }
+
+    let text_height = lines.len().max(1) as u16;
+    let width = area.width.saturating_sub(10).clamp(42, 78);
+    let height = (text_height + 4).min(area.height.saturating_sub(2)).max(9);
+    let x = area.x + (area.width.saturating_sub(width)) / 2;
+    let y = area.y + (area.height.saturating_sub(height)) / 2;
+    let panel_area = Rect::new(x, y, width, height);
+
+    frame.render_widget(Clear, panel_area);
+    let panel_block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(theme.overlay_border))
+        .style(Style::default().bg(theme.overlay_panel_bg));
+    frame.render_widget(panel_block, panel_area);
+
+    let inner = Rect::new(
+        panel_area.x + 2,
+        panel_area.y + 1,
+        panel_area.width.saturating_sub(4),
+        panel_area.height.saturating_sub(2),
+    );
+    let chunks = Layout::vertical([
+        Constraint::Length(text_height),
+        Constraint::Length(1),
+    ])
+    .split(inner);
+
+    let paragraph = Paragraph::new(lines)
+        .style(Style::default().fg(theme.text))
+        .alignment(Alignment::Left);
+    frame.render_widget(paragraph, chunks[0]);
+
+    let percent = progress
+        .map(|progress| (progress.overall_progress * 100.0).round() as u16)
+        .unwrap_or(0);
+    let gauge = Gauge::default()
+        .percent(percent.min(100))
+        .gauge_style(
+            Style::default()
+                .fg(theme.overlay_bar)
+                .bg(theme.overlay_panel_bg),
+        )
+        .label(Span::styled(
+            format!("{percent}%"),
+            Style::default().fg(theme.text),
+        ));
+    frame.render_widget(gauge, chunks[1]);
 }
 
 fn build_explorer_items(app: &App, theme: &Theme) -> Vec<ListItem<'static>> {
@@ -5163,6 +5621,43 @@ fn help_sections() -> Vec<HelpSection> {
                 LegendRow {
                     key: "Esc".to_string(),
                     action: "Cancel".to_string(),
+                },
+            ],
+        },
+        HelpSection {
+            title: "Dependencies",
+            rows: vec![
+                LegendRow {
+                    key: "↑/↓".to_string(),
+                    action: "Move selection".to_string(),
+                },
+                LegendRow {
+                    key: "Enter".to_string(),
+                    action: "Open link/folder".to_string(),
+                },
+                LegendRow {
+                    key: "D".to_string(),
+                    action: "Open downloads folder".to_string(),
+                },
+                LegendRow {
+                    key: "Y".to_string(),
+                    action: "Watch downloads".to_string(),
+                },
+                LegendRow {
+                    key: "I".to_string(),
+                    action: "Skip dependency".to_string(),
+                },
+                LegendRow {
+                    key: "G".to_string(),
+                    action: "Continue import".to_string(),
+                },
+                LegendRow {
+                    key: "C".to_string(),
+                    action: "Copy dependency id".to_string(),
+                },
+                LegendRow {
+                    key: "Esc".to_string(),
+                    action: "Cancel import".to_string(),
                 },
             ],
         },

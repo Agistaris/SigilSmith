@@ -1,6 +1,6 @@
 use crate::game::{self, GameId};
 use anyhow::{Context, Result};
-use directories::BaseDirs;
+use directories::{BaseDirs, UserDirs};
 use serde::{Deserialize, Serialize};
 use std::{fs, path::PathBuf};
 
@@ -11,6 +11,12 @@ pub struct AppConfig {
     pub confirm_profile_delete: bool,
     #[serde(default = "default_true")]
     pub confirm_mod_delete: bool,
+    #[serde(default = "default_downloads_dir")]
+    pub downloads_dir: PathBuf,
+    #[serde(default = "default_true")]
+    pub offer_dependency_downloads: bool,
+    #[serde(default = "default_true")]
+    pub warn_missing_dependencies: bool,
 }
 
 impl AppConfig {
@@ -32,6 +38,9 @@ impl AppConfig {
             active_game: GameId::default(),
             confirm_profile_delete: true,
             confirm_mod_delete: true,
+            downloads_dir: default_downloads_dir(),
+            offer_dependency_downloads: true,
+            warn_missing_dependencies: true,
         };
         config.save()?;
         Ok(config)
@@ -107,6 +116,17 @@ pub fn data_dir_for_game(game: GameId) -> Result<PathBuf> {
 
 fn default_true() -> bool {
     true
+}
+
+fn default_downloads_dir() -> PathBuf {
+    if let Some(user_dirs) = UserDirs::new() {
+        if let Some(path) = user_dirs.download_dir() {
+            return path.to_path_buf();
+        }
+    }
+    BaseDirs::new()
+        .map(|base| base.home_dir().to_path_buf())
+        .unwrap_or_else(|| PathBuf::from("/"))
 }
 
 fn base_data_dir() -> Result<PathBuf> {

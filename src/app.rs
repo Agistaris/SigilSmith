@@ -20,6 +20,7 @@ use std::{
     fs,
     io::{self, Write},
     path::PathBuf,
+    process::Command,
     sync::{
         mpsc::{self, Receiver, Sender, TryRecvError},
         Arc, Mutex,
@@ -63,6 +64,7 @@ pub enum InputMode {
 pub enum SetupStep {
     GameRoot,
     LarianDir,
+    DownloadsDir,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -128,6 +130,7 @@ pub enum DialogKind {
         resume_move_mode: bool,
         clear_filter: bool,
     },
+    CancelImport,
     ImportSummary,
 }
 
@@ -140,6 +143,34 @@ pub struct Dialog {
     pub choice: DialogChoice,
     pub kind: DialogKind,
     pub toggle: Option<DialogToggle>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DependencyStatus {
+    Missing,
+    Waiting,
+    Downloaded,
+    Skipped,
+}
+
+#[derive(Debug, Clone)]
+pub struct DependencyItem {
+    pub label: String,
+    pub required_by: Vec<String>,
+    pub status: DependencyStatus,
+    pub link: Option<String>,
+    pub matched_path: Option<PathBuf>,
+    pub last_size: Option<u64>,
+    pub stable_ticks: u8,
+    pub match_keys: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct DependencyQueue {
+    pub items: Vec<DependencyItem>,
+    pub selected: usize,
+    pub downloads_dir: PathBuf,
+    pub last_scan: Instant,
 }
 
 #[derive(Debug, Clone)]
@@ -436,6 +467,8 @@ pub struct App {
     import_tx: Sender<ImportMessage>,
     import_rx: Receiver<ImportMessage>,
     import_batches: VecDeque<importer::ImportBatch>,
+    pending_import_batch: Option<importer::ImportBatch>,
+    dependency_queue: Option<DependencyQueue>,
     import_failures: Vec<importer::ImportFailure>,
     import_progress: Option<importer::ImportProgress>,
     import_summary_pending: bool,
@@ -543,7 +576,20 @@ pub enum SmartRankMessage {
 impl App {
     pub fn initialize() -> Result<Self> {
         let mut setup_error = None;
-        let app_config = AppConfig::load_or_create()?;
+        let mut app_config = AppConfig::load_or_create()?;
+        if app_config.downloads_dir.as_os_str().is_empty() {
+            if let Some(user_dirs) = directories::UserDirs::new() {
+                if let Some(path) = user_dirs.download_dir() {
+                    app_config.downloads_dir = path.to_path_buf();
+                }
+            }
+            if app_config.downloads_dir.as_os_str().is_empty() {
+                app_config.downloads_dir = BaseDirs::new()
+                    .map(|base| base.home_dir().to_path_buf())
+                    .unwrap_or_else(|| PathBuf::from("/"));
+            }
+            let _ = app_config.save();
+        }
         let game_id = app_config.active_game;
         let mut config = GameConfig::load_or_create(game_id)?;
         if let Err(err) =
@@ -630,6 +676,8 @@ impl App {
             import_tx,
             import_rx,
             import_batches: VecDeque::new(),
+            pending_import_batch: None,
+            dependency_queue: None,
             import_failures: Vec::new(),
             import_progress: None,
             import_summary_pending: false,
@@ -916,6 +964,32 @@ impl App {
             "disabled"
         };
         self.status = format!("Confirm mod delete {state}");
+        Ok(())
+    }
+
+    pub fn toggle_dependency_downloads(&mut self) -> Result<()> {
+        self.app_config.offer_dependency_downloads =
+            !self.app_config.offer_dependency_downloads;
+        self.app_config.save()?;
+        let state = if self.app_config.offer_dependency_downloads {
+            "enabled"
+        } else {
+            "disabled"
+        };
+        self.status = format!("Dependency downloads {state}");
+        Ok(())
+    }
+
+    pub fn toggle_dependency_warnings(&mut self) -> Result<()> {
+        self.app_config.warn_missing_dependencies =
+            !self.app_config.warn_missing_dependencies;
+        self.app_config.save()?;
+        let state = if self.app_config.warn_missing_dependencies {
+            "enabled"
+        } else {
+            "disabled"
+        };
+        self.status = format!("Missing dependency warnings {state}");
         Ok(())
     }
 
@@ -1756,6 +1830,24 @@ impl App {
         });
     }
 
+    pub fn prompt_cancel_import(&mut self) {
+        if self.dialog.is_some() {
+            return;
+        }
+        self.open_dialog(Dialog {
+            title: "Cancel Import".to_string(),
+            message: "Cancel this import and return to the main view?".to_string(),
+            yes_label: "Cancel import".to_string(),
+            no_label: "Continue".to_string(),
+            choice: DialogChoice::No,
+            kind: DialogKind::CancelImport,
+            toggle: Some(DialogToggle {
+                label: "Keep imported files".to_string(),
+                checked: false,
+            }),
+        });
+    }
+
     pub fn delete_profile(&mut self, name: String) -> Result<()> {
         if self.library.profiles.len() <= 1 {
             self.status = "Cannot delete the last profile".to_string();
@@ -2229,6 +2321,7 @@ impl App {
         match step {
             SetupStep::GameRoot => self.enter_setup_game_root(),
             SetupStep::LarianDir => self.enter_setup_larian_dir(),
+            SetupStep::DownloadsDir => self.enter_setup_downloads_dir(),
         }
     }
 
@@ -2242,12 +2335,18 @@ impl App {
         self.open_path_browser(SetupStep::LarianDir);
     }
 
+    pub fn enter_setup_downloads_dir(&mut self) {
+        self.move_mode = false;
+        self.open_path_browser(SetupStep::DownloadsDir);
+    }
+
     fn open_path_browser(&mut self, step: SetupStep) {
         let current = self.path_browser_start(step);
         let entries = self.build_path_browser_entries(step, &current);
         let title = match step {
             SetupStep::GameRoot => "Select BG3 install root (Data/ + bin/)",
             SetupStep::LarianDir => "Select Larian data dir (PlayerProfiles/)",
+            SetupStep::DownloadsDir => "Select downloads folder",
         };
         let input_seed = current.display().to_string();
         self.input_mode = InputMode::Browsing(PathBrowser {
@@ -2283,6 +2382,12 @@ impl App {
                     ".local/share/Steam/steamapps/compatdata/1086940/pfx/drive_c/users/steamuser/AppData/Local/Larian Studios",
                 ));
             }
+            SetupStep::DownloadsDir => {
+                if !self.app_config.downloads_dir.as_os_str().is_empty() {
+                    candidates.push(self.app_config.downloads_dir.clone());
+                }
+                candidates.push(home.join("Downloads"));
+            }
         }
         candidates
             .into_iter()
@@ -2294,6 +2399,7 @@ impl App {
         match step {
             SetupStep::GameRoot => game::looks_like_game_root(self.game_id, path),
             SetupStep::LarianDir => game::looks_like_user_dir(self.game_id, path),
+            SetupStep::DownloadsDir => path.is_dir(),
         }
     }
 
@@ -2351,6 +2457,7 @@ impl App {
         match step {
             SetupStep::GameRoot => self.submit_game_root_path(path),
             SetupStep::LarianDir => self.submit_larian_dir_path(path),
+            SetupStep::DownloadsDir => self.submit_downloads_dir_path(path),
         }
     }
 
@@ -2386,6 +2493,110 @@ impl App {
         }
         self.mod_filter_snapshot = None;
         self.apply_mod_filter(String::new(), true);
+    }
+
+    pub fn dependency_queue_active(&self) -> bool {
+        self.dependency_queue.is_some()
+    }
+
+    pub fn dependency_queue_move(&mut self, delta: isize) {
+        let Some(queue) = &mut self.dependency_queue else {
+            return;
+        };
+        if queue.items.is_empty() {
+            queue.selected = 0;
+            return;
+        }
+        let len = queue.items.len() as isize;
+        let mut next = queue.selected as isize + delta;
+        if next < 0 {
+            next = 0;
+        }
+        if next >= len {
+            next = len - 1;
+        }
+        queue.selected = next as usize;
+    }
+
+    pub fn dependency_queue_mark_waiting(&mut self) {
+        if !self.app_config.offer_dependency_downloads {
+            self.status = "Dependency downloads disabled in settings".to_string();
+            return;
+        }
+        let Some(item) = self.dependency_queue_selected_mut() else {
+            return;
+        };
+        if item.status == DependencyStatus::Downloaded {
+            return;
+        }
+        item.status = DependencyStatus::Waiting;
+        self.status = format!("Waiting for download: {}", item.label);
+    }
+
+    pub fn dependency_queue_ignore(&mut self) {
+        let Some(item) = self.dependency_queue_selected_mut() else {
+            return;
+        };
+        item.status = DependencyStatus::Skipped;
+        self.status = format!("Skipped dependency: {}", item.label);
+    }
+
+    pub fn dependency_queue_continue(&mut self) {
+        self.finish_dependency_queue(true);
+    }
+
+    pub fn dependency_queue_cancel(&mut self) {
+        self.prompt_cancel_import();
+    }
+
+    pub fn dependency_queue_link(&self) -> Option<String> {
+        self.dependency_queue_selected()
+            .and_then(|item| item.link.clone())
+    }
+
+    pub fn dependency_queue_label(&self) -> Option<String> {
+        self.dependency_queue_selected()
+            .map(|item| item.label.clone())
+    }
+
+    pub fn dependency_queue(&self) -> Option<&DependencyQueue> {
+        self.dependency_queue.as_ref()
+    }
+
+    pub fn open_link(&mut self, link: &str) {
+        if link.trim().is_empty() {
+            return;
+        }
+        if let Err(err) = Command::new("xdg-open").arg(link).spawn() {
+            self.status = format!("Failed to open link: {err}");
+            self.log_warn(format!("Failed to open link: {err}"));
+        } else {
+            self.status = "Opened link in browser".to_string();
+        }
+    }
+
+    pub fn open_downloads_dir(&mut self) {
+        let path = self.app_config.downloads_dir.display().to_string();
+        if path.trim().is_empty() {
+            self.status = "Downloads folder not set".to_string();
+            return;
+        }
+        if let Err(err) = Command::new("xdg-open").arg(&path).spawn() {
+            self.status = format!("Failed to open downloads folder: {err}");
+            self.log_warn(format!("Failed to open downloads folder: {err}"));
+        } else {
+            self.status = "Opened downloads folder".to_string();
+        }
+    }
+
+    fn dependency_queue_selected(&self) -> Option<&DependencyItem> {
+        let queue = self.dependency_queue.as_ref()?;
+        queue.items.get(queue.selected)
+    }
+
+    fn dependency_queue_selected_mut(&mut self) -> Option<&mut DependencyItem> {
+        let queue = self.dependency_queue.as_mut()?;
+        queue.items.get_mut(queue.selected)
     }
 
     pub fn handle_submit(&mut self, purpose: InputPurpose, value: String) -> Result<()> {
@@ -2532,6 +2743,22 @@ impl App {
         self.status = "Game paths set".to_string();
         self.log_info(format!("Larian dir set: {}", path.display()));
         self.set_toast("Paths updated", ToastLevel::Info, Duration::from_secs(2));
+        Ok(())
+    }
+
+    fn submit_downloads_dir_path(&mut self, path: PathBuf) -> Result<()> {
+        if !path.exists() || !path.is_dir() {
+            self.status = format!("Path not found: {}", path.display());
+            self.log_warn(format!("Downloads dir not found: {}", path.display()));
+            self.open_path_browser(SetupStep::DownloadsDir);
+            return Ok(());
+        }
+
+        self.app_config.downloads_dir = path.clone();
+        self.app_config.save()?;
+        self.status = "Downloads folder set".to_string();
+        self.log_info(format!("Downloads dir set: {}", path.display()));
+        self.set_toast("Downloads folder updated", ToastLevel::Info, Duration::from_secs(2));
         Ok(())
     }
 
@@ -2833,9 +3060,12 @@ impl App {
             }
         }
 
+        self.poll_dependency_downloads();
+
         if self.import_active.is_none() {
             self.process_next_import_batch();
             self.start_next_import();
+            self.resume_pending_import_batch();
         }
 
         self.poll_deploys();
@@ -3240,6 +3470,9 @@ impl App {
         if self.import_active.is_some() {
             return;
         }
+        if self.dependency_queue.is_some() {
+            return;
+        }
         if self.dialog.is_some()
             || self.pending_duplicate.is_some()
             || !self.duplicate_queue.is_empty()
@@ -3415,6 +3648,7 @@ impl App {
 
     fn process_next_import_batch(&mut self) {
         if self.import_active.is_some()
+            || self.dependency_queue.is_some()
             || self.dialog.is_some()
             || self.pending_duplicate.is_some()
             || !self.duplicate_queue.is_empty()
@@ -3426,8 +3660,275 @@ impl App {
             self.maybe_show_import_summary();
             return;
         };
+        if self.queue_dependency_check(&batch) {
+            return;
+        }
 
         self.stage_imports(batch.mods, &batch.source);
+    }
+
+    fn queue_dependency_check(&mut self, batch: &importer::ImportBatch) -> bool {
+        if !self.app_config.offer_dependency_downloads && !self.app_config.warn_missing_dependencies
+        {
+            return false;
+        }
+
+        let Some(queue) = self.build_dependency_queue(batch) else {
+            return false;
+        };
+
+        self.pending_import_batch = Some(batch.clone());
+        self.dependency_queue = Some(queue);
+        self.status = "Missing dependencies detected".to_string();
+        self.log_warn("Missing dependencies detected".to_string());
+        true
+    }
+
+    fn build_dependency_queue(&self, batch: &importer::ImportBatch) -> Option<DependencyQueue> {
+        let existing_ids: HashSet<String> =
+            self.library.mods.iter().map(|entry| entry.id.clone()).collect();
+        let batch_ids: HashSet<String> = batch
+            .mods
+            .iter()
+            .map(|entry| entry.id.clone())
+            .collect();
+        let mut missing: HashMap<String, DependencyItem> = HashMap::new();
+
+        for mod_entry in &batch.mods {
+            let deps = self.collect_mod_dependencies(mod_entry);
+            if deps.is_empty() {
+                continue;
+            }
+            let required_by = mod_entry.display_name();
+            for dep in deps {
+                if existing_ids.contains(&dep) || batch_ids.contains(&dep) {
+                    continue;
+                }
+                let entry = missing.entry(dep.clone()).or_insert_with(|| {
+                    let label = dep.clone();
+                    let mut match_keys = Vec::new();
+                    match_keys.push(normalize_label(&label));
+                    match_keys.sort();
+                    match_keys.dedup();
+                    DependencyItem {
+                        label,
+                        required_by: Vec::new(),
+                        status: DependencyStatus::Missing,
+                        link: None,
+                        matched_path: None,
+                        last_size: None,
+                        stable_ticks: 0,
+                        match_keys,
+                    }
+                });
+                entry.required_by.push(required_by.clone());
+            }
+        }
+
+        if missing.is_empty() {
+            return None;
+        }
+
+        let mut items: Vec<DependencyItem> = missing.into_values().collect();
+        for item in &mut items {
+            item.required_by.sort();
+            item.required_by.dedup();
+        }
+        items.sort_by(|a, b| a.label.cmp(&b.label));
+        Some(DependencyQueue {
+            items,
+            selected: 0,
+            downloads_dir: self.app_config.downloads_dir.clone(),
+            last_scan: Instant::now(),
+        })
+    }
+
+    fn collect_mod_dependencies(&self, mod_entry: &ModEntry) -> Vec<String> {
+        let mod_root = library_mod_root(&self.config.data_dir).join(&mod_entry.id);
+        let mut deps = Vec::new();
+        let mut json_deps = Vec::new();
+
+        for target in &mod_entry.targets {
+            if let InstallTarget::Pak { file, .. } = target {
+                let pak_path = mod_root.join(file);
+                if let Some(meta) = metadata::read_meta_lsx_from_pak(&pak_path) {
+                    deps.extend(meta.dependencies);
+                }
+            }
+        }
+
+        if deps.is_empty() {
+            if let Some(meta_path) = metadata::find_meta_lsx(&mod_root) {
+                if let Some(meta) = metadata::read_meta_lsx(&meta_path) {
+                    deps.extend(meta.dependencies);
+                }
+            }
+        }
+
+        if let Some(info_path) = metadata::find_info_json(&mod_root) {
+            let infos = metadata::read_json_mods(&info_path);
+            for info in infos {
+                if !info.dependencies.is_empty() {
+                    json_deps.extend(info.dependencies);
+                }
+            }
+        }
+
+        deps.extend(json_deps);
+        deps.sort();
+        deps.dedup();
+        deps
+    }
+
+    fn poll_dependency_downloads(&mut self) {
+        let mut detected = Vec::new();
+        {
+            let Some(queue) = self.dependency_queue.as_mut() else {
+                return;
+            };
+
+            if queue.last_scan.elapsed() < Duration::from_millis(400) {
+                return;
+            }
+            queue.last_scan = Instant::now();
+
+            let entries = match fs::read_dir(&queue.downloads_dir) {
+                Ok(entries) => entries,
+                Err(err) => {
+                    self.status = format!("Downloads folder unavailable: {err}");
+                    self.log_warn(format!("Downloads folder unavailable: {err}"));
+                    return;
+                }
+            };
+
+            let mut candidates = Vec::new();
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if !path.is_file() {
+                    continue;
+                }
+                let name = path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .unwrap_or("")
+                    .to_string();
+                if is_partial_download(&name) {
+                    continue;
+                }
+                let metadata = match fs::metadata(&path) {
+                    Ok(meta) => meta,
+                    Err(_) => continue,
+                };
+                let size = metadata.len();
+                candidates.push((path, normalize_label(&name), size));
+            }
+
+            for item in &mut queue.items {
+                if item.status != DependencyStatus::Waiting {
+                    continue;
+                }
+                if item.matched_path.is_some() {
+                    continue;
+                }
+                let mut matched: Option<(PathBuf, u64)> = None;
+                for (path, normalized, size) in &candidates {
+                    if item
+                        .match_keys
+                        .iter()
+                        .any(|key| !key.is_empty() && normalized.contains(key))
+                    {
+                        matched = Some((path.clone(), *size));
+                        break;
+                    }
+                }
+                let Some((path, size)) = matched else {
+                    continue;
+                };
+                if let Some(previous) = item.last_size {
+                    if previous == size {
+                        item.stable_ticks = item.stable_ticks.saturating_add(1);
+                    } else {
+                        item.stable_ticks = 0;
+                    }
+                }
+                item.last_size = Some(size);
+                if item.stable_ticks >= 2 {
+                    item.status = DependencyStatus::Downloaded;
+                    item.matched_path = Some(path.clone());
+                    detected.push(item.label.clone());
+                }
+            }
+        }
+
+        if let Some(label) = detected.last() {
+            self.status = format!("Dependency ready: {}", label);
+        }
+        for label in detected {
+            self.log_info(format!("Dependency download detected: {}", label));
+        }
+    }
+
+    fn resume_pending_import_batch(&mut self) {
+        if self.dependency_queue.is_some() {
+            return;
+        }
+        let Some(batch) = self.pending_import_batch.take() else {
+            return;
+        };
+        if self.import_active.is_some()
+            || !self.import_queue.is_empty()
+            || !self.import_batches.is_empty()
+            || self.pending_duplicate.is_some()
+            || !self.duplicate_queue.is_empty()
+            || self.dialog.is_some()
+        {
+            self.pending_import_batch = Some(batch);
+            return;
+        }
+
+        self.stage_imports(batch.mods, &batch.source);
+    }
+
+    fn finish_dependency_queue(&mut self, proceed: bool) {
+        let queue = self.dependency_queue.take();
+        let Some(mut queue) = queue else {
+            return;
+        };
+
+        if !proceed {
+            self.cancel_pending_import(false);
+            return;
+        }
+
+        let mut paths = Vec::new();
+        for item in queue.items.drain(..) {
+            if item.status == DependencyStatus::Downloaded {
+                if let Some(path) = item.matched_path {
+                    paths.push(path);
+                }
+            }
+        }
+
+        for path in paths.into_iter().rev() {
+            self.import_queue.push_front(path);
+        }
+
+        self.status = "Continuing import".to_string();
+        self.start_next_import();
+    }
+
+    fn cancel_pending_import(&mut self, keep_files: bool) {
+        let Some(batch) = self.pending_import_batch.take() else {
+            return;
+        };
+        if !keep_files {
+            for mod_entry in &batch.mods {
+                self.remove_mod_root(&mod_entry.id);
+            }
+        }
+        self.status = "Import canceled".to_string();
+        self.log_warn("Import canceled during dependency check".to_string());
+        self.import_summary_pending = true;
     }
 
     fn maybe_show_import_summary(&mut self) {
@@ -3774,6 +4275,17 @@ impl App {
                     } else {
                         self.status = "Order view restored".to_string();
                     }
+                }
+            }
+            DialogKind::CancelImport => {
+                if matches!(choice, DialogChoice::Yes) {
+                    let keep_files = dialog
+                        .toggle
+                        .as_ref()
+                        .map(|toggle| toggle.checked)
+                        .unwrap_or(false);
+                    self.dependency_queue = None;
+                    self.cancel_pending_import(keep_files);
                 }
             }
             DialogKind::ImportSummary => {}
@@ -5383,6 +5895,14 @@ fn extract_timestamp(label: &str) -> Option<u64> {
     }
 
     best
+}
+
+fn is_partial_download(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    lower.ends_with(".part")
+        || lower.ends_with(".crdownload")
+        || lower.ends_with(".tmp")
+        || lower.ends_with(".download")
 }
 
 fn mod_version_stamp(entry: &ModEntry) -> Option<u64> {
