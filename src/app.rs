@@ -175,6 +175,52 @@ pub struct DependencyQueue {
 }
 
 #[derive(Debug, Clone)]
+struct DependencyLookup {
+    id_map: HashMap<String, String>,
+    key_map: HashMap<String, Vec<String>>,
+}
+
+impl DependencyLookup {
+    fn new(mods: &[ModEntry]) -> Self {
+        let mut id_map = HashMap::new();
+        let mut key_map: HashMap<String, Vec<String>> = HashMap::new();
+        for mod_entry in mods {
+            let id_key = normalize_label(&mod_entry.id);
+            if !id_key.is_empty() {
+                id_map.insert(id_key, mod_entry.id.clone());
+            }
+            for key in mod_dependency_keys(mod_entry) {
+                key_map.entry(key).or_default().push(mod_entry.id.clone());
+            }
+        }
+        for ids in key_map.values_mut() {
+            ids.sort();
+            ids.dedup();
+        }
+        Self { id_map, key_map }
+    }
+
+    fn resolve_ids(&self, dependency: &str) -> Vec<String> {
+        let mut out = Vec::new();
+        for key in dependency_match_keys(dependency) {
+            if let Some(id) = self.id_map.get(&key) {
+                out.push(id.clone());
+            }
+            if let Some(ids) = self.key_map.get(&key) {
+                out.extend(ids.iter().cloned());
+            }
+        }
+        out.sort();
+        out.dedup();
+        out
+    }
+
+    fn contains(&self, dependency: &str) -> bool {
+        !self.resolve_ids(dependency).is_empty()
+    }
+}
+
+#[derive(Debug, Clone)]
 pub struct DependentMod {
     pub id: String,
     pub name: String,
@@ -1131,6 +1177,8 @@ impl App {
             return;
         }
         self.smart_rank_interrupt = true;
+        self.smart_rank_progress = None;
+        self.status = "Smart ranking paused for changes".to_string();
         self.log_info(format!("Smart rank interrupted: {reason}"));
     }
 
@@ -1956,6 +2004,15 @@ impl App {
         if !self.dependency_cache_ready {
             return Vec::new();
         }
+        let target_keys: HashSet<String> = self
+            .library
+            .mods
+            .iter()
+            .find(|entry| entry.id == target_id)
+            .map(mod_dependency_keys)
+            .unwrap_or_else(|| vec![normalize_label(target_id)])
+            .into_iter()
+            .collect();
         let mut out = Vec::new();
         for mod_entry in &self.library.mods {
             if mod_entry.id == target_id {
@@ -1963,7 +2020,13 @@ impl App {
             }
             let deps = self.dependency_cache.get(&mod_entry.id);
             if deps
-                .map(|deps| deps.iter().any(|dep| dep.eq_ignore_ascii_case(target_id)))
+                .map(|deps| {
+                    deps.iter().any(|dep| {
+                        dependency_match_keys(dep)
+                            .iter()
+                            .any(|key| target_keys.contains(key))
+                    })
+                })
                 .unwrap_or(false)
             {
                 out.push(DependentMod {
@@ -4054,13 +4117,8 @@ impl App {
     }
 
     fn build_dependency_queue(&self, batch: &importer::ImportBatch) -> Option<DependencyQueue> {
-        let existing_ids: HashSet<String> =
-            self.library.mods.iter().map(|entry| entry.id.clone()).collect();
-        let batch_ids: HashSet<String> = batch
-            .mods
-            .iter()
-            .map(|entry| entry.id.clone())
-            .collect();
+        let existing_lookup = DependencyLookup::new(&self.library.mods);
+        let batch_lookup = DependencyLookup::new(&batch.mods);
         let mut missing: HashMap<String, DependencyItem> = HashMap::new();
 
         for mod_entry in &batch.mods {
@@ -4070,15 +4128,11 @@ impl App {
             }
             let required_by = mod_entry.display_name();
             for dep in deps {
-                if existing_ids.contains(&dep) || batch_ids.contains(&dep) {
+                if existing_lookup.contains(&dep) || batch_lookup.contains(&dep) {
                     continue;
                 }
                 let entry = missing.entry(dep.clone()).or_insert_with(|| {
                     let label = dep.clone();
-                    let mut match_keys = Vec::new();
-                    match_keys.push(normalize_label(&label));
-                    match_keys.sort();
-                    match_keys.dedup();
                     DependencyItem {
                         label,
                         required_by: Vec::new(),
@@ -4087,7 +4141,7 @@ impl App {
                         matched_path: None,
                         last_size: None,
                         stable_ticks: 0,
-                        match_keys,
+                        match_keys: dependency_match_keys(&dep),
                     }
                 });
                 entry.required_by.push(required_by.clone());
@@ -4113,8 +4167,7 @@ impl App {
     }
 
     fn build_dependency_queue_for_mods(&self, mods: &[ModEntry]) -> Option<DependencyQueue> {
-        let existing_ids: HashSet<String> =
-            self.library.mods.iter().map(|entry| entry.id.clone()).collect();
+        let existing_lookup = DependencyLookup::new(&self.library.mods);
         let mut missing: HashMap<String, DependencyItem> = HashMap::new();
 
         for mod_entry in mods {
@@ -4124,15 +4177,11 @@ impl App {
             }
             let required_by = mod_entry.display_name();
             for dep in deps {
-                if existing_ids.contains(&dep) {
+                if existing_lookup.contains(&dep) {
                     continue;
                 }
                 let entry = missing.entry(dep.clone()).or_insert_with(|| {
                     let label = dep.clone();
-                    let mut match_keys = Vec::new();
-                    match_keys.push(normalize_label(&label));
-                    match_keys.sort();
-                    match_keys.dedup();
                     DependencyItem {
                         label,
                         required_by: Vec::new(),
@@ -4141,7 +4190,7 @@ impl App {
                         matched_path: None,
                         last_size: None,
                         stable_ticks: 0,
-                        match_keys,
+                        match_keys: dependency_match_keys(&dep),
                     }
                 });
                 entry.required_by.push(required_by.clone());
@@ -5294,35 +5343,36 @@ impl App {
             return;
         }
 
-        let mut dependency_ids: HashSet<String> = HashSet::new();
+        let mut dependency_labels: Vec<String> = Vec::new();
         for mod_entry in &mods {
-            for dep in self.cached_mod_dependencies(mod_entry) {
-                dependency_ids.insert(dep);
-            }
+            dependency_labels.extend(self.cached_mod_dependencies(mod_entry));
         }
 
-        let existing_ids: HashSet<String> =
-            self.library.mods.iter().map(|entry| entry.id.clone()).collect();
+        let lookup = DependencyLookup::new(&self.library.mods);
+        let mut present: HashSet<String> = HashSet::new();
         let mut missing = Vec::new();
-        let mut present = Vec::new();
-        for dep in dependency_ids {
-            if existing_ids.contains(&dep) {
-                present.push(dep);
-            } else {
+        for dep in dependency_labels {
+            let ids = lookup.resolve_ids(&dep);
+            if ids.is_empty() {
                 missing.push(dep);
+            } else {
+                for id in ids {
+                    present.insert(id);
+                }
             }
         }
+        missing.sort();
+        missing.dedup();
 
         if !missing.is_empty() {
-            if !self.app_config.offer_dependency_downloads && !self.app_config.warn_missing_dependencies
-            {
+            if !self.app_config.offer_dependency_downloads && !self.app_config.warn_missing_dependencies {
                 self.status = "Missing dependencies; enable blocked".to_string();
                 self.log_warn("Missing dependencies; enable blocked".to_string());
                 return;
             }
             if let Some(queue) = self.build_dependency_queue_for_mods(&mods) {
                 let mut to_enable = ids.clone();
-                to_enable.extend(present);
+                to_enable.extend(present.into_iter());
                 to_enable.sort();
                 to_enable.dedup();
                 self.pending_dependency_enable = Some(to_enable);
@@ -5337,7 +5387,7 @@ impl App {
         }
 
         let mut to_enable = ids;
-        to_enable.extend(present);
+        to_enable.extend(present.into_iter());
         to_enable.sort();
         to_enable.dedup();
         let changed = self.set_mods_enabled_in_active(&to_enable, true);
@@ -6401,6 +6451,51 @@ fn build_dependent_message(dependents: &[DependentMod]) -> String {
     lines.push(String::new());
     lines.push("Removing it will disable those mods.".to_string());
     lines.join("\n")
+}
+
+fn dependency_match_keys(value: &str) -> Vec<String> {
+    let mut keys = Vec::new();
+    let normalized = normalize_label(value);
+    if !normalized.is_empty() {
+        keys.push(normalized);
+    }
+    for token in value.split(|ch: char| !ch.is_ascii_alphanumeric()) {
+        let normalized = normalize_label(token);
+        if !normalized.is_empty() {
+            keys.push(normalized);
+        }
+    }
+    keys.sort();
+    keys.dedup();
+    keys
+}
+
+fn mod_dependency_keys(mod_entry: &ModEntry) -> Vec<String> {
+    let mut keys = Vec::new();
+    let mut push_key = |value: &str| {
+        let key = normalize_label(value);
+        if !key.is_empty() {
+            keys.push(key);
+        }
+    };
+
+    push_key(&mod_entry.id);
+    push_key(&mod_entry.name);
+    push_key(&mod_entry.display_name());
+    if let Some(label) = mod_entry.source_label() {
+        push_key(label);
+    }
+    for target in &mod_entry.targets {
+        if let InstallTarget::Pak { file, info } = target {
+            push_key(file);
+            push_key(&info.uuid);
+            push_key(&info.folder);
+            push_key(&info.name);
+        }
+    }
+    keys.sort();
+    keys.dedup();
+    keys
 }
 
 fn similarity_ratio(a: &str, b: &str) -> f32 {
