@@ -175,13 +175,13 @@ pub struct DependencyQueue {
 }
 
 #[derive(Debug, Clone)]
-struct DependencyLookup {
+pub struct DependencyLookup {
     id_map: HashMap<String, String>,
     key_map: HashMap<String, Vec<String>>,
 }
 
 impl DependencyLookup {
-    fn new(mods: &[ModEntry]) -> Self {
+    pub fn new(mods: &[ModEntry]) -> Self {
         let mut id_map = HashMap::new();
         let mut key_map: HashMap<String, Vec<String>> = HashMap::new();
         for mod_entry in mods {
@@ -215,7 +215,7 @@ impl DependencyLookup {
         out
     }
 
-    fn contains(&self, dependency: &str) -> bool {
+    pub fn contains(&self, dependency: &str) -> bool {
         !self.resolve_ids(dependency).is_empty()
     }
 }
@@ -640,7 +640,7 @@ pub struct SmartRankPreview {
     pub explain: smart_rank::SmartRankExplain,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct SmartRankCache {
     fingerprint: String,
     result: smart_rank::SmartRankResult,
@@ -861,6 +861,7 @@ impl App {
             },
         };
 
+        app.load_smart_rank_cache();
         let mod_count = app.library.mods.len();
         app.log_info(format!("Library loaded: {mod_count} mod(s)"));
         app.log_info("Detecting game paths...".to_string());
@@ -1184,6 +1185,7 @@ impl App {
 
     pub fn clear_smart_rank_cache(&mut self) {
         self.smart_rank_cache = None;
+        self.clear_smart_rank_cache_file();
         if self.smart_rank_active {
             self.status = "Smart rank cache cleared; warming up after scan".to_string();
             self.smart_rank_refresh_pending = true;
@@ -1200,6 +1202,7 @@ impl App {
     fn interrupt_smart_rank(&mut self, reason: &str, restart: bool) {
         self.smart_rank_refresh_pending = restart;
         self.smart_rank_cache = None;
+        self.clear_smart_rank_cache_file();
         if !self.smart_rank_active {
             return;
         }
@@ -2135,12 +2138,12 @@ impl App {
         self.open_dialog(Dialog {
             title: "Cancel Import".to_string(),
             message: "Cancel this import and return to the main view?".to_string(),
-            yes_label: "Cancel import".to_string(),
-            no_label: "Continue".to_string(),
+            yes_label: "Continue import".to_string(),
+            no_label: "Cancel".to_string(),
             choice: DialogChoice::No,
             kind: DialogKind::CancelImport,
             toggle: Some(DialogToggle {
-                label: "Keep imported files".to_string(),
+                label: "Remember import choice".to_string(),
                 checked: false,
             }),
         });
@@ -3561,6 +3564,7 @@ impl App {
                             fingerprint: self.smart_rank_fingerprint(),
                             result: result.clone(),
                         });
+                        self.save_smart_rank_cache();
                         match self.smart_rank_mode.unwrap_or(SmartRankMode::Preview) {
                             SmartRankMode::Preview => {
                                 self.finalize_smart_rank_preview(result);
@@ -3671,6 +3675,53 @@ impl App {
             }
         }
         hasher.finalize().to_hex().to_string()
+    }
+
+    fn smart_rank_cache_path(&self) -> PathBuf {
+        self.config.data_dir.join("smart_rank_cache.json")
+    }
+
+    fn load_smart_rank_cache(&mut self) {
+        let path = self.smart_rank_cache_path();
+        let raw = match fs::read_to_string(&path) {
+            Ok(raw) => raw,
+            Err(_) => return,
+        };
+        match serde_json::from_str::<SmartRankCache>(&raw) {
+            Ok(cache) => {
+                self.smart_rank_cache = Some(cache);
+                self.log_info("Smart rank cache loaded".to_string());
+            }
+            Err(err) => {
+                self.log_warn(format!("Smart rank cache load failed: {err}"));
+            }
+        }
+    }
+
+    fn save_smart_rank_cache(&mut self) {
+        let Some(cache) = &self.smart_rank_cache else {
+            return;
+        };
+        let raw = match serde_json::to_string_pretty(cache) {
+            Ok(raw) => raw,
+            Err(err) => {
+                self.log_warn(format!("Smart rank cache serialize failed: {err}"));
+                return;
+            }
+        };
+        let path = self.smart_rank_cache_path();
+        if let Err(err) = fs::write(&path, raw) {
+            self.log_warn(format!("Smart rank cache write failed: {err}"));
+        }
+    }
+
+    fn clear_smart_rank_cache_file(&mut self) {
+        let path = self.smart_rank_cache_path();
+        if let Err(err) = fs::remove_file(&path) {
+            if err.kind() != std::io::ErrorKind::NotFound {
+                self.log_warn(format!("Smart rank cache delete failed: {err}"));
+            }
+        }
     }
 
     fn start_native_sync(&mut self) {
@@ -4047,6 +4098,20 @@ impl App {
         }
         let page = self.mods_view_height.saturating_sub(1).max(1);
         self.selected = self.selected.saturating_add(page);
+    }
+
+    pub fn jump_mod_selection(&mut self, delta: isize) {
+        if self.move_mode {
+            return;
+        }
+        if delta.is_negative() {
+            self.selected = self
+                .selected
+                .saturating_sub(delta.wrapping_abs() as usize);
+        } else {
+            self.selected = self.selected.saturating_add(delta as usize);
+        }
+        self.clamp_selection();
     }
 
     pub fn log_info(&mut self, message: String) {
@@ -4494,6 +4559,28 @@ impl App {
             return deps.clone();
         }
         self.collect_mod_dependencies(mod_entry)
+    }
+
+    pub fn dependency_lookup(&self) -> Option<DependencyLookup> {
+        if !self.dependency_cache_ready {
+            return None;
+        }
+        Some(DependencyLookup::new(&self.library.mods))
+    }
+
+    pub fn missing_dependency_count_for_mod(
+        &self,
+        mod_entry: &ModEntry,
+        lookup: &DependencyLookup,
+    ) -> usize {
+        if !self.dependency_cache_ready {
+            return 0;
+        }
+        let deps = self.cached_mod_dependencies(mod_entry);
+        if deps.is_empty() {
+            return 0;
+        }
+        deps.iter().filter(|dep| !lookup.contains(dep)).count()
     }
 
     pub fn debug_dependency_report(&self, query: &str) -> String {
@@ -5035,7 +5122,7 @@ impl App {
                 }
             }
             DialogKind::CancelImport => {
-                if matches!(choice, DialogChoice::Yes) {
+                if matches!(choice, DialogChoice::No) {
                     let keep_files = dialog
                         .toggle
                         .as_ref()

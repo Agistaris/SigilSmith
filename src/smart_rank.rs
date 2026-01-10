@@ -6,6 +6,7 @@ use crate::{
 };
 use anyhow::{Context, Result};
 use lz4_flex::block::decompress;
+use serde::{Deserialize, Serialize};
 use std::{
     collections::{HashMap, HashSet},
     fs::File,
@@ -15,7 +16,7 @@ use std::{
 };
 use walkdir::WalkDir;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SmartRankReport {
     pub moved: usize,
     pub missing: usize,
@@ -32,7 +33,7 @@ pub struct SmartRankReport {
     pub elapsed_ms: u64,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SmartRankGroup {
     Loose,
     Pak,
@@ -47,7 +48,7 @@ impl SmartRankGroup {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SmartRankProgress {
     pub group: SmartRankGroup,
     pub scanned: usize,
@@ -55,7 +56,7 @@ pub struct SmartRankProgress {
     pub name: String,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SmartRankResult {
     pub order: Vec<ProfileEntry>,
     pub report: SmartRankReport,
@@ -93,18 +94,18 @@ struct RankItem {
     date_hint: i64,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SmartRankExplain {
     pub lines: Vec<SmartRankExplainLine>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SmartRankExplainLine {
     pub kind: ExplainLineKind,
     pub text: String,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub enum ExplainLineKind {
     Header,
     Item,

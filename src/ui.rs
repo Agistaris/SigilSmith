@@ -677,6 +677,12 @@ fn handle_mods_mode(app: &mut App, key: KeyEvent) -> Result<()> {
         (KeyCode::Right, mods) if mods.contains(KeyModifiers::CONTROL) => {
             app.cycle_mod_sort_column(1);
         }
+        (KeyCode::Up, mods) if mods.contains(KeyModifiers::SHIFT) => {
+            app.jump_mod_selection(-10);
+        }
+        (KeyCode::Down, mods) if mods.contains(KeyModifiers::SHIFT) => {
+            app.jump_mod_selection(10);
+        }
         (KeyCode::Char('m'), _) | (KeyCode::Char('M'), _) => {
             if app.move_mode {
                 app.toggle_move_mode();
@@ -2594,11 +2600,8 @@ fn draw_dialog(frame: &mut Frame<'_>, app: &App, theme: &Theme) {
     if height > area.height.saturating_sub(2) {
         height = area.height.saturating_sub(2);
     }
-    let x = area.x + (area.width.saturating_sub(width)) / 2;
-    let y = area.y + (area.height.saturating_sub(height)) / 2;
-    let dialog_area = Rect::new(x, y, width, height);
-
-    frame.render_widget(Clear, dialog_area);
+    let (outer_area, dialog_area) = padded_modal(area, width, height, 1);
+    render_modal_backdrop(frame, outer_area, theme);
     let dialog_block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
@@ -2743,6 +2746,14 @@ fn padded_modal(area: Rect, width: u16, height: u16, pad: u16) -> (Rect, Rect) {
     (outer, inner)
 }
 
+fn render_modal_backdrop(frame: &mut Frame<'_>, area: Rect, theme: &Theme) {
+    frame.render_widget(Clear, area);
+    frame.render_widget(
+        Block::default().style(Style::default().bg(theme.header_bg)),
+        area,
+    );
+}
+
 fn draw_settings_menu(frame: &mut Frame<'_>, app: &App, theme: &Theme) {
     let Some(menu) = &app.settings_menu else {
         return;
@@ -2769,11 +2780,7 @@ fn draw_settings_menu(frame: &mut Frame<'_>, app: &App, theme: &Theme) {
     let width = (max_line as u16 + 6).clamp(34, max_width.min(58));
     let (outer_area, menu_area) = padded_modal(area, width, height, 1);
 
-    frame.render_widget(Clear, outer_area);
-    frame.render_widget(
-        Block::default().style(Style::default().bg(theme.header_bg)),
-        outer_area,
-    );
+    render_modal_backdrop(frame, outer_area, theme);
     let menu_block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
@@ -2827,11 +2834,7 @@ fn draw_help_menu(frame: &mut Frame<'_>, app: &mut App, theme: &Theme) {
         }
     }
 
-    frame.render_widget(Clear, outer_area);
-    frame.render_widget(
-        Block::default().style(Style::default().bg(theme.header_bg)),
-        outer_area,
-    );
+    render_modal_backdrop(frame, outer_area, theme);
     let help_block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
@@ -2908,7 +2911,7 @@ fn draw_dependency_queue(frame: &mut Frame<'_>, app: &App, theme: &Theme) {
     let height = max_height.clamp(16, 26);
     let (outer_area, modal) = padded_modal(area, width, height, 1);
 
-    frame.render_widget(Clear, outer_area);
+    render_modal_backdrop(frame, outer_area, theme);
     let panel_block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
@@ -3128,11 +3131,9 @@ fn draw_path_browser(frame: &mut Frame<'_>, _app: &App, theme: &Theme, browser: 
     let area = frame.size();
     let width = (area.width.saturating_sub(4)).clamp(46, 86);
     let height = (area.height.saturating_sub(4)).clamp(12, 22);
-    let x = area.x + (area.width.saturating_sub(width)) / 2;
-    let y = area.y + (area.height.saturating_sub(height)) / 2;
-    let modal = Rect::new(x, y, width, height);
+    let (outer_area, modal) = padded_modal(area, width, height, 1);
 
-    frame.render_widget(Clear, modal);
+    render_modal_backdrop(frame, outer_area, theme);
 
     let title = match browser.step {
         SetupStep::GameRoot => "Select BG3 install root",
@@ -3362,9 +3363,7 @@ fn draw_smart_rank_preview(frame: &mut Frame<'_>, app: &mut App, theme: &Theme) 
     let width = max_width.min(120).max(60).min(max_width);
     let max_height = area.height.saturating_sub(2).max(1);
     let height = max_height.min(22).max(10);
-    let x = area.x + (area.width.saturating_sub(width)) / 2;
-    let y = area.y + (area.height.saturating_sub(height)) / 2;
-    let preview_area = Rect::new(x, y, width, height);
+    let (outer_area, preview_area) = padded_modal(area, width, height, 1);
 
     let inner_width = preview_area.width.saturating_sub(3) as usize;
     let inner_height = preview_area.height.saturating_sub(2) as usize;
@@ -3377,7 +3376,7 @@ fn draw_smart_rank_preview(frame: &mut Frame<'_>, app: &mut App, theme: &Theme) 
         app.smart_rank_view,
     );
 
-    frame.render_widget(Clear, preview_area);
+    render_modal_backdrop(frame, outer_area, theme);
     let block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
@@ -4092,11 +4091,9 @@ fn draw_import_overlay(frame: &mut Frame<'_>, app: &App, theme: &Theme) {
     let text_height = lines.len().max(1) as u16;
     let width = area.width.saturating_sub(10).clamp(42, 78);
     let height = (text_height + 4).min(area.height.saturating_sub(2)).max(9);
-    let x = area.x + (area.width.saturating_sub(width)) / 2;
-    let y = area.y + (area.height.saturating_sub(height)) / 2;
-    let panel_area = Rect::new(x, y, width, height);
+    let (outer_area, panel_area) = padded_modal(area, width, height, 1);
 
-    frame.render_widget(Clear, panel_area);
+    render_modal_backdrop(frame, outer_area, theme);
     let panel_block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(theme.overlay_border))
@@ -4163,11 +4160,9 @@ fn draw_startup_overlay(frame: &mut Frame<'_>, app: &App, theme: &Theme) {
     let text_height = lines.len() as u16;
     let width = area.width.saturating_sub(10).clamp(42, 72);
     let height = (text_height + 4).min(area.height.saturating_sub(2)).max(9);
-    let x = area.x + (area.width.saturating_sub(width)) / 2;
-    let y = area.y + (area.height.saturating_sub(height)) / 2;
-    let panel_area = Rect::new(x, y, width, height);
+    let (outer_area, panel_area) = padded_modal(area, width, height, 1);
 
-    frame.render_widget(Clear, panel_area);
+    render_modal_backdrop(frame, outer_area, theme);
     let panel_block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(theme.overlay_border))
@@ -4313,6 +4308,7 @@ fn build_rows(app: &App, theme: &Theme) -> (Vec<Row<'static>>, ModCounts, usize)
     let (total, enabled) = app.profile_counts();
     let profile_entries = app.visible_profile_entries();
     let mod_map = app.library.index_by_id();
+    let dep_lookup = app.dependency_lookup();
 
     for (row_index, (order_index, entry)) in profile_entries.iter().enumerate() {
         let Some(mod_entry) = mod_map.get(&entry.id) else {
@@ -4328,6 +4324,7 @@ fn build_rows(app: &App, theme: &Theme) -> (Vec<Row<'static>>, ModCounts, usize)
             entry.enabled,
             mod_entry,
             theme,
+            dep_lookup.as_ref(),
         );
         target_width = target_width.max(target_len);
         rows.push(row);
@@ -4374,6 +4371,7 @@ fn row_for_entry(
     enabled: bool,
     mod_entry: &ModEntry,
     theme: &Theme,
+    dep_lookup: Option<&crate::app::DependencyLookup>,
 ) -> (Row<'static>, usize) {
     let (enabled_text, enabled_style) = if enabled {
         ("[x]", Style::default().fg(theme.success))
@@ -4396,6 +4394,26 @@ fn row_for_entry(
     };
     let created_text = format_date_cell(mod_entry.created_at);
     let added_text = format_date_cell(Some(mod_entry.added_at));
+    let mut name_spans = Vec::new();
+    name_spans.push(Span::styled(
+        mod_entry.display_name(),
+        Style::default().fg(theme.text),
+    ));
+    if let Some(lookup) = dep_lookup {
+        let missing = app.missing_dependency_count_for_mod(mod_entry, lookup);
+        if missing > 0 {
+            let label = if missing == 1 {
+                "Missing 1 Dependency".to_string()
+            } else {
+                format!("Missing {missing} Dependencies")
+            };
+            name_spans.push(Span::raw(" "));
+            name_spans.push(Span::styled(
+                format!("[{label}]"),
+                Style::default().fg(theme.muted).add_modifier(Modifier::DIM),
+            ));
+        }
+    }
     let mut row = Row::new(vec![
         Cell::from(enabled_text.to_string()).style(enabled_style),
         Cell::from(native_marker.to_string()).style(native_style),
@@ -4404,7 +4422,7 @@ fn row_for_entry(
         Cell::from(state_label).style(state_style),
         Cell::from(created_text).style(Style::default().fg(theme.muted)),
         Cell::from(added_text).style(Style::default().fg(theme.muted)),
-        Cell::from(mod_entry.display_name()),
+        Cell::from(Line::from(name_spans)),
     ]);
     if row_index % 2 == 1 {
         row = row.style(Style::default().bg(theme.row_alt_bg));
@@ -5247,6 +5265,10 @@ fn hotkey_rows_for_focus(focus: Focus) -> HotkeyRows {
                     action: "Page scroll".to_string(),
                 },
                 LegendRow {
+                    key: "Shift+↑/↓".to_string(),
+                    action: "Jump 10".to_string(),
+                },
+                LegendRow {
                     key: "/ or Ctrl+F".to_string(),
                     action: "Search".to_string(),
                 },
@@ -5569,6 +5591,10 @@ fn help_sections() -> Vec<HelpSection> {
                 LegendRow {
                     key: "PgUp/PgDn".to_string(),
                     action: "Page scroll".to_string(),
+                },
+                LegendRow {
+                    key: "Shift+↑/↓".to_string(),
+                    action: "Jump 10".to_string(),
                 },
                 LegendRow {
                     key: "Space".to_string(),
