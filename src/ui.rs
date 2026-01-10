@@ -150,6 +150,7 @@ pub fn run(app: &mut App) -> Result<()> {
 }
 
 fn run_loop(terminal: &mut Terminal<impl Backend>, app: &mut App) -> Result<()> {
+    let mut startup_complete = false;
     loop {
         app.tick();
         if let Some((purpose, value)) = app.maybe_auto_submit() {
@@ -164,6 +165,10 @@ fn run_loop(terminal: &mut Terminal<impl Backend>, app: &mut App) -> Result<()> 
         app.poll_updates();
         app.clamp_selection();
         terminal.draw(|frame| draw(frame, app))?;
+        if !startup_complete {
+            app.finish_startup();
+            startup_complete = true;
+        }
 
         if app.should_quit {
             break;
@@ -2011,6 +2016,7 @@ fn draw(frame: &mut Frame<'_>, app: &mut App) {
         draw_help_menu(frame, app, &theme);
     }
     draw_import_overlay(frame, app, &theme);
+    draw_startup_overlay(frame, app, &theme);
 }
 
 fn current_filter_value(app: &App) -> (String, bool) {
@@ -2925,8 +2931,13 @@ fn draw_dependency_queue(frame: &mut Frame<'_>, app: &App, theme: &Theme) {
         .count();
 
     let mut header_lines = Vec::new();
+    let header_text = if app.dependency_queue_enable_pending() {
+        "Resolve missing dependencies before enabling mods."
+    } else {
+        "Resolve missing dependencies before import continues."
+    };
     header_lines.push(Line::from(Span::styled(
-        "Resolve missing dependencies before import continues.",
+        header_text,
         Style::default().fg(theme.text),
     )));
     let summary = format!(
@@ -3074,7 +3085,14 @@ fn draw_dependency_queue(frame: &mut Frame<'_>, app: &App, theme: &Theme) {
         Span::styled("[I]", key_style),
         Span::styled(" Skip  ", text_style),
         Span::styled("[G]", key_style),
-        Span::styled(" Continue  ", text_style),
+        Span::styled(
+            if app.dependency_queue_enable_pending() {
+                " Continue enable  "
+            } else {
+                " Continue import  "
+            },
+            text_style,
+        ),
         Span::styled("[Esc]", key_style),
         Span::styled(" Cancel", text_style),
     ]);
@@ -4100,6 +4118,60 @@ fn draw_import_overlay(frame: &mut Frame<'_>, app: &App, theme: &Theme) {
             Style::default().fg(theme.text),
         ));
     frame.render_widget(gauge, chunks[1]);
+}
+
+fn draw_startup_overlay(frame: &mut Frame<'_>, app: &App, theme: &Theme) {
+    if !app.startup_pending() {
+        return;
+    }
+
+    let area = frame.size();
+    frame.render_widget(Clear, area);
+    frame.render_widget(
+        Block::default().style(Style::default().bg(theme.overlay_bg)),
+        area,
+    );
+
+    let mut lines = Vec::new();
+    lines.push(Line::from(Span::styled(
+        "Starting SigilSmith",
+        Style::default()
+            .fg(theme.accent)
+            .add_modifier(Modifier::BOLD),
+    )));
+    lines.push(Line::from(Span::styled(
+        "Loading mods, metadata, and smart ranking…",
+        Style::default().fg(theme.text),
+    )));
+    lines.push(Line::from(Span::styled(
+        "This should only take a moment.",
+        Style::default().fg(theme.muted),
+    )));
+
+    let text_height = lines.len() as u16;
+    let width = area.width.saturating_sub(10).clamp(42, 72);
+    let height = (text_height + 4).min(area.height.saturating_sub(2)).max(9);
+    let x = area.x + (area.width.saturating_sub(width)) / 2;
+    let y = area.y + (area.height.saturating_sub(height)) / 2;
+    let panel_area = Rect::new(x, y, width, height);
+
+    frame.render_widget(Clear, panel_area);
+    let panel_block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(theme.overlay_border))
+        .style(Style::default().bg(theme.overlay_panel_bg));
+    frame.render_widget(panel_block, panel_area);
+
+    let inner = Rect::new(
+        panel_area.x + 2,
+        panel_area.y + 1,
+        panel_area.width.saturating_sub(4),
+        panel_area.height.saturating_sub(2),
+    );
+    let paragraph = Paragraph::new(lines)
+        .style(Style::default().fg(theme.text))
+        .alignment(Alignment::Left);
+    frame.render_widget(paragraph, inner);
 }
 
 fn build_explorer_items(app: &App, theme: &Theme) -> Vec<ListItem<'static>> {

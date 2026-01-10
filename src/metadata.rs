@@ -168,13 +168,138 @@ pub fn read_meta_lsx(path: &Path) -> Option<ModMeta> {
 }
 
 pub fn read_meta_lsx_from_pak(path: &Path) -> Option<ModMeta> {
-    if let Some(meta) = read_meta_lsx_from_pak_custom(path) {
+    if let Some(mut meta) = read_meta_lsx_from_pak_custom(path) {
+        fill_dependency_fallback(&mut meta, path);
         return Some(meta);
     }
-    let file = fs::File::open(path).ok()?;
-    let lspk = lspk::Reader::new(file).ok()?.read().ok()?;
-    let meta = lspk.extract_meta_lsx().ok()?;
-    Some(parse_meta_lsx(&meta.decompressed_bytes))
+    if let Ok(file) = fs::File::open(path) {
+        if let Ok(lspk) = lspk::Reader::new(file).and_then(|mut reader| reader.read()) {
+            if let Ok(meta) = lspk.extract_meta_lsx() {
+                let mut parsed = parse_meta_lsx(&meta.decompressed_bytes);
+                fill_dependency_fallback(&mut parsed, path);
+                return Some(parsed);
+            }
+        }
+    }
+    read_meta_lsx_from_pak_fuzzy(path).map(|mut meta| {
+        fill_dependency_fallback(&mut meta, path);
+        meta
+    })
+}
+
+fn read_meta_lsx_from_pak_fuzzy(path: &Path) -> Option<ModMeta> {
+    let bytes = fs::read(path).ok()?;
+    let xml_start = find_bytes(&bytes, b"<?xml")?;
+    let xml_end = find_bytes(&bytes[xml_start..], b"</save>")?;
+    let end = xml_start + xml_end + b"</save>".len();
+    let slice = &bytes[xml_start..end];
+    let meta = parse_meta_lsx(slice);
+    if !meta.dependencies.is_empty()
+        || meta.uuid.is_some()
+        || meta.folder.is_some()
+        || meta.name.is_some()
+    {
+        return Some(meta);
+    }
+    read_meta_lsx_from_pak_raw(&bytes)
+}
+
+fn read_meta_lsx_from_pak_raw(bytes: &[u8]) -> Option<ModMeta> {
+    let deps = scan_dependency_uuids(bytes);
+    if deps.is_empty() {
+        return None;
+    }
+    Some(ModMeta {
+        dependencies: deps,
+        ..ModMeta::default()
+    })
+}
+
+fn scan_dependency_uuids(bytes: &[u8]) -> Vec<String> {
+    let mut out = Vec::new();
+    let needle = b"Dependencies";
+    let window_size = 4096usize;
+    let mut offset = 0usize;
+    while let Some(index) = find_bytes(&bytes[offset..], needle) {
+        let start = offset + index;
+        let end = (start + window_size).min(bytes.len());
+        let window = &bytes[start..end];
+        let mut found = extract_uuid_suffix_strings(window);
+        if found.is_empty() {
+            found = extract_uuid_strings(window);
+        }
+        out.extend(found);
+        offset = start + needle.len();
+    }
+    out.sort();
+    out.dedup();
+    out
+}
+
+fn extract_uuid_strings(bytes: &[u8]) -> Vec<String> {
+    let mut out = Vec::new();
+    let len = bytes.len();
+    let uuid_len = 36;
+    let mut i = 0usize;
+    while i + uuid_len <= len {
+        let slice = &bytes[i..i + uuid_len];
+        if is_uuid_bytes(slice) {
+            if let Ok(value) = std::str::from_utf8(slice) {
+                out.push(value.to_ascii_lowercase());
+            }
+            i += uuid_len;
+        } else {
+            i += 1;
+        }
+    }
+    out
+}
+
+fn extract_uuid_suffix_strings(bytes: &[u8]) -> Vec<String> {
+    let mut out = Vec::new();
+    let len = bytes.len();
+    let uuid_len = 36;
+    let mut i = 0usize;
+    while i + uuid_len + 1 <= len {
+        if bytes[i] == b'_' && is_uuid_bytes(&bytes[i + 1..i + 1 + uuid_len]) {
+            if let Ok(value) = std::str::from_utf8(&bytes[i + 1..i + 1 + uuid_len]) {
+                out.push(value.to_ascii_lowercase());
+            }
+            i += uuid_len + 1;
+        } else {
+            i += 1;
+        }
+    }
+    out
+}
+
+fn is_uuid_bytes(bytes: &[u8]) -> bool {
+    const DASHES: [usize; 4] = [8, 13, 18, 23];
+    if bytes.len() != 36 {
+        return false;
+    }
+    for (i, &byte) in bytes.iter().enumerate() {
+        if DASHES.contains(&i) {
+            if byte != b'-' {
+                return false;
+            }
+        } else if !byte.is_ascii_hexdigit() {
+            return false;
+        }
+    }
+    true
+}
+
+fn fill_dependency_fallback(meta: &mut ModMeta, path: &Path) {
+    if !meta.dependencies.is_empty() {
+        return;
+    }
+    if let Ok(bytes) = fs::read(path) {
+        let deps = scan_dependency_uuids(&bytes);
+        if !deps.is_empty() {
+            meta.dependencies = deps;
+        }
+    }
 }
 
 pub fn find_meta_lsx(root: &Path) -> Option<PathBuf> {
@@ -489,6 +614,15 @@ fn normalize_path(path: &str) -> String {
     path.replace('\\', "/")
         .trim_start_matches('/')
         .to_ascii_lowercase()
+}
+
+fn find_bytes(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    if needle.is_empty() || haystack.len() < needle.len() {
+        return None;
+    }
+    haystack
+        .windows(needle.len())
+        .position(|window| window == needle)
 }
 
 fn attr_value(e: &quick_xml::events::BytesStart<'_>, key: &[u8]) -> Option<String> {

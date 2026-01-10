@@ -1,9 +1,9 @@
 use crate::{
-    app::{App, CliImportOptions, CliVerbosity},
+    app::{App, CliImportOptions, CliVerbosity, StartupMode},
     bg3::GamePaths,
     game,
     library::{library_mod_root, InstallTarget, Library, ModEntry, Profile},
-    metadata, ui,
+    metadata, native_pak, ui,
 };
 use anyhow::{bail, Result};
 use serde::Serialize;
@@ -46,6 +46,7 @@ enum CliAction {
 enum CliCommand {
     ModsList(ModsListOptions),
     ProfilesList,
+    DepsList,
     DepsMissing,
     Paths,
     Help,
@@ -72,11 +73,11 @@ pub fn run() -> Result<()> {
     let action = parse_args(&args)?;
     match action {
         CliAction::Ui => {
-            let mut app = App::initialize()?;
+            let mut app = App::initialize(StartupMode::Ui)?;
             ui::run(&mut app)
         }
         CliAction::Import { paths, options } => {
-            let mut app = App::initialize()?;
+            let mut app = App::initialize(StartupMode::Cli)?;
             app.import_mods_cli(paths, options)
         }
         CliAction::Command {
@@ -93,7 +94,7 @@ pub fn run() -> Result<()> {
                 Ok(())
             }
             _ => {
-                let mut app = App::initialize()?;
+                let mut app = App::initialize(StartupMode::Cli)?;
                 run_command(&mut app, command, format, profile)
             }
         },
@@ -190,11 +191,21 @@ fn parse_subcommand(tokens: &[String], global: &GlobalOptions) -> Result<Option<
             format: global.format,
             profile: global.profile.clone(),
         })),
-        "deps" => Ok(Some(CliAction::Command {
-            command: CliCommand::DepsMissing,
-            format: global.format,
-            profile: global.profile.clone(),
-        })),
+        "deps" => {
+            let sub = tokens.get(1).map(|value| value.as_str()).unwrap_or("missing");
+            let command = match sub {
+                "list" => CliCommand::DepsList,
+                "missing" => CliCommand::DepsMissing,
+                _ => {
+                    bail!("Unknown deps command: {sub} (use 'list' or 'missing')");
+                }
+            };
+            Ok(Some(CliAction::Command {
+                command,
+                format: global.format,
+                profile: global.profile.clone(),
+            }))
+        }
         "paths" => Ok(Some(CliAction::Command {
             command: CliCommand::Paths,
             format: global.format,
@@ -343,6 +354,10 @@ fn run_command(
             list_mods(app, profile, options, format)
         }
         CliCommand::ProfilesList => list_profiles(&app.library, format),
+        CliCommand::DepsList => {
+            let profile = resolve_profile(&app.library, profile.as_deref())?;
+            list_dependencies(app, profile, format)
+        }
         CliCommand::DepsMissing => {
             let profile = resolve_profile(&app.library, profile.as_deref())?;
             list_missing_dependencies(app, profile, format)
@@ -495,6 +510,84 @@ struct MissingDependencyItem {
     reason: String,
 }
 
+#[derive(Serialize)]
+struct DependencyListItem {
+    mod_name: String,
+    mod_id: String,
+    dependencies: Vec<DependencyRef>,
+}
+
+#[derive(Serialize)]
+struct DependencyRef {
+    id: String,
+    name: Option<String>,
+    enabled: bool,
+}
+
+fn list_dependencies(app: &App, profile: &Profile, format: OutputFormat) -> Result<()> {
+    let mod_map = app.library.index_by_id();
+    let enabled_ids: HashSet<&String> = profile
+        .order
+        .iter()
+        .filter(|entry| entry.enabled)
+        .map(|entry| &entry.id)
+        .collect();
+    let paths = game::detect_paths(
+        app.game_id,
+        Some(&app.config.game_root),
+        Some(&app.config.larian_dir),
+    )
+    .ok();
+
+    let mut list = Vec::new();
+    for mod_entry in &app.library.mods {
+        let deps = collect_dependencies(app, mod_entry, paths.as_ref());
+        if deps.is_empty() {
+            continue;
+        }
+        let mut refs = Vec::new();
+        for dep_id in deps {
+            let dep = mod_map.get(&dep_id);
+            let name = dep.map(|entry| entry.display_name());
+            let enabled = dep
+                .map(|entry| enabled_ids.contains(&entry.id))
+                .unwrap_or(false);
+            refs.push(DependencyRef {
+                id: dep_id,
+                name,
+                enabled,
+            });
+        }
+        list.push(DependencyListItem {
+            mod_name: mod_entry.display_name(),
+            mod_id: mod_entry.id.clone(),
+            dependencies: refs,
+        });
+    }
+
+    match format {
+        OutputFormat::Json => {
+            println!("{}", serde_json::to_string_pretty(&list)?);
+        }
+        OutputFormat::Text => {
+            if list.is_empty() {
+                println!("No dependencies detected.");
+            } else {
+                for item in list {
+                    println!("{} ({})", item.mod_name, item.mod_id);
+                    for dep in item.dependencies {
+                        let name = dep.name.unwrap_or_else(|| "Unknown".to_string());
+                        let status = if dep.enabled { "enabled" } else { "disabled" };
+                        println!("  -> {} ({}) {}", dep.id, name, status);
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
 fn list_missing_dependencies(app: &App, profile: &Profile, format: OutputFormat) -> Result<()> {
     let mod_map = app.library.index_by_id();
     let enabled_ids: HashSet<&String> = profile
@@ -572,12 +665,32 @@ fn collect_dependencies(
     } else {
         mod_root.clone()
     };
+    let native_index = if mod_entry.is_native() {
+        paths.map(|paths| native_pak::build_native_pak_index(&paths.larian_mods_dir))
+    } else {
+        None
+    };
 
     for target in &mod_entry.targets {
         let InstallTarget::Pak { file, .. } = target else {
             continue;
         };
-        let pak_path = base_dir.join(file);
+        let mut pak_path = base_dir.join(file);
+        if mod_entry.is_native() && !pak_path.exists() {
+            if let Some(info) = mod_entry.targets.iter().find_map(|target| {
+                if let InstallTarget::Pak { info, .. } = target {
+                    Some(info)
+                } else {
+                    None
+                }
+            }) {
+                if let Some(index) = native_index.as_deref() {
+                    if let Some(resolved) = native_pak::resolve_native_pak_path(info, index) {
+                        pak_path = resolved;
+                    }
+                }
+            }
+        }
         if let Some(meta) = metadata::read_meta_lsx_from_pak(&pak_path) {
             out.extend(meta.dependencies);
         }
@@ -593,6 +706,7 @@ fn collect_dependencies(
 
     out.sort();
     out.dedup();
+    out.retain(|dep| !dep.eq_ignore_ascii_case(&mod_entry.id));
     out
 }
 
@@ -666,6 +780,7 @@ fn print_help() {
     println!("  sigilsmith                     Launch TUI");
     println!("  sigilsmith mods list            List mods");
     println!("  sigilsmith profiles list        List profiles");
+    println!("  sigilsmith deps list            List dependencies for installed mods");
     println!("  sigilsmith deps missing         List missing dependencies");
     println!("  sigilsmith paths                Show detected paths");
     println!("  sigilsmith --import <paths...>  Import mods without the TUI");

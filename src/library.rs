@@ -241,7 +241,7 @@ impl Default for ModSource {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum InstallTarget {
     Pak { file: String, info: PakInfo },
@@ -276,7 +276,7 @@ pub struct TargetOverride {
     pub enabled: bool,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PakInfo {
     pub uuid: String,
     pub name: String,

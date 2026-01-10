@@ -125,6 +125,7 @@ pub enum DialogKind {
         id: String,
         name: String,
         native: bool,
+        dependents: Vec<DependentMod>,
     },
     MoveBlocked {
         resume_move_mode: bool,
@@ -171,6 +172,12 @@ pub struct DependencyQueue {
     pub selected: usize,
     pub downloads_dir: PathBuf,
     pub last_scan: Instant,
+}
+
+#[derive(Debug, Clone)]
+pub struct DependentMod {
+    pub id: String,
+    pub name: String,
 }
 
 #[derive(Debug, Clone)]
@@ -452,6 +459,10 @@ pub struct App {
     smart_rank_mode: Option<SmartRankMode>,
     smart_rank_tx: Sender<SmartRankMessage>,
     smart_rank_rx: Receiver<SmartRankMessage>,
+    native_sync_tx: Sender<NativeSyncMessage>,
+    native_sync_rx: Receiver<NativeSyncMessage>,
+    native_sync_active: bool,
+    native_sync_progress: Option<NativeSyncProgress>,
     metadata_tx: Sender<MetadataMessage>,
     metadata_rx: Receiver<MetadataMessage>,
     metadata_active: bool,
@@ -459,6 +470,9 @@ pub struct App {
     update_rx: Receiver<UpdateMessage>,
     update_active: bool,
     update_started_at: Option<Instant>,
+    startup_pending: bool,
+    startup_mode: StartupMode,
+    startup_post_sync_pending: bool,
     hotkey_pending_focus: Option<Focus>,
     hotkey_transition_at: Option<Instant>,
     hotkey_fade_until: Option<Instant>,
@@ -469,6 +483,7 @@ pub struct App {
     import_batches: VecDeque<importer::ImportBatch>,
     pending_import_batch: Option<importer::ImportBatch>,
     dependency_queue: Option<DependencyQueue>,
+    pending_dependency_enable: Option<Vec<String>>,
     import_failures: Vec<importer::ImportFailure>,
     import_progress: Option<importer::ImportProgress>,
     import_summary_pending: bool,
@@ -544,6 +559,12 @@ pub enum SmartRankMode {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StartupMode {
+    Ui,
+    Cli,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CliVerbosity {
     Quiet,
     Normal,
@@ -573,8 +594,61 @@ pub enum SmartRankMessage {
     Failed(String),
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NativeSyncStage {
+    NativeFiles,
+    AdoptNative,
+    AddMissing,
+}
+
+impl NativeSyncStage {
+    fn label(self) -> &'static str {
+        match self {
+            NativeSyncStage::NativeFiles => "Native mods",
+            NativeSyncStage::AdoptNative => "Adopting native",
+            NativeSyncStage::AddMissing => "Adding missing",
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct NativeSyncProgress {
+    pub stage: NativeSyncStage,
+    pub current: usize,
+    pub total: usize,
+}
+
+#[derive(Debug, Clone)]
+pub struct NativeModUpdate {
+    pub id: String,
+    pub source: ModSource,
+    pub name: String,
+    pub source_label: Option<String>,
+    pub targets: Vec<InstallTarget>,
+    pub created_at: Option<i64>,
+    pub modified_at: Option<i64>,
+}
+
+#[derive(Debug, Clone)]
+pub struct NativeSyncDelta {
+    pub updates: Vec<NativeModUpdate>,
+    pub added: Vec<ModEntry>,
+    pub updated_native_files: usize,
+    pub adopted_native: usize,
+    pub modsettings_exists: bool,
+    pub enabled_set: HashSet<String>,
+    pub order: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+pub enum NativeSyncMessage {
+    Progress(NativeSyncProgress),
+    Completed(NativeSyncDelta),
+    Skipped(String),
+}
+
 impl App {
-    pub fn initialize() -> Result<Self> {
+    pub fn initialize(mode: StartupMode) -> Result<Self> {
         let mut setup_error = None;
         let mut app_config = AppConfig::load_or_create()?;
         if app_config.downloads_dir.as_os_str().is_empty() {
@@ -624,6 +698,7 @@ impl App {
         let (deploy_tx, deploy_rx) = mpsc::channel();
         let (conflict_tx, conflict_rx) = mpsc::channel();
         let (smart_rank_tx, smart_rank_rx) = mpsc::channel();
+        let (native_sync_tx, native_sync_rx) = mpsc::channel();
         let (metadata_tx, metadata_rx) = mpsc::channel();
         let (update_tx, update_rx) = mpsc::channel();
         let log_path = config.data_dir.join("sigilsmith.log");
@@ -661,6 +736,10 @@ impl App {
             smart_rank_mode: None,
             smart_rank_tx,
             smart_rank_rx,
+            native_sync_tx,
+            native_sync_rx,
+            native_sync_active: false,
+            native_sync_progress: None,
             metadata_tx,
             metadata_rx,
             metadata_active: false,
@@ -668,6 +747,9 @@ impl App {
             update_rx,
             update_active: false,
             update_started_at: None,
+            startup_pending: true,
+            startup_mode: mode,
+            startup_post_sync_pending: false,
             hotkey_pending_focus: None,
             hotkey_transition_at: None,
             hotkey_fade_until: None,
@@ -678,6 +760,7 @@ impl App {
             import_batches: VecDeque::new(),
             pending_import_batch: None,
             dependency_queue: None,
+            pending_dependency_enable: None,
             import_failures: Vec::new(),
             import_progress: None,
             import_summary_pending: false,
@@ -733,14 +816,33 @@ impl App {
             );
         }
         app.ensure_setup();
-        app.sync_native_mods();
-        app.start_metadata_refresh();
-        app.queue_conflict_scan("startup");
-        if app.paths_ready() {
-            app.start_smart_rank_scan(SmartRankMode::Warmup);
+        if matches!(mode, StartupMode::Cli) {
+            app.finish_startup();
         }
-        app.start_update_check();
         Ok(app)
+    }
+
+    pub fn finish_startup(&mut self) {
+        if !self.startup_pending {
+            return;
+        }
+        self.startup_pending = false;
+        if matches!(self.startup_mode, StartupMode::Ui) {
+            self.startup_post_sync_pending = true;
+            self.start_native_sync();
+        } else {
+            self.run_native_sync_inline();
+            self.run_post_sync_tasks();
+        }
+    }
+
+    fn run_post_sync_tasks(&mut self) {
+        self.start_metadata_refresh();
+        self.queue_conflict_scan("startup");
+        if self.paths_ready() {
+            self.start_smart_rank_scan(SmartRankMode::Warmup);
+        }
+        self.start_update_check();
     }
 
     pub fn profile_counts(&self) -> (usize, usize) {
@@ -1183,12 +1285,18 @@ impl App {
     }
 
     pub fn is_busy(&self) -> bool {
-        self.import_active.is_some()
+        self.startup_pending
+            || self.native_sync_active
+            || self.import_active.is_some()
             || self.deploy_active
             || self.deploy_pending
             || self.conflict_active
             || self.conflict_pending
             || self.smart_rank_active
+    }
+
+    pub fn startup_pending(&self) -> bool {
+        self.startup_pending
     }
 
     pub fn override_swap_info(&self) -> Option<OverrideSwapInfo> {
@@ -1471,7 +1579,7 @@ impl App {
         self.status = format!("Active game: {}", game_id.display_name());
         self.log_info(format!("Active game: {}", game_id.display_name()));
         self.ensure_setup();
-        self.sync_native_mods();
+        self.run_native_sync_inline();
         self.queue_conflict_scan("game changed");
         Ok(())
     }
@@ -1741,6 +1849,7 @@ impl App {
             return;
         }
 
+        let dependents = self.find_dependents(&id);
         let is_native = self
             .library
             .mods
@@ -1748,7 +1857,7 @@ impl App {
             .find(|entry| entry.id == id)
             .map(|entry| entry.is_native())
             .unwrap_or(false);
-        let message = String::new();
+        let message = build_dependent_message(&dependents);
         let (title, yes_label, toggle) = if is_native {
             (
                 "Remove Native Mod".to_string(),
@@ -1778,9 +1887,31 @@ impl App {
                 id,
                 name,
                 native: is_native,
+                dependents,
             },
             toggle,
         });
+    }
+
+    fn find_dependents(&self, target_id: &str) -> Vec<DependentMod> {
+        let mut out = Vec::new();
+        for mod_entry in &self.library.mods {
+            if mod_entry.id == target_id {
+                continue;
+            }
+            let deps = self.collect_mod_dependencies(mod_entry);
+            if deps
+                .iter()
+                .any(|dep| dep.eq_ignore_ascii_case(target_id))
+            {
+                out.push(DependentMod {
+                    id: mod_entry.id.clone(),
+                    name: mod_entry.display_name(),
+                });
+            }
+        }
+        out.sort_by(|a, b| a.name.cmp(&b.name));
+        out
     }
 
     pub fn prompt_move_blocked(&mut self, resume_move_mode: bool) {
@@ -2462,6 +2593,9 @@ impl App {
     }
 
     pub fn enter_import_mode(&mut self) {
+        if self.block_mod_changes("import") {
+            return;
+        }
         self.move_mode = false;
         self.input_mode = InputMode::Editing {
             prompt: "Import path".to_string(),
@@ -2497,6 +2631,10 @@ impl App {
 
     pub fn dependency_queue_active(&self) -> bool {
         self.dependency_queue.is_some()
+    }
+
+    pub fn dependency_queue_enable_pending(&self) -> bool {
+        self.pending_dependency_enable.is_some()
     }
 
     pub fn dependency_queue_move(&mut self, delta: isize) {
@@ -2546,7 +2684,13 @@ impl App {
     }
 
     pub fn dependency_queue_cancel(&mut self) {
-        self.prompt_cancel_import();
+        if self.pending_import_batch.is_some() {
+            self.prompt_cancel_import();
+            return;
+        }
+        self.dependency_queue = None;
+        self.pending_dependency_enable = None;
+        self.status = "Dependency check canceled".to_string();
     }
 
     pub fn dependency_queue_link(&self) -> Option<String> {
@@ -2587,6 +2731,19 @@ impl App {
         } else {
             self.status = "Opened downloads folder".to_string();
         }
+    }
+
+    fn block_mod_changes(&mut self, action: &str) -> bool {
+        if !self.native_sync_active {
+            return false;
+        }
+        self.status = format!("Startup sync running: {action} blocked");
+        self.set_toast(
+            "Startup sync in progress - please wait",
+            ToastLevel::Warn,
+            Duration::from_secs(2),
+        );
+        true
     }
 
     fn dependency_queue_selected(&self) -> Option<&DependencyItem> {
@@ -2655,6 +2812,9 @@ impl App {
     }
 
     pub fn import_mod(&mut self, raw_path: String) -> Result<()> {
+        if self.block_mod_changes("import") {
+            return Ok(());
+        }
         let path = expand_tilde(raw_path.trim());
         if !path.exists() {
             let display = display_path(&path);
@@ -3052,6 +3212,7 @@ impl App {
     }
 
     pub fn poll_imports(&mut self) {
+        self.poll_native_sync();
         loop {
             match self.import_rx.try_recv() {
                 Ok(message) => self.handle_import_message(message),
@@ -3072,6 +3233,16 @@ impl App {
         self.maybe_start_deploy();
         self.poll_conflicts();
         self.maybe_start_conflict_scan();
+
+        if self.dependency_queue.is_none()
+            && self.import_active.is_none()
+            && self.import_queue.is_empty()
+            && self.import_batches.is_empty()
+            && self.pending_duplicate.is_none()
+            && self.dialog.is_none()
+        {
+            self.apply_pending_dependency_enable();
+        }
     }
 
     pub fn poll_smart_rank(&mut self) {
@@ -3147,6 +3318,86 @@ impl App {
             };
             let _ = tx.send(message);
         });
+    }
+
+    fn start_native_sync(&mut self) {
+        if self.native_sync_active {
+            return;
+        }
+        self.native_sync_active = true;
+        self.native_sync_progress = None;
+        self.status = "Syncing native mods...".to_string();
+        let tx = self.native_sync_tx.clone();
+        let config = self.config.clone();
+        let library = self.library.clone();
+        let game_id = self.game_id;
+        thread::spawn(move || {
+            match sync_native_mods_delta(game_id, &config, &library, Some(&tx)) {
+                Ok(delta) => {
+                    let _ = tx.send(NativeSyncMessage::Completed(delta));
+                }
+                Err(reason) => {
+                    let _ = tx.send(NativeSyncMessage::Skipped(reason));
+                }
+            }
+        });
+    }
+
+    fn run_native_sync_inline(&mut self) {
+        match sync_native_mods_delta(self.game_id, &self.config, &self.library, None) {
+            Ok(delta) => {
+                self.apply_native_sync_delta(delta);
+            }
+            Err(reason) => {
+                self.log_warn(format!("Native mod sync skipped: {reason}"));
+            }
+        }
+    }
+
+    fn poll_native_sync(&mut self) {
+        loop {
+            match self.native_sync_rx.try_recv() {
+                Ok(message) => match message {
+                    NativeSyncMessage::Progress(progress) => {
+                        let label = progress.stage.label();
+                        self.native_sync_progress = Some(progress.clone());
+                        if progress.total > 0 {
+                            self.status = format!(
+                                "{label}: {}/{}",
+                                progress.current, progress.total
+                            );
+                        } else {
+                            self.status = format!("{label}: working...");
+                        }
+                    }
+                    NativeSyncMessage::Completed(delta) => {
+                        self.native_sync_active = false;
+                        self.native_sync_progress = None;
+                        self.apply_native_sync_delta(delta);
+                        if self.startup_post_sync_pending {
+                            self.startup_post_sync_pending = false;
+                            self.run_post_sync_tasks();
+                        }
+                    }
+                    NativeSyncMessage::Skipped(reason) => {
+                        self.native_sync_active = false;
+                        self.native_sync_progress = None;
+                        self.status = format!("Native mod sync skipped: {reason}");
+                        self.log_warn(format!("Native mod sync skipped: {reason}"));
+                        if self.startup_post_sync_pending {
+                            self.startup_post_sync_pending = false;
+                            self.run_post_sync_tasks();
+                        }
+                    }
+                },
+                Err(TryRecvError::Empty) => break,
+                Err(TryRecvError::Disconnected) => {
+                    self.native_sync_active = false;
+                    self.native_sync_progress = None;
+                    break;
+                }
+            }
+        }
     }
 
     fn start_update_check(&mut self) {
@@ -3678,6 +3929,7 @@ impl App {
         };
 
         self.pending_import_batch = Some(batch.clone());
+        self.pending_dependency_enable = None;
         self.dependency_queue = Some(queue);
         self.status = "Missing dependencies detected".to_string();
         self.log_warn("Missing dependencies detected".to_string());
@@ -3743,14 +3995,102 @@ impl App {
         })
     }
 
+    fn build_dependency_queue_for_mods(&self, mods: &[ModEntry]) -> Option<DependencyQueue> {
+        let existing_ids: HashSet<String> =
+            self.library.mods.iter().map(|entry| entry.id.clone()).collect();
+        let mut missing: HashMap<String, DependencyItem> = HashMap::new();
+
+        for mod_entry in mods {
+            let deps = self.collect_mod_dependencies(mod_entry);
+            if deps.is_empty() {
+                continue;
+            }
+            let required_by = mod_entry.display_name();
+            for dep in deps {
+                if existing_ids.contains(&dep) {
+                    continue;
+                }
+                let entry = missing.entry(dep.clone()).or_insert_with(|| {
+                    let label = dep.clone();
+                    let mut match_keys = Vec::new();
+                    match_keys.push(normalize_label(&label));
+                    match_keys.sort();
+                    match_keys.dedup();
+                    DependencyItem {
+                        label,
+                        required_by: Vec::new(),
+                        status: DependencyStatus::Missing,
+                        link: None,
+                        matched_path: None,
+                        last_size: None,
+                        stable_ticks: 0,
+                        match_keys,
+                    }
+                });
+                entry.required_by.push(required_by.clone());
+            }
+        }
+
+        if missing.is_empty() {
+            return None;
+        }
+
+        let mut items: Vec<DependencyItem> = missing.into_values().collect();
+        for item in &mut items {
+            item.required_by.sort();
+            item.required_by.dedup();
+        }
+        items.sort_by(|a, b| a.label.cmp(&b.label));
+        Some(DependencyQueue {
+            items,
+            selected: 0,
+            downloads_dir: self.app_config.downloads_dir.clone(),
+            last_scan: Instant::now(),
+        })
+    }
+
     fn collect_mod_dependencies(&self, mod_entry: &ModEntry) -> Vec<String> {
         let mod_root = library_mod_root(&self.config.data_dir).join(&mod_entry.id);
+        let mut native_paths = None;
+        let mut native_index = None;
+        if mod_entry.is_native() {
+            if let Ok(paths) = game::detect_paths(
+                self.game_id,
+                Some(&self.config.game_root),
+                Some(&self.config.larian_dir),
+            ) {
+                native_index = Some(native_pak::build_native_pak_index(&paths.larian_mods_dir));
+                native_paths = Some(paths);
+            }
+        }
         let mut deps = Vec::new();
         let mut json_deps = Vec::new();
 
         for target in &mod_entry.targets {
             if let InstallTarget::Pak { file, .. } = target {
-                let pak_path = mod_root.join(file);
+                let mut pak_path = mod_root.join(file);
+                if mod_entry.is_native() {
+                    if let Some(paths) = &native_paths {
+                        pak_path = paths.larian_mods_dir.join(file);
+                        if !pak_path.exists() {
+                            if let Some(info) = mod_entry.targets.iter().find_map(|target| {
+                                if let InstallTarget::Pak { info, .. } = target {
+                                    Some(info)
+                                } else {
+                                    None
+                                }
+                            }) {
+                                if let Some(index) = native_index.as_deref() {
+                                    if let Some(resolved) =
+                                        native_pak::resolve_native_pak_path(info, index)
+                                    {
+                                        pak_path = resolved;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
                 if let Some(meta) = metadata::read_meta_lsx_from_pak(&pak_path) {
                     deps.extend(meta.dependencies);
                 }
@@ -3777,6 +4117,7 @@ impl App {
         deps.extend(json_deps);
         deps.sort();
         deps.dedup();
+        deps.retain(|dep| !dep.eq_ignore_ascii_case(&mod_entry.id));
         deps
     }
 
@@ -3896,7 +4237,12 @@ impl App {
         };
 
         if !proceed {
-            self.cancel_pending_import(false);
+            if self.pending_import_batch.is_some() {
+                self.cancel_pending_import(false);
+            } else {
+                self.pending_dependency_enable = None;
+                self.status = "Dependency check canceled".to_string();
+            }
             return;
         }
 
@@ -3913,8 +4259,12 @@ impl App {
             self.import_queue.push_front(path);
         }
 
-        self.status = "Continuing import".to_string();
-        self.start_next_import();
+        if !self.import_queue.is_empty() {
+            self.status = "Continuing import".to_string();
+            self.start_next_import();
+        } else if self.pending_dependency_enable.is_some() {
+            self.apply_pending_dependency_enable();
+        }
     }
 
     fn cancel_pending_import(&mut self, keep_files: bool) {
@@ -4237,7 +4587,12 @@ impl App {
                     }
                 }
             }
-            DialogKind::DeleteMod { id, name, native } => {
+            DialogKind::DeleteMod {
+                id,
+                name,
+                native,
+                dependents,
+            } => {
                 if matches!(choice, DialogChoice::Yes) {
                     let mut remove_native_files = false;
                     if let Some(toggle) = dialog.toggle {
@@ -4254,6 +4609,14 @@ impl App {
                     }
                     self.status = format!("Mod removed: {name}");
                     self.log_info(format!("Mod removed: {name}"));
+                    let dependent_ids: Vec<String> =
+                        dependents.iter().map(|item| item.id.clone()).collect();
+                    let disabled = self.disable_mods_by_id(&dependent_ids);
+                    if disabled > 0 {
+                        self.status = format!("Disabled {disabled} dependent mod(s)");
+                        self.log_warn(format!("Disabled {disabled} dependent mod(s)"));
+                        self.queue_auto_deploy("dependency disabled");
+                    }
                     self.clamp_selection();
                     self.queue_auto_deploy("mod removed");
                 }
@@ -4378,6 +4741,26 @@ impl App {
         true
     }
 
+    fn disable_mods_by_id(&mut self, ids: &[String]) -> usize {
+        if ids.is_empty() {
+            return 0;
+        }
+        let id_set: HashSet<&str> = ids.iter().map(|id| id.as_str()).collect();
+        let mut changed = 0;
+        for profile in &mut self.library.profiles {
+            for entry in &mut profile.order {
+                if id_set.contains(entry.id.as_str()) && entry.enabled {
+                    entry.enabled = false;
+                    changed += 1;
+                }
+            }
+        }
+        if changed > 0 {
+            let _ = self.library.save(&self.config.data_dir);
+        }
+        changed
+    }
+
     fn remove_native_mod_files(&mut self, mod_entry: &ModEntry) {
         let paths = match game::detect_paths(
             self.game_id,
@@ -4427,232 +4810,87 @@ impl App {
         let _ = fs::remove_dir_all(&mod_root);
     }
 
-    fn sync_native_mods(&mut self) {
-        let paths = match game::detect_paths(
-            self.game_id,
-            Some(&self.config.game_root),
-            Some(&self.config.larian_dir),
-        ) {
-            Ok(paths) => paths,
-            Err(err) => {
-                self.log_warn(format!("Native mod sync skipped: {err}"));
-                return;
-            }
-        };
-        let modsettings_exists = paths.modsettings_path.exists();
-        let native_pak_index = native_pak::build_native_pak_index(&paths.larian_mods_dir);
+    fn apply_native_sync_delta(&mut self, delta: NativeSyncDelta) {
+        let mut changed = false;
+        let updated_native_files = delta.updated_native_files;
+        let adopted_native = delta.adopted_native;
 
-        let snapshot = match deploy::read_modsettings_snapshot(&paths.modsettings_path) {
-            Ok(snapshot) => snapshot,
-            Err(err) => {
-                self.log_warn(format!("Native mod sync failed: {err}"));
-                return;
-            }
-        };
-        let deploy::ModSettingsSnapshot { modules, order } = snapshot;
-        let modules_set: HashSet<String> = modules
-            .iter()
-            .map(|module| module.info.uuid.clone())
-            .collect();
-        let module_created_by_uuid: HashMap<String, Option<i64>> = modules
-            .iter()
-            .map(|module| (module.info.uuid.clone(), module.created_at))
-            .collect();
-
-        let mut existing_ids: HashSet<String> = self
-            .library
-            .mods
-            .iter()
-            .map(|entry| entry.id.clone())
-            .collect();
-        let order_set: HashSet<String> = order.iter().cloned().collect();
-        let mut modules_by_uuid: HashMap<String, deploy::ModSettingsModule> = modules
-            .into_iter()
-            .map(|module| (module.info.uuid.clone(), module))
-            .collect();
-
-        let mods_root = self.config.data_dir.join("mods");
-        let mut updated_native_files = 0usize;
-        for mod_entry in self
-            .library
-            .mods
-            .iter_mut()
-            .filter(|entry| entry.is_native())
-        {
-            let Some(info) = mod_entry.targets.iter().find_map(|target| match target {
-                crate::library::InstallTarget::Pak { info, .. } => Some(info.clone()),
-                _ => None,
-            }) else {
-                continue;
-            };
-            let Some(filename) = native_pak::resolve_native_pak_filename(&info, &native_pak_index)
+        for update in delta.updates {
+            let Some(entry) = self
+                .library
+                .mods
+                .iter_mut()
+                .find(|entry| entry.id == update.id)
             else {
                 continue;
             };
-            let mut changed = false;
-            for target in &mut mod_entry.targets {
-                if let crate::library::InstallTarget::Pak { file, .. } = target {
-                    if *file != filename {
-                        *file = filename.clone();
-                        changed = true;
-                    }
-                }
+            if entry.source != update.source {
+                entry.source = update.source;
+                changed = true;
             }
-            {
-                let pak_path = paths.larian_mods_dir.join(&filename);
-                let modsettings_created =
-                    module_created_by_uuid.get(&mod_entry.id).copied().flatten();
-                let meta_created =
-                    metadata::read_meta_lsx_from_pak(&pak_path).and_then(|meta| meta.created_at);
-                let (raw_created, raw_modified) = path_times(&pak_path);
-                let primary_created = earliest_timestamp(&[modsettings_created, meta_created]);
-                let (created_at, modified_at) =
-                    resolve_native_times(primary_created, raw_created, raw_modified);
-                if primary_created.is_some() {
-                    if created_at.is_some() && mod_entry.created_at != created_at {
-                        mod_entry.created_at = created_at;
-                    }
-                } else if should_clear_native_created(
-                    mod_entry.created_at,
-                    raw_created,
-                    raw_modified,
-                    mod_entry.added_at,
-                ) {
-                    mod_entry.created_at = None;
-                }
-                if let Some(modified_at) = modified_at {
-                    if mod_entry.modified_at.is_none()
-                        || mod_entry
-                            .modified_at
-                            .map(|value| value < modified_at)
-                            .unwrap_or(true)
-                    {
-                        mod_entry.modified_at = Some(modified_at);
-                    }
-                }
+            if entry.name != update.name {
+                entry.name = update.name;
+                changed = true;
             }
-            if changed {
-                updated_native_files += 1;
+            if entry.source_label != update.source_label {
+                entry.source_label = update.source_label;
+                changed = true;
+            }
+            if entry.targets != update.targets {
+                entry.targets = update.targets;
+                changed = true;
+            }
+            if entry.created_at != update.created_at {
+                entry.created_at = update.created_at;
+                changed = true;
+            }
+            if entry.modified_at != update.modified_at {
+                entry.modified_at = update.modified_at;
+                changed = true;
             }
         }
-
-        let mut adopted_native = 0usize;
-        for mod_entry in self
-            .library
-            .mods
-            .iter_mut()
-            .filter(|entry| !entry.is_native())
-        {
-            if !modules_set.contains(&mod_entry.id) {
-                continue;
-            }
-            if mods_root.join(&mod_entry.id).exists() {
-                continue;
-            }
-            let Some(module) = modules_by_uuid.get(&mod_entry.id) else {
-                continue;
-            };
-            let info = &module.info;
-            let modsettings_created = module.created_at;
-            let filename = native_pak::resolve_native_pak_filename(info, &native_pak_index)
-                .unwrap_or_else(|| format!("{}.pak", info.folder));
-            mod_entry.source = ModSource::Native;
-            mod_entry.name = info.name.clone();
-            mod_entry.source_label = None;
-            mod_entry.targets = vec![crate::library::InstallTarget::Pak {
-                file: filename.clone(),
-                info: info.clone(),
-            }];
-            let pak_path = paths.larian_mods_dir.join(&filename);
-            let meta_created =
-                metadata::read_meta_lsx_from_pak(&pak_path).and_then(|meta| meta.created_at);
-            let (raw_created, raw_modified) = path_times(&pak_path);
-            let primary_created = earliest_timestamp(&[modsettings_created, meta_created]);
-            let (created_at, modified_at) =
-                resolve_native_times(primary_created, raw_created, raw_modified);
-            if primary_created.is_some() {
-                mod_entry.created_at = created_at;
-            }
-            if let Some(modified_at) = modified_at {
-                mod_entry.modified_at = Some(modified_at);
-            }
-            adopted_native += 1;
-        }
-
-        let mut ordered = Vec::new();
-        for uuid in &order {
-            if let Some(module) = modules_by_uuid.remove(uuid) {
-                ordered.push(module);
-            }
-        }
-        ordered.extend(modules_by_uuid.into_values());
 
         let mut added = 0usize;
-        for module in ordered {
-            let info = module.info;
-            let modsettings_created = module.created_at;
-            let uuid = info.uuid.clone();
-            if existing_ids.contains(&uuid) {
-                continue;
+        if !delta.added.is_empty() {
+            let mut existing_ids: HashSet<String> = self
+                .library
+                .mods
+                .iter()
+                .map(|entry| entry.id.clone())
+                .collect();
+            for mod_entry in delta.added {
+                if existing_ids.insert(mod_entry.id.clone()) {
+                    self.library.mods.push(mod_entry);
+                    added += 1;
+                    changed = true;
+                }
             }
-            let filename = native_pak::resolve_native_pak_filename(&info, &native_pak_index)
-                .unwrap_or_else(|| format!("{}.pak", info.folder));
-            let pak_path = paths.larian_mods_dir.join(&filename);
-            let meta_created =
-                metadata::read_meta_lsx_from_pak(&pak_path).and_then(|meta| meta.created_at);
-            let (raw_created, raw_modified) = path_times(&pak_path);
-            let primary_created = earliest_timestamp(&[modsettings_created, meta_created]);
-            let (created_at, modified_at) =
-                resolve_native_times(primary_created, raw_created, raw_modified);
-            let mod_entry = ModEntry {
-                id: uuid.clone(),
-                name: info.name.clone(),
-                created_at,
-                modified_at,
-                added_at: now_timestamp(),
-                targets: vec![crate::library::InstallTarget::Pak {
-                    file: filename,
-                    info,
-                }],
-                target_overrides: Vec::new(),
-                source_label: None,
-                source: ModSource::Native,
-            };
-            self.library.mods.push(mod_entry);
-            existing_ids.insert(uuid);
-            added += 1;
+            if added > 0 {
+                self.library.ensure_mods_in_profiles();
+            }
         }
 
-        if added > 0 {
-            self.library.ensure_mods_in_profiles();
-        }
-
-        let mod_has_pak: HashMap<String, bool> = self
-            .library
-            .mods
-            .iter()
-            .map(|mod_entry| {
-                (
-                    mod_entry.id.clone(),
-                    mod_entry.has_target_kind(TargetKind::Pak),
-                )
-            })
-            .collect();
         let mut updated_enabled = false;
         let mut reordered = false;
-        if modsettings_exists {
-            let enabled_set: HashSet<String> = if order.is_empty() {
-                modules_set
-            } else {
-                order_set.clone()
-            };
+        if delta.modsettings_exists {
+            let mod_has_pak: HashMap<String, bool> = self
+                .library
+                .mods
+                .iter()
+                .map(|mod_entry| {
+                    (
+                        mod_entry.id.clone(),
+                        mod_entry.has_target_kind(TargetKind::Pak),
+                    )
+                })
+                .collect();
             if let Some(profile) = self.library.active_profile_mut() {
                 for entry in &mut profile.order {
                     let has_pak = mod_has_pak.get(&entry.id).copied().unwrap_or(false);
                     if !has_pak {
                         continue;
                     }
-                    let desired = enabled_set.contains(&entry.id);
+                    let desired = delta.enabled_set.contains(&entry.id);
                     if entry.enabled != desired {
                         entry.enabled = desired;
                         updated_enabled = true;
@@ -4660,7 +4898,7 @@ impl App {
                 }
             }
             if let Some(profile) = self.library.active_profile_mut() {
-                if !order.is_empty() {
+                if !delta.order.is_empty() {
                     let entry_map: HashMap<String, ProfileEntry> = profile
                         .order
                         .iter()
@@ -4679,7 +4917,7 @@ impl App {
                     }
                     let mut pak_set: HashSet<String> = pak_ids.iter().cloned().collect();
                     let mut pak_ordered = Vec::new();
-                    for uuid in &order {
+                    for uuid in &delta.order {
                         if pak_set.remove(uuid) {
                             pak_ordered.push(uuid.clone());
                         }
@@ -4713,6 +4951,7 @@ impl App {
             || reordered
             || updated_native_files > 0
             || adopted_native > 0
+            || changed
         {
             if let Err(err) = self.library.save(&self.config.data_dir) {
                 self.log_warn(format!("Native mod sync save failed: {err}"));
@@ -4731,6 +4970,9 @@ impl App {
             if reordered {
                 self.log_info("Native mod order synced".to_string());
             }
+            self.status = "Native mods synced".to_string();
+        } else {
+            self.status = "Native mods already synced".to_string();
         }
     }
 
@@ -4855,16 +5097,129 @@ impl App {
     }
 
     pub fn toggle_selected(&mut self) {
+        if self.block_mod_changes("toggle") {
+            return;
+        }
         let Some(index) = self.selected_profile_index() else {
             return;
         };
-        let Some(profile) = self.library.active_profile_mut() else {
+        let Some(profile) = self.library.active_profile() else {
             return;
         };
-        if let Some(entry) = profile.order.get_mut(index) {
-            entry.enabled = !entry.enabled;
+        let Some(entry) = profile.order.get(index) else {
+            return;
+        };
+        let id = entry.id.clone();
+        let enabled = entry.enabled;
+        if enabled {
+            self.set_mods_enabled_in_active(&[id], false);
             self.queue_auto_deploy("enable toggle");
+        } else {
+            self.enable_mods_with_dependencies(vec![id]);
         }
+    }
+
+    fn enable_mods_with_dependencies(&mut self, ids: Vec<String>) {
+        if self.block_mod_changes("enable") {
+            return;
+        }
+        let mut mods = Vec::new();
+        for id in &ids {
+            if let Some(entry) = self.library.mods.iter().find(|entry| entry.id == *id) {
+                mods.push(entry.clone());
+            }
+        }
+        if mods.is_empty() {
+            self.status = "No mods to enable".to_string();
+            return;
+        }
+
+        let mut dependency_ids: HashSet<String> = HashSet::new();
+        for mod_entry in &mods {
+            for dep in self.collect_mod_dependencies(mod_entry) {
+                dependency_ids.insert(dep);
+            }
+        }
+
+        let existing_ids: HashSet<String> =
+            self.library.mods.iter().map(|entry| entry.id.clone()).collect();
+        let mut missing = Vec::new();
+        let mut present = Vec::new();
+        for dep in dependency_ids {
+            if existing_ids.contains(&dep) {
+                present.push(dep);
+            } else {
+                missing.push(dep);
+            }
+        }
+
+        if !missing.is_empty() {
+            if !self.app_config.offer_dependency_downloads && !self.app_config.warn_missing_dependencies
+            {
+                self.status = "Missing dependencies; enable blocked".to_string();
+                self.log_warn("Missing dependencies; enable blocked".to_string());
+                return;
+            }
+            if let Some(queue) = self.build_dependency_queue_for_mods(&mods) {
+                let mut to_enable = ids.clone();
+                to_enable.extend(present);
+                to_enable.sort();
+                to_enable.dedup();
+                self.pending_dependency_enable = Some(to_enable);
+                self.dependency_queue = Some(queue);
+                self.status = "Missing dependencies detected".to_string();
+                self.log_warn("Missing dependencies detected".to_string());
+                return;
+            }
+            self.status = "Missing dependencies; enable blocked".to_string();
+            self.log_warn("Missing dependencies; enable blocked".to_string());
+            return;
+        }
+
+        let mut to_enable = ids;
+        to_enable.extend(present);
+        to_enable.sort();
+        to_enable.dedup();
+        let changed = self.set_mods_enabled_in_active(&to_enable, true);
+        if changed == 0 {
+            self.status = "Mods already enabled".to_string();
+            return;
+        }
+        self.status = format!("Enabled {changed} mod(s)");
+        self.log_info(format!("Enabled {changed} mod(s)"));
+        self.queue_auto_deploy("enable dependencies");
+    }
+
+    fn apply_pending_dependency_enable(&mut self) {
+        let Some(ids) = self.pending_dependency_enable.take() else {
+            return;
+        };
+        let changed = self.set_mods_enabled_in_active(&ids, true);
+        if changed == 0 {
+            self.status = "Dependencies already enabled".to_string();
+            return;
+        }
+        self.status = format!("Enabled {changed} dependency mod(s)");
+        self.log_info(format!("Enabled {changed} dependency mod(s)"));
+        self.queue_auto_deploy("dependency enable");
+    }
+
+    fn set_mods_enabled_in_active(&mut self, ids: &[String], enabled: bool) -> usize {
+        let Some(profile) = self.library.active_profile_mut() else {
+            return 0;
+        };
+        let id_set: HashSet<&str> = ids.iter().map(|id| id.as_str()).collect();
+        let mut changed = 0;
+        for entry in &mut profile.order {
+            if id_set.contains(entry.id.as_str()) && entry.enabled != enabled {
+                entry.enabled = enabled;
+                changed += 1;
+            }
+        }
+        if changed > 0 {
+            let _ = self.library.save(&self.config.data_dir);
+        }
+        changed
     }
 
     pub fn toggle_move_mode(&mut self) {
@@ -4887,6 +5242,7 @@ impl App {
         let Some(selected_id) = selected_id else {
             return;
         };
+        let dependents = self.find_dependents(&selected_id);
 
         if !self.remove_mod_by_id(&selected_id) {
             self.status = "No mod removed".to_string();
@@ -4895,6 +5251,14 @@ impl App {
 
         self.status = "Mod removed from library".to_string();
         self.log_info("Mod removed from library".to_string());
+        let dependent_ids: Vec<String> =
+            dependents.iter().map(|item| item.id.clone()).collect();
+        let disabled = self.disable_mods_by_id(&dependent_ids);
+        if disabled > 0 {
+            self.status = format!("Disabled {disabled} dependent mod(s)");
+            self.log_warn(format!("Disabled {disabled} dependent mod(s)"));
+            self.queue_auto_deploy("dependency disabled");
+        }
         self.clamp_selection();
         self.queue_auto_deploy("mod removed");
     }
@@ -5031,33 +5395,36 @@ impl App {
     }
 
     pub fn enable_visible_mods(&mut self) {
+        if self.block_mod_changes("enable") {
+            return;
+        }
         let indices = self.visible_profile_indices();
         if indices.is_empty() {
             self.status = "No visible mods to enable".to_string();
             return;
         }
-        let Some(profile) = self.library.active_profile_mut() else {
+        let Some(profile) = self.library.active_profile() else {
             return;
         };
-        let mut changed = 0;
+        let mut ids = Vec::new();
         for index in indices {
-            if let Some(entry) = profile.order.get_mut(index) {
+            if let Some(entry) = profile.order.get(index) {
                 if !entry.enabled {
-                    entry.enabled = true;
-                    changed += 1;
+                    ids.push(entry.id.clone());
                 }
             }
         }
-        if changed == 0 {
+        if ids.is_empty() {
             self.status = "Visible mods already enabled".to_string();
             return;
         }
-        self.status = format!("Enabled {changed} mod(s)");
-        self.log_info(format!("Enabled {changed} mod(s)"));
-        self.queue_auto_deploy("enable all");
+        self.enable_mods_with_dependencies(ids);
     }
 
     pub fn disable_visible_mods(&mut self) {
+        if self.block_mod_changes("disable") {
+            return;
+        }
         let indices = self.visible_profile_indices();
         if indices.is_empty() {
             self.status = "No visible mods to disable".to_string();
@@ -5085,6 +5452,9 @@ impl App {
     }
 
     pub fn invert_visible_mods(&mut self) {
+        if self.block_mod_changes("toggle") {
+            return;
+        }
         let indices = self.visible_profile_indices();
         if indices.is_empty() {
             self.status = "No visible mods to invert".to_string();
@@ -5834,6 +6204,24 @@ fn summarize_error(error: &str) -> String {
     last.to_string()
 }
 
+fn build_dependent_message(dependents: &[DependentMod]) -> String {
+    if dependents.is_empty() {
+        return String::new();
+    }
+    let mut lines = Vec::new();
+    lines.push("This mod is required by:".to_string());
+    let max_list = 6usize;
+    for dependent in dependents.iter().take(max_list) {
+        lines.push(format!("- {}", dependent.name));
+    }
+    if dependents.len() > max_list {
+        lines.push(format!("...and {} more", dependents.len() - max_list));
+    }
+    lines.push(String::new());
+    lines.push("Removing it will disable those mods.".to_string());
+    lines.join("\n")
+}
+
 fn similarity_ratio(a: &str, b: &str) -> f32 {
     if a.is_empty() && b.is_empty() {
         return 1.0;
@@ -6234,6 +6622,256 @@ fn collect_metadata_updates(
     }
 
     Ok(updates)
+}
+
+fn sync_native_mods_delta(
+    game_id: GameId,
+    config: &GameConfig,
+    library: &Library,
+    progress: Option<&Sender<NativeSyncMessage>>,
+) -> Result<NativeSyncDelta, String> {
+    let paths = game::detect_paths(game_id, Some(&config.game_root), Some(&config.larian_dir))
+        .map_err(|err| err.to_string())?;
+    let modsettings_exists = paths.modsettings_path.exists();
+    let native_pak_index = native_pak::build_native_pak_index(&paths.larian_mods_dir);
+
+    let snapshot =
+        deploy::read_modsettings_snapshot(&paths.modsettings_path).map_err(|err| err.to_string())?;
+    let deploy::ModSettingsSnapshot { modules, order } = snapshot;
+    let modules_set: HashSet<String> = modules
+        .iter()
+        .map(|module| module.info.uuid.clone())
+        .collect();
+    let order_set: HashSet<String> = order.iter().cloned().collect();
+    let enabled_set: HashSet<String> = if order.is_empty() {
+        modules_set.clone()
+    } else {
+        order_set
+    };
+    let module_created_by_uuid: HashMap<String, Option<i64>> = modules
+        .iter()
+        .map(|module| (module.info.uuid.clone(), module.created_at))
+        .collect();
+
+    let mut existing_ids: HashSet<String> = library
+        .mods
+        .iter()
+        .map(|entry| entry.id.clone())
+        .collect();
+    let mut modules_by_uuid: HashMap<String, deploy::ModSettingsModule> = modules
+        .into_iter()
+        .map(|module| (module.info.uuid.clone(), module))
+        .collect();
+
+    let mods_root = config.data_dir.join("mods");
+    let mut updates = Vec::new();
+    let mut updated_native_files = 0usize;
+
+    let native_mods: Vec<&ModEntry> = library
+        .mods
+        .iter()
+        .filter(|entry| entry.is_native())
+        .collect();
+    let total_native = native_mods.len();
+    for (index, mod_entry) in native_mods.iter().enumerate() {
+        if let Some(tx) = progress {
+            let _ = tx.send(NativeSyncMessage::Progress(NativeSyncProgress {
+                stage: NativeSyncStage::NativeFiles,
+                current: index + 1,
+                total: total_native,
+            }));
+        }
+
+        let Some(info) = mod_entry.targets.iter().find_map(|target| match target {
+            InstallTarget::Pak { info, .. } => Some(info.clone()),
+            _ => None,
+        }) else {
+            continue;
+        };
+        let Some(filename) = native_pak::resolve_native_pak_filename(&info, &native_pak_index)
+        else {
+            continue;
+        };
+        let mut targets = mod_entry.targets.clone();
+        let mut changed = false;
+        for target in &mut targets {
+            if let InstallTarget::Pak { file, .. } = target {
+                if *file != filename {
+                    *file = filename.clone();
+                    changed = true;
+                }
+            }
+        }
+
+        let pak_path = paths.larian_mods_dir.join(&filename);
+        let modsettings_created = module_created_by_uuid.get(&mod_entry.id).copied().flatten();
+        let meta_created =
+            metadata::read_meta_lsx_from_pak(&pak_path).and_then(|meta| meta.created_at);
+        let (raw_created, raw_modified) = path_times(&pak_path);
+        let primary_created = earliest_timestamp(&[modsettings_created, meta_created]);
+        let (created_at, modified_at) =
+            resolve_native_times(primary_created, raw_created, raw_modified);
+
+        let mut next_created = mod_entry.created_at;
+        let mut next_modified = mod_entry.modified_at;
+        if primary_created.is_some() {
+            if created_at.is_some() && mod_entry.created_at != created_at {
+                next_created = created_at;
+            }
+        } else if should_clear_native_created(
+            mod_entry.created_at,
+            raw_created,
+            raw_modified,
+            mod_entry.added_at,
+        ) {
+            next_created = None;
+        }
+        if let Some(modified_at) = modified_at {
+            if mod_entry.modified_at.is_none()
+                || mod_entry
+                    .modified_at
+                    .map(|value| value < modified_at)
+                    .unwrap_or(true)
+            {
+                next_modified = Some(modified_at);
+            }
+        }
+
+        if changed {
+            updated_native_files += 1;
+        }
+
+        updates.push(NativeModUpdate {
+            id: mod_entry.id.clone(),
+            source: mod_entry.source,
+            name: mod_entry.name.clone(),
+            source_label: mod_entry.source_label.clone(),
+            targets,
+            created_at: next_created,
+            modified_at: next_modified,
+        });
+    }
+
+    let mut adopted_native = 0usize;
+    let non_native_mods: Vec<&ModEntry> = library
+        .mods
+        .iter()
+        .filter(|entry| !entry.is_native())
+        .collect();
+    let total_adopt = non_native_mods.len();
+    for (index, mod_entry) in non_native_mods.iter().enumerate() {
+        if let Some(tx) = progress {
+            let _ = tx.send(NativeSyncMessage::Progress(NativeSyncProgress {
+                stage: NativeSyncStage::AdoptNative,
+                current: index + 1,
+                total: total_adopt,
+            }));
+        }
+        if !modules_set.contains(&mod_entry.id) {
+            continue;
+        }
+        if mods_root.join(&mod_entry.id).exists() {
+            continue;
+        }
+        let Some(module) = modules_by_uuid.get(&mod_entry.id) else {
+            continue;
+        };
+        let info = &module.info;
+        let modsettings_created = module.created_at;
+        let filename = native_pak::resolve_native_pak_filename(info, &native_pak_index)
+            .unwrap_or_else(|| format!("{}.pak", info.folder));
+        let pak_path = paths.larian_mods_dir.join(&filename);
+        let meta_created =
+            metadata::read_meta_lsx_from_pak(&pak_path).and_then(|meta| meta.created_at);
+        let (raw_created, raw_modified) = path_times(&pak_path);
+        let primary_created = earliest_timestamp(&[modsettings_created, meta_created]);
+        let (created_at, modified_at) =
+            resolve_native_times(primary_created, raw_created, raw_modified);
+
+        let mut next_created = mod_entry.created_at;
+        let mut next_modified = mod_entry.modified_at;
+        if primary_created.is_some() {
+            next_created = created_at;
+        }
+        if let Some(modified_at) = modified_at {
+            next_modified = Some(modified_at);
+        }
+
+        updates.push(NativeModUpdate {
+            id: mod_entry.id.clone(),
+            source: ModSource::Native,
+            name: info.name.clone(),
+            source_label: None,
+            targets: vec![InstallTarget::Pak {
+                file: filename.clone(),
+                info: info.clone(),
+            }],
+            created_at: next_created,
+            modified_at: next_modified,
+        });
+        adopted_native += 1;
+    }
+
+    let mut ordered = Vec::new();
+    for uuid in &order {
+        if let Some(module) = modules_by_uuid.remove(uuid) {
+            ordered.push(module);
+        }
+    }
+    ordered.extend(modules_by_uuid.into_values());
+
+    let mut added = Vec::new();
+    let total_add = ordered.len();
+    for (index, module) in ordered.into_iter().enumerate() {
+        if let Some(tx) = progress {
+            let _ = tx.send(NativeSyncMessage::Progress(NativeSyncProgress {
+                stage: NativeSyncStage::AddMissing,
+                current: index + 1,
+                total: total_add,
+            }));
+        }
+        let info = module.info;
+        let modsettings_created = module.created_at;
+        let uuid = info.uuid.clone();
+        if existing_ids.contains(&uuid) {
+            continue;
+        }
+        let filename = native_pak::resolve_native_pak_filename(&info, &native_pak_index)
+            .unwrap_or_else(|| format!("{}.pak", info.folder));
+        let pak_path = paths.larian_mods_dir.join(&filename);
+        let meta_created =
+            metadata::read_meta_lsx_from_pak(&pak_path).and_then(|meta| meta.created_at);
+        let (raw_created, raw_modified) = path_times(&pak_path);
+        let primary_created = earliest_timestamp(&[modsettings_created, meta_created]);
+        let (created_at, modified_at) =
+            resolve_native_times(primary_created, raw_created, raw_modified);
+        let mod_entry = ModEntry {
+            id: uuid.clone(),
+            name: info.name.clone(),
+            created_at,
+            modified_at,
+            added_at: now_timestamp(),
+            targets: vec![InstallTarget::Pak {
+                file: filename,
+                info,
+            }],
+            target_overrides: Vec::new(),
+            source_label: None,
+            source: ModSource::Native,
+        };
+        added.push(mod_entry);
+        existing_ids.insert(uuid);
+    }
+
+    Ok(NativeSyncDelta {
+        updates,
+        added,
+        updated_native_files,
+        adopted_native,
+        modsettings_exists,
+        enabled_set,
+        order,
+    })
 }
 
 fn now_timestamp() -> i64 {
