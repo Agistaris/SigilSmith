@@ -20,7 +20,7 @@ use std::{
     fs,
     io::{self, Write},
     path::PathBuf,
-    process::Command,
+    process::{Command, Stdio},
     sync::{
         mpsc::{self, Receiver, Sender, TryRecvError},
         Arc, Mutex,
@@ -239,6 +239,7 @@ struct MetadataUpdate {
     id: String,
     created_at: Option<i64>,
     modified_at: Option<i64>,
+    dependencies: Vec<String>,
 }
 
 enum MetadataMessage {
@@ -457,6 +458,8 @@ pub struct App {
     pub smart_rank_progress: Option<smart_rank::SmartRankProgress>,
     smart_rank_active: bool,
     smart_rank_mode: Option<SmartRankMode>,
+    smart_rank_interrupt: bool,
+    smart_rank_refresh_pending: bool,
     smart_rank_tx: Sender<SmartRankMessage>,
     smart_rank_rx: Receiver<SmartRankMessage>,
     native_sync_tx: Sender<NativeSyncMessage>,
@@ -484,6 +487,9 @@ pub struct App {
     pending_import_batch: Option<importer::ImportBatch>,
     dependency_queue: Option<DependencyQueue>,
     pending_dependency_enable: Option<Vec<String>>,
+    dependency_cache: HashMap<String, Vec<String>>,
+    dependency_cache_ready: bool,
+    pending_delete_mod: Option<(String, String)>,
     import_failures: Vec<importer::ImportFailure>,
     import_progress: Option<importer::ImportProgress>,
     import_summary_pending: bool,
@@ -734,6 +740,8 @@ impl App {
             smart_rank_progress: None,
             smart_rank_active: false,
             smart_rank_mode: None,
+            smart_rank_interrupt: false,
+            smart_rank_refresh_pending: false,
             smart_rank_tx,
             smart_rank_rx,
             native_sync_tx,
@@ -761,6 +769,9 @@ impl App {
             pending_import_batch: None,
             dependency_queue: None,
             pending_dependency_enable: None,
+            dependency_cache: HashMap::new(),
+            dependency_cache_ready: false,
+            pending_delete_mod: None,
             import_failures: Vec::new(),
             import_progress: None,
             import_summary_pending: false,
@@ -1112,6 +1123,29 @@ impl App {
         }
 
         self.start_smart_rank_scan(SmartRankMode::Preview);
+    }
+
+    fn interrupt_smart_rank(&mut self, reason: &str) {
+        self.smart_rank_refresh_pending = true;
+        if !self.smart_rank_active {
+            return;
+        }
+        self.smart_rank_interrupt = true;
+        self.log_info(format!("Smart rank interrupted: {reason}"));
+    }
+
+    fn maybe_restart_smart_rank(&mut self) {
+        if !self.smart_rank_refresh_pending {
+            return;
+        }
+        if self.smart_rank_active || self.is_busy() {
+            return;
+        }
+        if !self.paths_ready() {
+            return;
+        }
+        self.smart_rank_refresh_pending = false;
+        self.start_smart_rank_scan(SmartRankMode::Warmup);
     }
 
     fn start_smart_rank_scan(&mut self, mode: SmartRankMode) {
@@ -1893,16 +1927,44 @@ impl App {
         });
     }
 
+    fn queue_pending_delete(&mut self, id: String, name: String) {
+        self.pending_delete_mod = Some((id, name));
+        if !self.metadata_active {
+            self.start_metadata_refresh();
+        }
+        self.status = "Checking dependencies...".to_string();
+        self.set_toast(
+            "Checking dependencies...",
+            ToastLevel::Info,
+            Duration::from_secs(2),
+        );
+    }
+
+    fn maybe_prompt_pending_delete(&mut self) {
+        if self.dialog.is_some() {
+            return;
+        }
+        let Some((id, name)) = self.pending_delete_mod.take() else {
+            return;
+        };
+        if self.library.mods.iter().any(|entry| entry.id == id) {
+            self.prompt_delete_mod(id, name);
+        }
+    }
+
     fn find_dependents(&self, target_id: &str) -> Vec<DependentMod> {
+        if !self.dependency_cache_ready {
+            return Vec::new();
+        }
         let mut out = Vec::new();
         for mod_entry in &self.library.mods {
             if mod_entry.id == target_id {
                 continue;
             }
-            let deps = self.collect_mod_dependencies(mod_entry);
+            let deps = self.dependency_cache.get(&mod_entry.id);
             if deps
-                .iter()
-                .any(|dep| dep.eq_ignore_ascii_case(target_id))
+                .map(|deps| deps.iter().any(|dep| dep.eq_ignore_ascii_case(target_id)))
+                .unwrap_or(false)
             {
                 out.push(DependentMod {
                     id: mod_entry.id.clone(),
@@ -2707,16 +2769,46 @@ impl App {
         self.dependency_queue.as_ref()
     }
 
+    fn open_external(&mut self, target: &str, label: &str) {
+        let mut errors = Vec::new();
+        let candidates = [
+            ("xdg-open", vec![target]),
+            ("gio", vec!["open", target]),
+            ("kde-open5", vec![target]),
+            ("kioclient5", vec!["exec", target]),
+        ];
+        for (command, args) in candidates {
+            match Command::new(command)
+                .args(&args)
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()
+            {
+                Ok(status) if status.success() => {
+                    self.status = format!("Opened {label}");
+                    return;
+                }
+                Ok(status) => {
+                    errors.push(format!("{command} exited {status}"));
+                }
+                Err(err) => {
+                    errors.push(format!("{command} failed: {err}"));
+                }
+            }
+        }
+        self.status = format!("Failed to open {label}");
+        if errors.is_empty() {
+            self.log_warn(format!("Failed to open {label}"));
+        } else {
+            self.log_warn(format!("Failed to open {label}: {}", errors.join("; ")));
+        }
+    }
+
     pub fn open_link(&mut self, link: &str) {
         if link.trim().is_empty() {
             return;
         }
-        if let Err(err) = Command::new("xdg-open").arg(link).spawn() {
-            self.status = format!("Failed to open link: {err}");
-            self.log_warn(format!("Failed to open link: {err}"));
-        } else {
-            self.status = "Opened link in browser".to_string();
-        }
+        self.open_external(link, "link");
     }
 
     pub fn open_downloads_dir(&mut self) {
@@ -2725,12 +2817,7 @@ impl App {
             self.status = "Downloads folder not set".to_string();
             return;
         }
-        if let Err(err) = Command::new("xdg-open").arg(&path).spawn() {
-            self.status = format!("Failed to open downloads folder: {err}");
-            self.log_warn(format!("Failed to open downloads folder: {err}"));
-        } else {
-            self.status = "Opened downloads folder".to_string();
-        }
+        self.open_external(&path, "downloads folder");
     }
 
     fn block_mod_changes(&mut self, action: &str) -> bool {
@@ -3250,6 +3337,9 @@ impl App {
             match self.smart_rank_rx.try_recv() {
                 Ok(message) => match message {
                     SmartRankMessage::Progress(progress) => {
+                        if self.smart_rank_interrupt {
+                            continue;
+                        }
                         self.smart_rank_progress = Some(progress.clone());
                         let label = progress.group.label();
                         if progress.total > 0 {
@@ -3262,6 +3352,14 @@ impl App {
                         }
                     }
                     SmartRankMessage::Finished(result) => {
+                        if self.smart_rank_interrupt {
+                            self.smart_rank_active = false;
+                            self.smart_rank_progress = None;
+                            self.smart_rank_mode = None;
+                            self.smart_rank_interrupt = false;
+                            self.log_info("Smart rank result ignored (stale)".to_string());
+                            continue;
+                        }
                         match self.smart_rank_mode.unwrap_or(SmartRankMode::Preview) {
                             SmartRankMode::Preview => {
                                 self.finalize_smart_rank_preview(result);
@@ -3283,6 +3381,14 @@ impl App {
                         }
                     }
                     SmartRankMessage::Failed(err) => {
+                        if self.smart_rank_interrupt {
+                            self.smart_rank_active = false;
+                            self.smart_rank_mode = None;
+                            self.smart_rank_progress = None;
+                            self.smart_rank_interrupt = false;
+                            self.log_warn("Smart rank failed after interrupt".to_string());
+                            continue;
+                        }
                         self.smart_rank_active = false;
                         self.smart_rank_mode = None;
                         self.smart_rank_progress = None;
@@ -3297,6 +3403,7 @@ impl App {
                 }
             }
         }
+        self.maybe_restart_smart_rank();
     }
 
     fn start_metadata_refresh(&mut self) {
@@ -3507,10 +3614,16 @@ impl App {
                     MetadataMessage::Completed { updates } => {
                         self.metadata_active = false;
                         if updates.is_empty() {
+                            self.dependency_cache_ready = !self.dependency_cache.is_empty();
+                            self.maybe_prompt_pending_delete();
                             continue;
                         }
                         let mut updated = false;
+                        let mut cache_updated = false;
                         for update in updates {
+                            self.dependency_cache
+                                .insert(update.id.clone(), update.dependencies);
+                            cache_updated = true;
                             if let Some(mod_entry) = self
                                 .library
                                 .mods
@@ -3527,10 +3640,14 @@ impl App {
                                 }
                             }
                         }
+                        if cache_updated {
+                            self.dependency_cache_ready = true;
+                        }
                         if updated {
                             let _ = self.library.save(&self.config.data_dir);
                             self.log_info("Metadata refresh applied".to_string());
                         }
+                        self.maybe_prompt_pending_delete();
                     }
                     MetadataMessage::Failed { error } => {
                         self.metadata_active = false;
@@ -4001,7 +4118,7 @@ impl App {
         let mut missing: HashMap<String, DependencyItem> = HashMap::new();
 
         for mod_entry in mods {
-            let deps = self.collect_mod_dependencies(mod_entry);
+            let deps = self.cached_mod_dependencies(mod_entry);
             if deps.is_empty() {
                 continue;
             }
@@ -4119,6 +4236,20 @@ impl App {
         deps.dedup();
         deps.retain(|dep| !dep.eq_ignore_ascii_case(&mod_entry.id));
         deps
+    }
+
+    fn cached_mod_dependencies(&self, mod_entry: &ModEntry) -> Vec<String> {
+        if let Some(deps) = self.dependency_cache.get(&mod_entry.id) {
+            return deps.clone();
+        }
+        self.collect_mod_dependencies(mod_entry)
+    }
+
+    fn update_dependency_cache_for_entries(&mut self, entries: &[ModEntry]) {
+        for mod_entry in entries {
+            let deps = self.collect_mod_dependencies(mod_entry);
+            self.dependency_cache.insert(mod_entry.id.clone(), deps);
+        }
     }
 
     fn poll_dependency_downloads(&mut self) {
@@ -4332,14 +4463,18 @@ impl App {
         if count == 0 {
             return Ok(0);
         }
+        self.interrupt_smart_rank("import");
 
+        let mut added = Vec::new();
         for mod_entry in mods {
             self.library.mods.retain(|entry| entry.id != mod_entry.id);
-            self.library.mods.push(mod_entry);
+            self.library.mods.push(mod_entry.clone());
+            added.push(mod_entry);
         }
 
         self.library.ensure_mods_in_profiles();
         self.library.save(&self.config.data_dir)?;
+        self.update_dependency_cache_for_entries(&added);
         self.queue_conflict_scan("library update");
         Ok(count)
     }
@@ -4713,6 +4848,7 @@ impl App {
     }
 
     fn remove_mod_by_id_with_options(&mut self, id: &str, delete_native_files: bool) -> bool {
+        self.interrupt_smart_rank("remove");
         let mod_entry = match self.library.mods.iter().find(|entry| entry.id == id) {
             Some(entry) => entry.clone(),
             None => return false,
@@ -4721,7 +4857,6 @@ impl App {
             self.remove_native_mod_files(&mod_entry);
         }
 
-        let mod_root = self.config.data_dir.join("mods").join(id);
         let before = self.library.mods.len();
         self.library.mods.retain(|mod_entry| mod_entry.id != id);
         if before == self.library.mods.len() {
@@ -4735,7 +4870,8 @@ impl App {
                 .retain(|override_entry| override_entry.mod_id != id);
         }
 
-        let _ = fs::remove_dir_all(&mod_root);
+        self.queue_remove_mod_root(id);
+        self.dependency_cache.remove(id);
         let _ = self.library.save(&self.config.data_dir);
         self.queue_conflict_scan("mod removed");
         true
@@ -4808,6 +4944,30 @@ impl App {
     fn remove_mod_root(&self, id: &str) {
         let mod_root = self.config.data_dir.join("mods").join(id);
         let _ = fs::remove_dir_all(&mod_root);
+    }
+
+    fn queue_remove_mod_root(&mut self, id: &str) {
+        let mod_root = self.config.data_dir.join("mods").join(id);
+        if !mod_root.exists() {
+            return;
+        }
+        let trash_root = self.config.data_dir.join("trash");
+        if let Err(err) = fs::create_dir_all(&trash_root) {
+            self.log_warn(format!("Remove mod files skipped: {err}"));
+            return;
+        }
+        let stamp = now_timestamp();
+        let trash_path = trash_root.join(format!("{id}-{stamp}"));
+        match fs::rename(&mod_root, &trash_path) {
+            Ok(()) => {
+                thread::spawn(move || {
+                    let _ = fs::remove_dir_all(&trash_path);
+                });
+            }
+            Err(err) => {
+                self.log_warn(format!("Remove mod files skipped: {err}"));
+            }
+        }
     }
 
     fn apply_native_sync_delta(&mut self, delta: NativeSyncDelta) {
@@ -5136,7 +5296,7 @@ impl App {
 
         let mut dependency_ids: HashSet<String> = HashSet::new();
         for mod_entry in &mods {
-            for dep in self.collect_mod_dependencies(mod_entry) {
+            for dep in self.cached_mod_dependencies(mod_entry) {
                 dependency_ids.insert(dep);
             }
         }
@@ -5217,6 +5377,7 @@ impl App {
             }
         }
         if changed > 0 {
+            self.interrupt_smart_rank(if enabled { "enable" } else { "disable" });
             let _ = self.library.save(&self.config.data_dir);
         }
         changed
@@ -5228,6 +5389,7 @@ impl App {
             self.status = "Move mode disabled".to_string();
             if self.move_dirty {
                 self.move_dirty = false;
+                self.interrupt_smart_rank("order changed");
                 self.queue_auto_deploy("order changed");
             }
         } else {
@@ -5242,6 +5404,18 @@ impl App {
         let Some(selected_id) = selected_id else {
             return;
         };
+        let Some(entry) = self
+            .library
+            .mods
+            .iter()
+            .find(|mod_entry| mod_entry.id == selected_id)
+        else {
+            return;
+        };
+        if !self.dependency_cache_ready {
+            self.queue_pending_delete(entry.id.clone(), entry.display_name());
+            return;
+        }
         let dependents = self.find_dependents(&selected_id);
 
         if !self.remove_mod_by_id(&selected_id) {
@@ -5264,6 +5438,9 @@ impl App {
     }
 
     pub fn request_remove_selected(&mut self) {
+        if self.block_mod_changes("remove") {
+            return;
+        }
         let Some(selected_id) = self.selected_profile_id() else {
             return;
         };
@@ -5276,9 +5453,13 @@ impl App {
             return;
         };
 
-        if entry.is_native() {
-            self.prompt_delete_mod(entry.id.clone(), entry.display_name());
-        } else if self.app_config.confirm_mod_delete {
+        if !self.dependency_cache_ready {
+            self.queue_pending_delete(entry.id.clone(), entry.display_name());
+            return;
+        }
+
+        let dependents = self.find_dependents(&entry.id);
+        if entry.is_native() || self.app_config.confirm_mod_delete || !dependents.is_empty() {
             self.prompt_delete_mod(entry.id.clone(), entry.display_name());
         } else {
             self.remove_selected();
@@ -6491,6 +6672,7 @@ fn collect_metadata_updates(
         let mut json_created: Option<i64> = None;
         let mut file_created: Option<i64> = None;
         let mut file_modified: Option<i64> = None;
+        let mut dependencies: Vec<String> = Vec::new();
 
         for pak_path in resolve_pak_paths(
             mod_entry,
@@ -6504,6 +6686,9 @@ fn collect_metadata_updates(
                         Some(existing) => existing.min(created),
                         None => created,
                     });
+                }
+                if !meta.dependencies.is_empty() {
+                    dependencies.extend(meta.dependencies);
                 }
             }
             let (raw_created, raw_modified) = path_times(&pak_path);
@@ -6531,6 +6716,9 @@ fn collect_metadata_updates(
                             None => created,
                         });
                     }
+                    if !meta.dependencies.is_empty() {
+                        dependencies.extend(meta.dependencies);
+                    }
                 }
             }
             if let Some(info_path) = metadata::find_info_json(&mod_root) {
@@ -6540,6 +6728,11 @@ fn collect_metadata_updates(
                         Some(existing) => existing.min(created),
                         None => created,
                     });
+                }
+                for info in &json_mods {
+                    if !info.dependencies.is_empty() {
+                        dependencies.extend(info.dependencies.clone());
+                    }
                 }
             }
             let (raw_created, raw_modified) = scan_mod_targets_times(mod_entry, &mod_root);
@@ -6556,6 +6749,10 @@ fn collect_metadata_updates(
                 });
             }
         }
+
+        dependencies.sort();
+        dependencies.dedup();
+        dependencies.retain(|dep| !dep.eq_ignore_ascii_case(&mod_entry.id));
 
         let (primary_created, created_candidate, modified_candidate, should_clear_created) =
             if mod_entry.is_native() {
@@ -6612,13 +6809,12 @@ fn collect_metadata_updates(
             }
         }
 
-        if next_created != mod_entry.created_at || next_modified != mod_entry.modified_at {
-            updates.push(MetadataUpdate {
-                id: mod_entry.id.clone(),
-                created_at: next_created,
-                modified_at: next_modified,
-            });
-        }
+        updates.push(MetadataUpdate {
+            id: mod_entry.id.clone(),
+            created_at: next_created,
+            modified_at: next_modified,
+            dependencies,
+        });
     }
 
     Ok(updates)
