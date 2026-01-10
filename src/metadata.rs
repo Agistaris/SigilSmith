@@ -57,6 +57,8 @@ pub fn parse_meta_lsx(bytes: &[u8]) -> ModMeta {
     let mut in_dependencies = false;
     let mut in_dependency = false;
     let mut in_module_info = false;
+    let mut current_dep_uuid: Option<String> = None;
+    let mut current_dep_label: Option<String> = None;
 
     loop {
         match reader.read_event_into(&mut buf) {
@@ -67,6 +69,10 @@ pub fn parse_meta_lsx(bytes: &[u8]) -> ModMeta {
                         in_dependencies = node_stack.iter().any(|node| node == "Dependencies");
                         in_dependency = node_stack.iter().any(|node| node == "Dependency");
                         in_module_info = node_stack.iter().any(|node| node == "ModuleInfo");
+                        if in_dependency && node_stack.last().map(|node| node == "Dependency").unwrap_or(false) {
+                            current_dep_uuid = None;
+                            current_dep_label = None;
+                        }
                     }
                 }
             }
@@ -77,7 +83,11 @@ pub fn parse_meta_lsx(bytes: &[u8]) -> ModMeta {
                             (attr_value(&e, b"id"), attr_value(&e, b"value"))
                         {
                             if id == "UUID" {
-                                deps.push(value);
+                                current_dep_uuid = Some(value);
+                            } else if id == "Name" {
+                                current_dep_label = Some(value);
+                            } else if id == "Folder" && current_dep_label.is_none() {
+                                current_dep_label = Some(value);
                             }
                         }
                     }
@@ -133,7 +143,16 @@ pub fn parse_meta_lsx(bytes: &[u8]) -> ModMeta {
             }
             Ok(Event::End(e)) => {
                 if e.name().as_ref() == b"node" {
-                    node_stack.pop();
+                    let popped = node_stack.pop();
+                    if let Some(popped) = popped.as_deref() {
+                        if popped == "Dependency" {
+                            push_dependency_ref(
+                                &mut deps,
+                                current_dep_uuid.take(),
+                                current_dep_label.take(),
+                            );
+                        }
+                    }
                     in_dependencies = node_stack.iter().any(|node| node == "Dependencies");
                     in_dependency = node_stack.iter().any(|node| node == "Dependency");
                     in_module_info = node_stack.iter().any(|node| node == "ModuleInfo");
@@ -160,6 +179,35 @@ pub fn parse_meta_lsx(bytes: &[u8]) -> ModMeta {
         publish_handle,
         module_type,
     }
+}
+
+fn push_dependency_ref(
+    deps: &mut Vec<String>,
+    uuid: Option<String>,
+    label: Option<String>,
+) {
+    let label = label
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .filter(|value| !is_base_dependency_label(value));
+    if let Some(label) = label {
+        if let Some(uuid) = uuid {
+            deps.push(format!("{label}_{uuid}"));
+        } else {
+            deps.push(label);
+        }
+    } else if let Some(uuid) = uuid {
+        deps.push(uuid);
+    }
+}
+
+fn is_base_dependency_label(label: &str) -> bool {
+    let normalized: String = label
+        .chars()
+        .filter(|ch| ch.is_ascii_alphanumeric())
+        .map(|ch| ch.to_ascii_lowercase())
+        .collect();
+    matches!(normalized.as_str(), "gustav" | "gustavdev" | "shared")
 }
 
 pub fn read_meta_lsx(path: &Path) -> Option<ModMeta> {
@@ -205,7 +253,7 @@ fn read_meta_lsx_from_pak_fuzzy(path: &Path) -> Option<ModMeta> {
 }
 
 fn read_meta_lsx_from_pak_raw(bytes: &[u8]) -> Option<ModMeta> {
-    let deps = scan_dependency_uuids(bytes);
+    let deps = scan_dependency_refs(bytes);
     if deps.is_empty() {
         return None;
     }
@@ -215,7 +263,7 @@ fn read_meta_lsx_from_pak_raw(bytes: &[u8]) -> Option<ModMeta> {
     })
 }
 
-fn scan_dependency_uuids(bytes: &[u8]) -> Vec<String> {
+fn scan_dependency_refs(bytes: &[u8]) -> Vec<String> {
     let mut out = Vec::new();
     let needle = b"Dependencies";
     let window_size = 4096usize;
@@ -224,7 +272,10 @@ fn scan_dependency_uuids(bytes: &[u8]) -> Vec<String> {
         let start = offset + index;
         let end = (start + window_size).min(bytes.len());
         let window = &bytes[start..end];
-        let mut found = extract_uuid_suffix_strings(window);
+        let mut found = extract_dependency_label_strings(window);
+        if found.is_empty() {
+            found = extract_uuid_suffix_strings(window);
+        }
         if found.is_empty() {
             found = extract_uuid_strings(window);
         }
@@ -233,6 +284,37 @@ fn scan_dependency_uuids(bytes: &[u8]) -> Vec<String> {
     }
     out.sort();
     out.dedup();
+    out
+}
+
+fn extract_dependency_label_strings(bytes: &[u8]) -> Vec<String> {
+    let mut out = Vec::new();
+    let len = bytes.len();
+    let uuid_len = 36;
+    let mut i = 0usize;
+    while i + uuid_len + 1 <= len {
+        if bytes[i] == b'_' && is_uuid_bytes(&bytes[i + 1..i + 1 + uuid_len]) {
+            let mut start = i;
+            while start > 0 {
+                let prev = bytes[start - 1];
+                if prev.is_ascii_alphanumeric() || prev == b'_' {
+                    start -= 1;
+                } else {
+                    break;
+                }
+            }
+            let prefix = &bytes[start..i];
+            let prefix = std::str::from_utf8(prefix).ok().unwrap_or("");
+            if prefix.len() >= 3 && !is_base_dependency_label(prefix) {
+                if let Ok(uuid) = std::str::from_utf8(&bytes[i + 1..i + 1 + uuid_len]) {
+                    out.push(format!("{prefix}_{uuid}"));
+                }
+            }
+            i += uuid_len + 1;
+        } else {
+            i += 1;
+        }
+    }
     out
 }
 
@@ -291,15 +373,27 @@ fn is_uuid_bytes(bytes: &[u8]) -> bool {
 }
 
 fn fill_dependency_fallback(meta: &mut ModMeta, path: &Path) {
-    if !meta.dependencies.is_empty() {
+    if !meta
+        .dependencies
+        .iter()
+        .all(|dep| is_uuid_like_str(dep))
+    {
         return;
     }
     if let Ok(bytes) = fs::read(path) {
-        let deps = scan_dependency_uuids(&bytes);
+        let mut deps = scan_dependency_refs(&bytes);
         if !deps.is_empty() {
+            deps.extend(meta.dependencies.drain(..));
+            deps.sort();
+            deps.dedup();
             meta.dependencies = deps;
         }
     }
+}
+
+fn is_uuid_like_str(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    is_uuid_bytes(bytes)
 }
 
 pub fn find_meta_lsx(root: &Path) -> Option<PathBuf> {

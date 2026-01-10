@@ -59,7 +59,6 @@ struct Theme {
     log_bg: Color,
     subpanel_bg: Color,
     swap_bg: Color,
-    overlay_bg: Color,
     overlay_panel_bg: Color,
     overlay_border: Color,
     overlay_bar: Color,
@@ -83,7 +82,6 @@ impl Theme {
             log_bg: Color::Rgb(13, 18, 26),
             subpanel_bg: Color::Rgb(13, 18, 26),
             swap_bg: Color::Rgb(20, 90, 74),
-            overlay_bg: Color::Rgb(8, 12, 18),
             overlay_panel_bg: Color::Rgb(12, 20, 32),
             overlay_border: Color::Rgb(90, 140, 190),
             overlay_bar: Color::Rgb(120, 198, 255),
@@ -2698,18 +2696,22 @@ fn delete_dependents_lines(
     if dependents.is_empty() {
         return Vec::new();
     }
+    let highlight_style = Style::default()
+        .fg(theme.header_bg)
+        .bg(theme.warning)
+        .add_modifier(Modifier::BOLD);
     let mut lines = Vec::new();
     let max_list = 4usize;
     if dependents.len() == 1 {
         lines.push(Line::from(Span::styled(
             format!("Will disable: {}", dependents[0].name),
-            Style::default().fg(theme.warning),
+            highlight_style,
         )));
         return lines;
     }
     lines.push(Line::from(Span::styled(
         format!("Will disable {} mods:", dependents.len()),
-        Style::default().fg(theme.warning),
+        highlight_style,
     )));
     for dependent in dependents.iter().take(max_list) {
         lines.push(Line::from(Span::styled(
@@ -2899,11 +2901,6 @@ fn draw_dependency_queue(frame: &mut Frame<'_>, app: &App, theme: &Theme) {
     };
 
     let area = frame.size();
-    frame.render_widget(Clear, area);
-    frame.render_widget(
-        Block::default().style(Style::default().bg(theme.overlay_bg)),
-        area,
-    );
 
     let max_width = area.width.saturating_sub(4).max(1);
     let width = max_width.clamp(60, 112);
@@ -2912,10 +2909,6 @@ fn draw_dependency_queue(frame: &mut Frame<'_>, app: &App, theme: &Theme) {
     let (outer_area, modal) = padded_modal(area, width, height, 1);
 
     frame.render_widget(Clear, outer_area);
-    frame.render_widget(
-        Block::default().style(Style::default().bg(theme.overlay_bg)),
-        outer_area,
-    );
     let panel_block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
@@ -3022,13 +3015,17 @@ fn draw_dependency_queue(frame: &mut Frame<'_>, app: &App, theme: &Theme) {
         } else {
             format!("Required by: {}", item.required_by.join(", "))
         };
-        let details = if let Some(link) = &item.link {
-            format!("{required_by} | Link: {link}")
-        } else if let Some(search) = &item.search_link {
-            format!("{required_by} | Link: none | Search: {search}")
+        let link_label = if item.link.is_some() {
+            "Link: available".to_string()
         } else {
-            format!("{required_by} | Link: none")
+            "Link: none".to_string()
         };
+        let search_label = if item.search_link.is_some() {
+            format!("Search: {}", item.search_label)
+        } else {
+            "Search: none".to_string()
+        };
+        let details = format!("{required_by} | {link_label} | {search_label}");
         let required_line = Line::from(Span::styled(
             truncate_text(&details, list_width),
             Style::default().fg(theme.muted),
@@ -4044,11 +4041,6 @@ fn draw_import_overlay(frame: &mut Frame<'_>, app: &App, theme: &Theme) {
     }
 
     let area = frame.size();
-    frame.render_widget(Clear, area);
-    frame.render_widget(
-        Block::default().style(Style::default().bg(theme.overlay_bg)),
-        area,
-    );
 
     let progress = app.import_progress();
     let label = progress
@@ -4151,11 +4143,6 @@ fn draw_startup_overlay(frame: &mut Frame<'_>, app: &App, theme: &Theme) {
     }
 
     let area = frame.size();
-    frame.render_widget(Clear, area);
-    frame.render_widget(
-        Block::default().style(Style::default().bg(theme.overlay_bg)),
-        area,
-    );
 
     let mut lines = Vec::new();
     lines.push(Line::from(Span::styled(

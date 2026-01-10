@@ -1197,8 +1197,8 @@ impl App {
         self.start_smart_rank_scan(SmartRankMode::Warmup);
     }
 
-    fn interrupt_smart_rank(&mut self, reason: &str) {
-        self.smart_rank_refresh_pending = true;
+    fn interrupt_smart_rank(&mut self, reason: &str, restart: bool) {
+        self.smart_rank_refresh_pending = restart;
         self.smart_rank_cache = None;
         if !self.smart_rank_active {
             return;
@@ -1207,6 +1207,10 @@ impl App {
         self.smart_rank_progress = None;
         self.status = "Smart ranking paused for changes".to_string();
         self.log_info(format!("Smart rank interrupted: {reason}"));
+    }
+
+    fn invalidate_smart_rank_cache(&mut self, reason: &str) {
+        self.interrupt_smart_rank(reason, false);
     }
 
     fn maybe_restart_smart_rank(&mut self) {
@@ -4310,15 +4314,16 @@ impl App {
                 if existing_lookup.contains(&dep) || batch_lookup.contains(&dep) {
                     continue;
                 }
-                let entry = missing.entry(dep.clone()).or_insert_with(|| {
-                    let display_label = dependency_display_label(&dep);
-                    let uuid = dependency_uuid(&dep);
+                let display_label = dependency_display_label(&dep);
+                let uuid = dependency_uuid(&dep);
+                let signature = dependency_signature(&display_label, &uuid, &dep);
+                let entry = missing.entry(signature).or_insert_with(|| {
                     let search_label = dependency_search_label(&display_label, &uuid, &dep);
                     let search_link = dependency_search_link(&search_label);
                     DependencyItem {
                         label: dep.clone(),
-                        display_label,
-                        uuid,
+                        display_label: display_label.clone(),
+                        uuid: uuid.clone(),
                         required_by: Vec::new(),
                         status: DependencyStatus::Missing,
                         link: None,
@@ -4327,6 +4332,16 @@ impl App {
                     }
                 });
                 entry.required_by.push(required_by.clone());
+                if entry.display_label == "Unknown dependency"
+                    && display_label != "Unknown dependency"
+                {
+                    entry.display_label = display_label.clone();
+                    entry.search_label = dependency_search_label(&display_label, &uuid, &dep);
+                    entry.search_link = dependency_search_link(&entry.search_label);
+                }
+                if entry.uuid.is_none() {
+                    entry.uuid = uuid;
+                }
             }
         }
 
@@ -4357,15 +4372,16 @@ impl App {
                 if existing_lookup.contains(&dep) {
                     continue;
                 }
-                let entry = missing.entry(dep.clone()).or_insert_with(|| {
-                    let display_label = dependency_display_label(&dep);
-                    let uuid = dependency_uuid(&dep);
+                let display_label = dependency_display_label(&dep);
+                let uuid = dependency_uuid(&dep);
+                let signature = dependency_signature(&display_label, &uuid, &dep);
+                let entry = missing.entry(signature).or_insert_with(|| {
                     let search_label = dependency_search_label(&display_label, &uuid, &dep);
                     let search_link = dependency_search_link(&search_label);
                     DependencyItem {
                         label: dep.clone(),
-                        display_label,
-                        uuid,
+                        display_label: display_label.clone(),
+                        uuid: uuid.clone(),
                         required_by: Vec::new(),
                         status: DependencyStatus::Missing,
                         link: None,
@@ -4374,6 +4390,16 @@ impl App {
                     }
                 });
                 entry.required_by.push(required_by.clone());
+                if entry.display_label == "Unknown dependency"
+                    && display_label != "Unknown dependency"
+                {
+                    entry.display_label = display_label.clone();
+                    entry.search_label = dependency_search_label(&display_label, &uuid, &dep);
+                    entry.search_link = dependency_search_link(&entry.search_label);
+                }
+                if entry.uuid.is_none() {
+                    entry.uuid = uuid;
+                }
             }
         }
 
@@ -4693,7 +4719,7 @@ impl App {
         if count == 0 {
             return Ok(0);
         }
-        self.interrupt_smart_rank("import");
+        self.invalidate_smart_rank_cache("import");
 
         let mut added = Vec::new();
         for mod_entry in mods {
@@ -5097,7 +5123,7 @@ impl App {
     }
 
     fn remove_mod_by_id_with_options(&mut self, id: &str, delete_native_files: bool) -> bool {
-        self.interrupt_smart_rank("remove");
+        self.invalidate_smart_rank_cache("remove");
         let mod_entry = match self.library.mods.iter().find(|entry| entry.id == id) {
             Some(entry) => entry.clone(),
             None => return false,
@@ -5672,7 +5698,7 @@ impl App {
             }
         }
         if changed > 0 {
-            self.interrupt_smart_rank(if enabled { "enable" } else { "disable" });
+            self.invalidate_smart_rank_cache(if enabled { "enable" } else { "disable" });
             let _ = self.library.save(&self.config.data_dir);
         }
         changed
@@ -5684,7 +5710,7 @@ impl App {
             self.status = "Move mode disabled".to_string();
             if self.move_dirty {
                 self.move_dirty = false;
-                self.interrupt_smart_rank("order changed");
+                self.invalidate_smart_rank_cache("order changed");
                 self.queue_auto_deploy("order changed");
             }
         } else {
@@ -6722,6 +6748,17 @@ fn dependency_display_label(value: &str) -> String {
 
 fn dependency_uuid(value: &str) -> Option<String> {
     extract_uuid_candidates(value).into_iter().next()
+}
+
+fn dependency_signature(display_label: &str, uuid: &Option<String>, raw: &str) -> String {
+    if let Some(uuid) = uuid.as_ref() {
+        return uuid.clone();
+    }
+    let normalized = normalize_label(display_label);
+    if !normalized.is_empty() && normalized != "unknowndependency" {
+        return normalized;
+    }
+    normalize_label(raw)
 }
 
 fn dependency_search_label(display_label: &str, uuid: &Option<String>, raw: &str) -> String {
