@@ -17,6 +17,15 @@ pub struct ModMeta {
     pub dependencies: Vec<String>,
     pub tags: Vec<String>,
     pub created_at: Option<i64>,
+    pub uuid: Option<String>,
+    pub folder: Option<String>,
+    pub name: Option<String>,
+    pub version: Option<u64>,
+    pub md5: Option<String>,
+    pub author: Option<String>,
+    pub description: Option<String>,
+    pub publish_handle: Option<u64>,
+    pub module_type: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -35,6 +44,15 @@ pub fn parse_meta_lsx(bytes: &[u8]) -> ModMeta {
     let mut deps = Vec::new();
     let mut tags = Vec::new();
     let mut created_at: Option<i64> = None;
+    let mut uuid = None;
+    let mut folder = None;
+    let mut name = None;
+    let mut version = None;
+    let mut md5 = None;
+    let mut author = None;
+    let mut description = None;
+    let mut publish_handle = None;
+    let mut module_type = None;
     let mut in_dependencies = false;
     let mut in_dependency = false;
     let mut in_module_info = false;
@@ -66,16 +84,37 @@ pub fn parse_meta_lsx(bytes: &[u8]) -> ModMeta {
                         if let (Some(id), Some(value)) =
                             (attr_value(&e, b"id"), attr_value(&e, b"value"))
                         {
-                            if id == "Tags" && !value.trim().is_empty() {
-                                tags.extend(split_tags(&value));
+                            let value_str = value.as_str();
+                            if id == "Tags" && !value_str.trim().is_empty() {
+                                tags.extend(split_tags(value_str));
                             }
                             if id == "Created" {
-                                if let Some(parsed) = parse_created_at(&value) {
+                                if let Some(parsed) = parse_created_at(value_str) {
                                     created_at = Some(match created_at {
                                         Some(existing) => existing.min(parsed),
                                         None => parsed,
                                     });
                                 }
+                            }
+                            match id.as_str() {
+                                "UUID" => uuid = Some(value.clone()),
+                                "Folder" => folder = Some(value.clone()),
+                                "Name" => name = Some(value.clone()),
+                                "Version64" | "Version" => {
+                                    if let Ok(parsed) = value_str.parse::<u64>() {
+                                        version = Some(parsed);
+                                    }
+                                }
+                                "MD5" => md5 = Some(value.clone()),
+                                "Author" => author = Some(value.clone()),
+                                "Description" => description = Some(value.clone()),
+                                "PublishHandle" => {
+                                    if let Ok(parsed) = value_str.parse::<u64>() {
+                                        publish_handle = Some(parsed);
+                                    }
+                                }
+                                "Type" | "ModuleType" => module_type = Some(value.clone()),
+                                _ => {}
                             }
                         }
                     } else if created_at.is_none() {
@@ -110,6 +149,15 @@ pub fn parse_meta_lsx(bytes: &[u8]) -> ModMeta {
         dependencies: deps,
         tags,
         created_at,
+        uuid,
+        folder,
+        name,
+        version,
+        md5,
+        author,
+        description,
+        publish_handle,
+        module_type,
     }
 }
 

@@ -11,14 +11,16 @@ use std::{
     fs, io,
     path::{Path, PathBuf},
     process::{Command, Stdio},
-    time::{SystemTime, UNIX_EPOCH},
+    sync::Arc,
+    time::{Instant, SystemTime, UNIX_EPOCH},
 };
 use time::{Date, Month, PrimitiveDateTime, Time as TimeOfDay};
 use walkdir::WalkDir;
 
 pub struct ImportResult {
-    pub mods: Vec<ModEntry>,
+    pub batches: Vec<ImportBatch>,
     pub unrecognized: bool,
+    pub failures: Vec<ImportFailure>,
 }
 
 #[derive(Clone, Copy)]
@@ -26,6 +28,185 @@ struct SourceTimes {
     created_at: Option<i64>,
     modified_at: Option<i64>,
 }
+
+struct DirImportResult {
+    mods: Vec<ModEntry>,
+    unrecognized: bool,
+}
+
+#[derive(Clone, Copy)]
+enum CandidateKind {
+    Directory,
+    PakFile,
+    ArchiveFile,
+}
+
+struct ImportCandidate {
+    path: PathBuf,
+    label: String,
+    kind: CandidateKind,
+}
+
+struct ProgressReporter {
+    label: String,
+    unit_index: usize,
+    unit_count: usize,
+    stage_count: usize,
+    callback: Option<ProgressCallback>,
+}
+
+impl ProgressReporter {
+    fn report(
+        &self,
+        stage: ImportStage,
+        stage_current: usize,
+        stage_total: usize,
+        detail: Option<String>,
+    ) {
+        let Some(callback) = &self.callback else {
+            return;
+        };
+        let stage_total = stage_total.max(1);
+        let stage_current = stage_current.min(stage_total);
+        let stage_fraction = (stage_current as f32) / (stage_total as f32);
+        let stage_index = stage.index() as f32;
+        let stage_count = self.stage_count as f32;
+        let overall_progress = (stage_index + stage_fraction) / stage_count;
+        callback(ImportProgress {
+            label: self.label.clone(),
+            unit_index: self.unit_index + 1,
+            unit_count: self.unit_count,
+            stage,
+            stage_current,
+            stage_total,
+            overall_progress: overall_progress.clamp(0.0, 1.0),
+            detail,
+        });
+    }
+}
+
+struct CopyProgress<'a> {
+    reporter: Option<&'a ProgressReporter>,
+    copied: usize,
+    total: usize,
+    last_report: Instant,
+}
+
+impl<'a> CopyProgress<'a> {
+    fn new(reporter: Option<&'a ProgressReporter>, total: usize) -> Self {
+        Self {
+            reporter,
+            copied: 0,
+            total: total.max(1),
+            last_report: Instant::now(),
+        }
+    }
+
+    fn bump(&mut self, detail: Option<String>, force: bool) {
+        self.copied = self.copied.saturating_add(1);
+        let should_report = force
+            || self.copied % 50 == 0
+            || self.last_report.elapsed().as_millis() >= 120;
+        if should_report {
+            if let Some(reporter) = self.reporter {
+                reporter.report(
+                    ImportStage::ImportingLoose,
+                    self.copied,
+                    self.total,
+                    detail,
+                );
+            }
+            self.last_report = Instant::now();
+        }
+    }
+
+    fn advance(&mut self, count: usize) {
+        if count == 0 {
+            return;
+        }
+        self.copied = self.copied.saturating_add(count);
+        if let Some(reporter) = self.reporter {
+            reporter.report(
+                ImportStage::ImportingLoose,
+                self.copied,
+                self.total,
+                None,
+            );
+        }
+        self.last_report = Instant::now();
+    }
+
+    fn finish(&mut self) {
+        if let Some(reporter) = self.reporter {
+            reporter.report(ImportStage::ImportingLoose, self.total, self.total, None);
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct ImportSource {
+    pub label: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct ImportBatch {
+    pub source: ImportSource,
+    pub mods: Vec<ModEntry>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ImportFailure {
+    pub source: ImportSource,
+    pub error: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ImportStage {
+    Preparing,
+    Extracting,
+    Scanning,
+    ImportingPaks,
+    ImportingLoose,
+    Finalizing,
+}
+
+impl ImportStage {
+    fn index(self) -> usize {
+        match self {
+            ImportStage::Preparing => 0,
+            ImportStage::Extracting => 1,
+            ImportStage::Scanning => 2,
+            ImportStage::ImportingPaks => 3,
+            ImportStage::ImportingLoose => 4,
+            ImportStage::Finalizing => 5,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            ImportStage::Preparing => "Preparing",
+            ImportStage::Extracting => "Extracting",
+            ImportStage::Scanning => "Scanning",
+            ImportStage::ImportingPaks => "Importing .pak files",
+            ImportStage::ImportingLoose => "Importing loose files",
+            ImportStage::Finalizing => "Finalizing",
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct ImportProgress {
+    pub label: String,
+    pub unit_index: usize,
+    pub unit_count: usize,
+    pub stage: ImportStage,
+    pub stage_current: usize,
+    pub stage_total: usize,
+    pub overall_progress: f32,
+    pub detail: Option<String>,
+}
+
+pub type ProgressCallback = Arc<dyn Fn(ImportProgress) + Send + Sync>;
 
 fn source_times_for(path: &Path) -> SourceTimes {
     let (created_at, modified_at) = path_times(path);
@@ -104,30 +285,57 @@ fn scan_payload_times(scan: &PayloadScan) -> SourceTimes {
     }
 }
 
-pub fn import_path(path: &Path, data_dir: &Path) -> Result<ImportResult> {
+pub fn import_path_with_progress(
+    path: &Path,
+    data_dir: &Path,
+    progress: Option<ProgressCallback>,
+) -> Result<ImportResult> {
     if !path.exists() {
         return Ok(ImportResult {
-            mods: Vec::new(),
+            batches: Vec::new(),
             unrecognized: false,
+            failures: Vec::new(),
         });
     }
 
     fs::create_dir_all(library_mod_root(data_dir)).context("create mod library root")?;
 
     let result = if path.is_dir() {
-        import_from_dir(path, data_dir, None, false, None)?
+        import_batch_from_dir(path, data_dir, None, false, None, progress)?
     } else {
         let source_label = source_label_for_archive(path);
         match path.extension().and_then(|ext| ext.to_str()).unwrap_or("") {
-            "pak" | "PAK" => ImportResult {
-                mods: import_pak_file(path, data_dir)?,
-                unrecognized: false,
-            },
-            "zip" | "ZIP" => import_archive_zip(path, data_dir, source_label.as_deref())?,
-            "7z" | "7Z" => import_archive_7z(path, data_dir, source_label.as_deref())?,
+            "pak" | "PAK" => {
+                let label = source_label
+                    .clone()
+                    .unwrap_or_else(|| display_path_label(path));
+                let reporter = ProgressReporter {
+                    label: label.clone(),
+                    unit_index: 0,
+                    unit_count: 1,
+                    stage_count: 6,
+                    callback: progress.clone(),
+                };
+                reporter.report(ImportStage::Preparing, 0, 1, None);
+                let mods = import_pak_file(path, data_dir, source_label.as_deref(), Some(&reporter))?;
+                reporter.report(ImportStage::Finalizing, 1, 1, None);
+                ImportResult {
+                    batches: vec![ImportBatch {
+                        source: ImportSource {
+                            label,
+                        },
+                        mods,
+                    }],
+                    unrecognized: false,
+                    failures: Vec::new(),
+                }
+            }
+            "zip" | "ZIP" => import_archive_zip(path, data_dir, source_label.as_deref(), progress)?,
+            "7z" | "7Z" => import_archive_7z(path, data_dir, source_label.as_deref(), progress)?,
             _ => ImportResult {
-                mods: Vec::new(),
+                batches: Vec::new(),
                 unrecognized: true,
+                failures: Vec::new(),
             },
         }
     };
@@ -139,14 +347,35 @@ fn import_archive_zip(
     path: &Path,
     data_dir: &Path,
     source_label: Option<&str>,
+    progress: Option<ProgressCallback>,
 ) -> Result<ImportResult> {
     let temp_dir = make_temp_dir(data_dir, "zip")?;
     let source_times = source_times_for(path);
+    let label = source_label
+        .map(|label| label.to_string())
+        .unwrap_or_else(|| display_path_label(path));
+    let reporter = ProgressReporter {
+        label,
+        unit_index: 0,
+        unit_count: 1,
+        stage_count: 6,
+        callback: progress.clone(),
+    };
+    reporter.report(ImportStage::Preparing, 0, 1, None);
+    reporter.report(ImportStage::Extracting, 0, 1, None);
     if let Err(err) = extract_zip(path, &temp_dir) {
         let _ = fs::remove_dir_all(&temp_dir);
         return Err(err);
     }
-    let result = import_from_dir(&temp_dir, data_dir, source_label, true, Some(source_times));
+    reporter.report(ImportStage::Extracting, 1, 1, None);
+    let result = import_batch_from_dir(
+        &temp_dir,
+        data_dir,
+        source_label,
+        true,
+        Some(source_times),
+        progress,
+    );
     let _ = fs::remove_dir_all(&temp_dir);
     result
 }
@@ -155,16 +384,213 @@ fn import_archive_7z(
     path: &Path,
     data_dir: &Path,
     source_label: Option<&str>,
+    progress: Option<ProgressCallback>,
 ) -> Result<ImportResult> {
     let temp_dir = make_temp_dir(data_dir, "7z")?;
     let source_times = source_times_for(path);
+    let label = source_label
+        .map(|label| label.to_string())
+        .unwrap_or_else(|| display_path_label(path));
+    let reporter = ProgressReporter {
+        label,
+        unit_index: 0,
+        unit_count: 1,
+        stage_count: 6,
+        callback: progress.clone(),
+    };
+    reporter.report(ImportStage::Preparing, 0, 1, None);
+    reporter.report(ImportStage::Extracting, 0, 1, None);
     if let Err(err) = extract_7z(path, &temp_dir) {
         let _ = fs::remove_dir_all(&temp_dir);
         return Err(err);
     }
-    let result = import_from_dir(&temp_dir, data_dir, source_label, true, Some(source_times));
+    reporter.report(ImportStage::Extracting, 1, 1, None);
+    let result = import_batch_from_dir(
+        &temp_dir,
+        data_dir,
+        source_label,
+        true,
+        Some(source_times),
+        progress,
+    );
     let _ = fs::remove_dir_all(&temp_dir);
     result
+}
+
+fn import_batch_from_dir(
+    path: &Path,
+    data_dir: &Path,
+    source_label: Option<&str>,
+    allow_move: bool,
+    source_times: Option<SourceTimes>,
+    progress: Option<ProgressCallback>,
+) -> Result<ImportResult> {
+    let mut candidates = collect_import_candidates(path)?;
+    if candidates.is_empty() {
+        candidates.push(ImportCandidate {
+            path: path.to_path_buf(),
+            label: display_path_label(path),
+            kind: CandidateKind::Directory,
+        });
+    }
+
+    let unit_count = candidates.len();
+    let multi = unit_count > 1;
+    let mut batches = Vec::new();
+    let mut failures = Vec::new();
+    let mut unrecognized = false;
+
+    for (index, candidate) in candidates.into_iter().enumerate() {
+        let candidate_label = candidate.label.clone();
+        let display_label = match source_label {
+            Some(root_label) if multi => format!("{root_label} -> {candidate_label}"),
+            Some(root_label) => root_label.to_string(),
+            None => candidate_label.clone(),
+        };
+        let candidate_source_label = if multi {
+            Some(candidate_label.as_str())
+        } else {
+            source_label
+        };
+        let reporter = ProgressReporter {
+            label: display_label.clone(),
+            unit_index: index,
+            unit_count,
+            stage_count: 6,
+            callback: progress.clone(),
+        };
+
+        match candidate.kind {
+            CandidateKind::PakFile => {
+                reporter.report(ImportStage::Preparing, 0, 1, None);
+                let mods = match import_pak_file(
+                    &candidate.path,
+                    data_dir,
+                    candidate_source_label,
+                    Some(&reporter),
+                ) {
+                    Ok(mods) => mods,
+                    Err(err) => {
+                        failures.push(ImportFailure {
+                            source: ImportSource {
+                                label: display_label,
+                            },
+                            error: err.to_string(),
+                        });
+                        continue;
+                    }
+                };
+                if mods.is_empty() {
+                    failures.push(ImportFailure {
+                        source: ImportSource {
+                            label: display_label,
+                        },
+                        error: "No mods found".to_string(),
+                    });
+                    continue;
+                }
+                batches.push(ImportBatch {
+                    source: ImportSource {
+                        label: display_label,
+                    },
+                    mods,
+                });
+            }
+            CandidateKind::ArchiveFile => {
+                let source_label = candidate_source_label;
+                let result = match candidate
+                    .path
+                    .extension()
+                    .and_then(|ext| ext.to_str())
+                    .unwrap_or("")
+                {
+                    "zip" | "ZIP" => {
+                        import_archive_zip(&candidate.path, data_dir, source_label, progress.clone())
+                    }
+                    "7z" | "7Z" => {
+                        import_archive_7z(&candidate.path, data_dir, source_label, progress.clone())
+                    }
+                    _ => Ok(ImportResult {
+                        batches: Vec::new(),
+                        unrecognized: true,
+                        failures: Vec::new(),
+                    }),
+                };
+
+                match result {
+                    Ok(mut result) => {
+                        if result.unrecognized && result.batches.is_empty() {
+                            failures.push(ImportFailure {
+                                source: ImportSource {
+                                    label: display_label,
+                                },
+                                error: "Unrecognized archive layout".to_string(),
+                            });
+                            continue;
+                        }
+                        failures.append(&mut result.failures);
+                        batches.append(&mut result.batches);
+                    }
+                    Err(err) => {
+                        failures.push(ImportFailure {
+                            source: ImportSource {
+                                label: display_label,
+                            },
+                            error: err.to_string(),
+                        });
+                    }
+                }
+            }
+            CandidateKind::Directory => {
+                reporter.report(ImportStage::Preparing, 0, 1, None);
+                let result = match import_from_dir(
+                    &candidate.path,
+                    data_dir,
+                    candidate_source_label,
+                    allow_move,
+                    source_times,
+                    Some(&reporter),
+                ) {
+                    Ok(result) => result,
+                    Err(err) => {
+                        failures.push(ImportFailure {
+                            source: ImportSource {
+                                label: display_label,
+                            },
+                            error: err.to_string(),
+                        });
+                        continue;
+                    }
+                };
+                if result.unrecognized && unit_count == 1 {
+                    unrecognized = true;
+                }
+                if result.mods.is_empty() {
+                    if !unrecognized {
+                        failures.push(ImportFailure {
+                            source: ImportSource {
+                                label: display_label,
+                            },
+                            error: "No mods found".to_string(),
+                        });
+                    }
+                    continue;
+                }
+                batches.push(ImportBatch {
+                    source: ImportSource {
+                        label: display_label,
+                    },
+                    mods: result.mods,
+                });
+            }
+        }
+    }
+
+    Ok(ImportResult {
+        batches,
+        unrecognized,
+        failures,
+    })
 }
 
 fn import_from_dir(
@@ -173,12 +599,22 @@ fn import_from_dir(
     source_label: Option<&str>,
     allow_move: bool,
     source_times: Option<SourceTimes>,
-) -> Result<ImportResult> {
+    reporter: Option<&ProgressReporter>,
+) -> Result<DirImportResult> {
     let scan = scan_payload(path)?;
     let unrecognized = scan.pak_files.is_empty() && !scan.has_loose_targets();
     let allow_move = allow_move && !scan.has_overlap();
     let mut mods = Vec::new();
     let mut last_error: Option<anyhow::Error> = None;
+
+    if let Some(reporter) = reporter {
+        reporter.report(
+            ImportStage::Scanning,
+            1,
+            1,
+            Some("Scanning layout".to_string()),
+        );
+    }
 
     let use_archive_label = scan.pak_files.len() == 1;
     let meta_created = scan
@@ -192,13 +628,29 @@ fn import_from_dir(
         .map(|path| metadata::read_json_mods(path))
         .unwrap_or_default();
 
-    for pak_path in &scan.pak_files {
+    let pak_total = scan.pak_files.len();
+    for (index, pak_path) in scan.pak_files.iter().enumerate() {
         let label = if use_archive_label {
             source_label
         } else {
             pak_path.file_stem().and_then(|stem| stem.to_str())
         };
-        match import_single_pak(pak_path, data_dir, label, source_times, &json_mods) {
+        if let Some(reporter) = reporter {
+            reporter.report(
+                ImportStage::ImportingPaks,
+                index + 1,
+                pak_total.max(1),
+                label.map(|label| format!("Importing {label}")),
+            );
+        }
+        match import_single_pak(
+            pak_path,
+            data_dir,
+            label,
+            source_times,
+            &json_mods,
+            reporter,
+        ) {
             Ok(entry) => mods.push(entry),
             Err(err) => {
                 last_error = Some(err.context(format!("import pak {:?}", pak_path)));
@@ -215,6 +667,7 @@ fn import_from_dir(
             allow_move,
             source_times,
             meta_created.or_else(|| json_mods.iter().filter_map(|info| info.created_at).min()),
+            reporter,
         ) {
             Ok(entry) => mods.push(entry),
             Err(err) => {
@@ -223,23 +676,40 @@ fn import_from_dir(
         }
     }
 
+    if let Some(reporter) = reporter {
+        reporter.report(ImportStage::Finalizing, 1, 1, None);
+    }
+
     if mods.is_empty() {
         if let Some(err) = last_error {
             return Err(err);
         }
     }
 
-    Ok(ImportResult { mods, unrecognized })
+    Ok(DirImportResult { mods, unrecognized })
 }
 
-fn import_pak_file(path: &Path, data_dir: &Path) -> Result<Vec<ModEntry>> {
-    let label = source_label_for_archive(path);
+fn import_pak_file(
+    path: &Path,
+    data_dir: &Path,
+    source_label: Option<&str>,
+    reporter: Option<&ProgressReporter>,
+) -> Result<Vec<ModEntry>> {
+    if let Some(reporter) = reporter {
+        reporter.report(
+            ImportStage::ImportingPaks,
+            1,
+            1,
+            Some(display_path_label(path)),
+        );
+    }
     Ok(vec![import_single_pak(
         path,
         data_dir,
-        label.as_deref(),
+        source_label,
         None,
         &[],
+        reporter,
     )?])
 }
 
@@ -249,24 +719,32 @@ fn import_single_pak(
     source_label: Option<&str>,
     source_times: Option<SourceTimes>,
     json_mods: &[metadata::JsonModInfo],
+    _reporter: Option<&ProgressReporter>,
 ) -> Result<ModEntry> {
     let file = fs::File::open(path).context("open .pak")?;
     let lspk = lspk::Reader::new(file)
-        .context("read .pak header")?
-        .read()
-        .context("read .pak index")?;
-    let meta = match lspk.extract_meta_lsx() {
-        Ok(meta) => meta,
-        Err(_) => {
-            return import_override_pak(path, data_dir, source_label, source_times);
+        .ok()
+        .and_then(|mut reader| reader.read().ok());
+    let mut meta_info = None;
+    let mut module_info = None;
+    if let Some(lspk) = lspk {
+        if let Ok(meta) = lspk.extract_meta_lsx() {
+            meta_info = Some(metadata::parse_meta_lsx(&meta.decompressed_bytes));
+            if let Ok(parsed) = meta.deserialize_as_mod_pak() {
+                module_info = Some(parsed.module_info);
+            }
         }
+    }
+    if meta_info.is_none() {
+        meta_info = metadata::read_meta_lsx_from_pak(path);
+    }
+    let meta_info = meta_info.unwrap_or_default();
+    let pak_info = module_info
+        .map(PakInfo::from_module_info)
+        .or_else(|| pak_info_from_meta(&meta_info));
+    let Some(pak_info) = pak_info else {
+        return import_override_pak(path, data_dir, source_label, source_times);
     };
-    let meta_info = metadata::parse_meta_lsx(&meta.decompressed_bytes);
-    let module_info = meta
-        .deserialize_as_mod_pak()
-        .context("parse meta.lsx")?
-        .module_info;
-    let pak_info = PakInfo::from_module_info(module_info.clone());
     let json_created = json_mods
         .iter()
         .find(|entry| {
@@ -318,6 +796,27 @@ fn import_single_pak(
         target_overrides: Vec::new(),
         source_label: source_label.map(|label| label.to_string()),
         source: ModSource::Managed,
+    })
+}
+
+fn pak_info_from_meta(meta: &metadata::ModMeta) -> Option<PakInfo> {
+    let uuid = meta.uuid.clone()?;
+    let folder = meta
+        .folder
+        .clone()
+        .or_else(|| meta.name.clone())
+        .unwrap_or_else(|| uuid.clone());
+    let name = meta.name.clone().unwrap_or_else(|| folder.clone());
+    Some(PakInfo {
+        uuid,
+        name,
+        folder,
+        version: meta.version.unwrap_or(0),
+        md5: meta.md5.clone(),
+        publish_handle: meta.publish_handle,
+        author: meta.author.clone(),
+        description: meta.description.clone(),
+        module_type: meta.module_type.clone(),
     })
 }
 
@@ -378,19 +877,41 @@ fn import_loose(
     allow_move: bool,
     source_times: Option<SourceTimes>,
     meta_created: Option<i64>,
+    reporter: Option<&ProgressReporter>,
 ) -> Result<ModEntry> {
     let mod_id = hash_path(path);
     let mod_root = library_mod_root(data_dir).join(&mod_id);
     fs::create_dir_all(&mod_root).context("create loose mod storage")?;
 
     let mut targets = Vec::new();
+    let mut total_files = 0usize;
+    if let Some(data_dir) = &scan.data_dir {
+        total_files = total_files.saturating_add(count_copy_files(data_dir));
+    }
+    if let Some(generated_dir) = &scan.generated_dir {
+        total_files = total_files.saturating_add(count_copy_files(generated_dir));
+    } else if let Some(public_dir) = &scan.public_dir {
+        total_files = total_files.saturating_add(count_copy_files(public_dir));
+    }
+    if let Some(bin_dir) = &scan.bin_dir {
+        total_files = total_files.saturating_add(count_copy_files(bin_dir));
+    }
+    if let Some(reporter) = reporter {
+        reporter.report(
+            ImportStage::ImportingLoose,
+            0,
+            total_files.max(1),
+            Some("Copying files".to_string()),
+        );
+    }
+    let mut progress = CopyProgress::new(reporter, total_files);
 
     if let Some(data_dir) = &scan.data_dir {
         let dest = mod_root.join("Data");
         if allow_move {
-            move_or_copy_dir(data_dir, &dest)?;
+            move_or_copy_dir_with_progress(data_dir, &dest, &mut progress)?;
         } else {
-            copy_dir(data_dir, &dest)?;
+            copy_dir_with_progress(data_dir, &dest, &mut progress)?;
         }
         targets.push(InstallTarget::Data {
             dir: "Data".to_string(),
@@ -400,9 +921,9 @@ fn import_loose(
     if let Some(generated_dir) = &scan.generated_dir {
         let dest = mod_root.join("Generated");
         if allow_move {
-            move_or_copy_dir(generated_dir, &dest)?;
+            move_or_copy_dir_with_progress(generated_dir, &dest, &mut progress)?;
         } else {
-            copy_dir(generated_dir, &dest)?;
+            copy_dir_with_progress(generated_dir, &dest, &mut progress)?;
         }
         targets.push(InstallTarget::Generated {
             dir: "Generated".to_string(),
@@ -410,9 +931,9 @@ fn import_loose(
     } else if let Some(public_dir) = &scan.public_dir {
         let dest = mod_root.join("Generated").join("Public");
         if allow_move {
-            move_or_copy_dir(public_dir, &dest)?;
+            move_or_copy_dir_with_progress(public_dir, &dest, &mut progress)?;
         } else {
-            copy_dir(public_dir, &dest)?;
+            copy_dir_with_progress(public_dir, &dest, &mut progress)?;
         }
         targets.push(InstallTarget::Generated {
             dir: "Generated".to_string(),
@@ -422,14 +943,15 @@ fn import_loose(
     if let Some(bin_dir) = &scan.bin_dir {
         let dest = mod_root.join("bin");
         if allow_move {
-            move_or_copy_dir(bin_dir, &dest)?;
+            move_or_copy_dir_with_progress(bin_dir, &dest, &mut progress)?;
         } else {
-            copy_dir(bin_dir, &dest)?;
+            copy_dir_with_progress(bin_dir, &dest, &mut progress)?;
         }
         targets.push(InstallTarget::Bin {
             dir: "bin".to_string(),
         });
     }
+    progress.finish();
 
     persist_payload_metadata(scan, &mod_root);
 
@@ -493,6 +1015,13 @@ fn source_label_for_archive(path: &Path) -> Option<String> {
     path.file_stem()
         .and_then(|s| s.to_str())
         .map(|s| s.to_string())
+}
+
+fn display_path_label(path: &Path) -> String {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .map(|name| name.to_string())
+        .unwrap_or_else(|| path.display().to_string())
 }
 
 fn scan_payload(root: &Path) -> Result<PayloadScan> {
@@ -587,6 +1116,120 @@ fn scan_payload(root: &Path) -> Result<PayloadScan> {
         meta_file,
         info_json,
     })
+}
+
+fn collect_import_candidates(root: &Path) -> Result<Vec<ImportCandidate>> {
+    let mut candidates = Vec::new();
+    let mut top_level_dirs = Vec::new();
+    let mut mods_dir: Option<PathBuf> = None;
+
+    for entry in fs::read_dir(root).context("read import dir")? {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(_) => continue,
+        };
+        let path = entry.path();
+        if is_ignored_path(&path) {
+            continue;
+        }
+        let file_type = match entry.file_type() {
+            Ok(file_type) => file_type,
+            Err(_) => continue,
+        };
+        if file_type.is_file() {
+            if is_archive_file(&path) {
+                candidates.push(ImportCandidate {
+                    label: display_path_label(&path),
+                    path,
+                    kind: CandidateKind::ArchiveFile,
+                });
+            } else if is_pak_file(&path) {
+                candidates.push(ImportCandidate {
+                    label: display_pak_label(&path),
+                    path,
+                    kind: CandidateKind::PakFile,
+                });
+            }
+        } else if file_type.is_dir() {
+            let name = entry.file_name().to_string_lossy().to_lowercase();
+            if name == "mods" {
+                mods_dir = Some(path);
+            } else {
+                top_level_dirs.push(path);
+            }
+        }
+    }
+
+    if let Some(mods_dir) = mods_dir {
+        for entry in fs::read_dir(mods_dir).context("read Mods dir")? {
+            let entry = match entry {
+                Ok(entry) => entry,
+                Err(_) => continue,
+            };
+            let path = entry.path();
+            if is_ignored_path(&path) {
+                continue;
+            }
+            let file_type = match entry.file_type() {
+                Ok(file_type) => file_type,
+                Err(_) => continue,
+            };
+            if file_type.is_file() && is_pak_file(&path) {
+                candidates.push(ImportCandidate {
+                    label: display_pak_label(&path),
+                    path,
+                    kind: CandidateKind::PakFile,
+                });
+            } else if file_type.is_dir() {
+                if let Ok(true) = is_mod_candidate_dir(&path) {
+                    candidates.push(ImportCandidate {
+                        label: display_path_label(&path),
+                        path,
+                        kind: CandidateKind::Directory,
+                    });
+                }
+            }
+        }
+    }
+
+    for dir in top_level_dirs {
+        if let Ok(true) = is_mod_candidate_dir(&dir) {
+            candidates.push(ImportCandidate {
+                label: display_path_label(&dir),
+                path: dir,
+                kind: CandidateKind::Directory,
+            });
+        }
+    }
+
+    candidates.sort_by(|a, b| a.label.cmp(&b.label));
+    Ok(candidates)
+}
+
+fn is_mod_candidate_dir(path: &Path) -> Result<bool> {
+    let scan = scan_payload(path)?;
+    Ok(!scan.pak_files.is_empty() || scan.has_loose_targets())
+}
+
+fn is_archive_file(path: &Path) -> bool {
+    matches!(
+        path.extension().and_then(|ext| ext.to_str()).unwrap_or(""),
+        "zip" | "ZIP" | "7z" | "7Z"
+    )
+}
+
+fn is_pak_file(path: &Path) -> bool {
+    matches!(
+        path.extension().and_then(|ext| ext.to_str()).unwrap_or(""),
+        "pak" | "PAK"
+    )
+}
+
+fn display_pak_label(path: &Path) -> String {
+    path.file_stem()
+        .and_then(|s| s.to_str())
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| display_path_label(path))
 }
 
 fn is_bin_root_file(name: &str) -> bool {
@@ -722,7 +1365,21 @@ fn extract_with_7z(path: &Path, dest: &Path) -> Result<Option<()>> {
     Ok(Some(()))
 }
 
-fn copy_dir(source: &Path, dest: &Path) -> Result<()> {
+fn count_copy_files(source: &Path) -> usize {
+    WalkDir::new(source)
+        .follow_links(false)
+        .into_iter()
+        .filter_entry(|entry| !is_ignored_path(entry.path()))
+        .filter_map(|entry| entry.ok())
+        .filter(|entry| entry.file_type().is_file())
+        .count()
+}
+
+fn copy_dir_with_progress(
+    source: &Path,
+    dest: &Path,
+    progress: &mut CopyProgress<'_>,
+) -> Result<()> {
     for entry in WalkDir::new(source)
         .follow_links(false)
         .into_iter()
@@ -739,6 +1396,7 @@ fn copy_dir(source: &Path, dest: &Path) -> Result<()> {
             }
             fs::copy(entry.path(), &target).context("copy file")?;
             preserve_mtime(entry.path(), &target);
+            progress.bump(None, false);
         }
     }
     Ok(())
@@ -758,19 +1416,28 @@ fn preserve_mtime(source: &Path, dest: &Path) {
     let _ = set_file_mtime(dest, mtime);
 }
 
-fn move_or_copy_dir(source: &Path, dest: &Path) -> Result<()> {
+fn move_or_copy_dir_with_progress(
+    source: &Path,
+    dest: &Path,
+    progress: &mut CopyProgress<'_>,
+) -> Result<()> {
     if dest.exists() {
         fs::remove_dir_all(dest).context("remove existing target")?;
     }
     if let Some(parent) = dest.parent() {
         fs::create_dir_all(parent).context("create target parent")?;
     }
+    let count = count_copy_files(source);
     if contains_ignored_path(source) {
-        return copy_dir(source, dest);
+        copy_dir_with_progress(source, dest, progress)?;
+        return Ok(());
     }
     match fs::rename(source, dest) {
-        Ok(_) => Ok(()),
-        Err(_) => copy_dir(source, dest),
+        Ok(_) => {
+            progress.advance(count);
+            Ok(())
+        }
+        Err(_) => copy_dir_with_progress(source, dest, progress),
     }
 }
 

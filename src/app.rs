@@ -18,9 +18,12 @@ use std::{
     cmp::Ordering,
     collections::{HashMap, HashSet, VecDeque},
     fs,
-    io::Write,
+    io::{self, Write},
     path::PathBuf,
-    sync::mpsc::{self, Receiver, Sender, TryRecvError},
+    sync::{
+        mpsc::{self, Receiver, Sender, TryRecvError},
+        Arc, Mutex,
+    },
     thread,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
@@ -125,6 +128,7 @@ pub enum DialogKind {
         resume_move_mode: bool,
         clear_filter: bool,
     },
+    ImportSummary,
 }
 
 #[derive(Debug, Clone)]
@@ -176,6 +180,7 @@ pub enum UpdateStatus {
 }
 
 enum ImportMessage {
+    Progress(importer::ImportProgress),
     Completed {
         path: PathBuf,
         result: importer::ImportResult,
@@ -234,6 +239,7 @@ struct DuplicateDecision {
     existing_id: String,
     existing_label: String,
     kind: DuplicateKind,
+    default_overwrite: Option<bool>,
 }
 
 #[derive(Debug, Clone)]
@@ -429,6 +435,10 @@ pub struct App {
     import_active: Option<PathBuf>,
     import_tx: Sender<ImportMessage>,
     import_rx: Receiver<ImportMessage>,
+    import_batches: VecDeque<importer::ImportBatch>,
+    import_failures: Vec<importer::ImportFailure>,
+    import_progress: Option<importer::ImportProgress>,
+    import_summary_pending: bool,
     deploy_active: bool,
     deploy_pending: bool,
     deploy_reason: Option<String>,
@@ -442,6 +452,7 @@ pub struct App {
     log_path: PathBuf,
     duplicate_queue: VecDeque<DuplicateDecision>,
     pending_duplicate: Option<DuplicateDecision>,
+    duplicate_apply_all: Option<bool>,
     approved_imports: Vec<ModEntry>,
     pub conflicts: Vec<deploy::ConflictEntry>,
     pub conflict_selected: usize,
@@ -497,6 +508,20 @@ pub enum SmartRankView {
 pub enum SmartRankMode {
     Preview,
     Warmup,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CliVerbosity {
+    Quiet,
+    Normal,
+    Verbose,
+    Debug,
+}
+
+#[derive(Debug, Clone)]
+pub struct CliImportOptions {
+    pub deploy: bool,
+    pub verbosity: CliVerbosity,
 }
 
 #[derive(Debug, Clone)]
@@ -604,6 +629,10 @@ impl App {
             import_active: None,
             import_tx,
             import_rx,
+            import_batches: VecDeque::new(),
+            import_failures: Vec::new(),
+            import_progress: None,
+            import_summary_pending: false,
             deploy_active: false,
             deploy_pending: false,
             deploy_reason: None,
@@ -617,6 +646,7 @@ impl App {
             log_path,
             duplicate_queue: VecDeque::new(),
             pending_duplicate: None,
+            duplicate_apply_all: None,
             approved_imports: Vec::new(),
             conflicts: Vec::new(),
             conflict_selected: 0,
@@ -2164,6 +2194,18 @@ impl App {
             && game::looks_like_user_dir(self.game_id, &self.config.larian_dir)
     }
 
+    pub fn import_overlay_active(&self) -> bool {
+        self.import_active.is_some() || self.import_progress.is_some()
+    }
+
+    pub fn import_progress(&self) -> Option<&importer::ImportProgress> {
+        self.import_progress.as_ref()
+    }
+
+    pub fn import_summary_pending(&self) -> bool {
+        self.import_summary_pending
+    }
+
     pub fn hotkey_fade_active(&self) -> bool {
         self.hotkey_fade_until
             .map(|until| until > Instant::now())
@@ -2493,58 +2535,293 @@ impl App {
         Ok(())
     }
 
-    pub fn import_mod_blocking(&mut self, raw_path: String) -> Result<usize> {
-        let path = expand_tilde(raw_path.trim());
-        if !path.exists() {
-            self.log_warn(format!("Import path not found: {}", path.display()));
-            return Ok(0);
-        }
+    pub fn import_mods_cli(
+        &mut self,
+        paths: Vec<String>,
+        options: CliImportOptions,
+    ) -> Result<()> {
+        let mut total_imported = 0usize;
+        let mut failures: Vec<importer::ImportFailure> = Vec::new();
 
-        self.log_info(format!("Import started: {}", path.display()));
-        let imports = match importer::import_path(&path, &self.config.data_dir)
-            .with_context(|| format!("import {path:?}"))
-        {
-            Ok(imports) => imports,
-            Err(err) => {
-                self.log_error(format!("Import failed for {}: {err}", path.display()));
-                return Err(err);
+        for raw_path in paths {
+            let mut apply_all: Option<bool> = None;
+            let path = expand_tilde(raw_path.trim());
+            if !path.exists() {
+                let label = path.display().to_string();
+                if options.verbosity != CliVerbosity::Quiet {
+                    eprintln!("Import path not found: {label}");
+                }
+                failures.push(importer::ImportFailure {
+                    source: importer::ImportSource { label },
+                    error: "path not found".to_string(),
+                });
+                continue;
             }
-        };
-        if imports.mods.is_empty() {
-            if imports.unrecognized {
-                self.log_warn(format!(
-                    "Unrecognized mod layout for {} (skipped)",
-                    path.display()
-                ));
-                return Ok(0);
-            }
-            self.log_warn(format!("No mods detected in {}", path.display()));
-            return Ok(0);
-        }
 
-        let mods = imports.mods;
-        let mut overwritten = 0;
-        for mod_entry in &mods {
-            if let Some(existing_id) = self
-                .find_duplicate_by_name(&mod_entry.name)
-                .map(|entry| entry.id.clone())
+            if options.verbosity != CliVerbosity::Quiet {
+                println!("Importing: {}", path.display());
+            }
+
+            let printer = if matches!(options.verbosity, CliVerbosity::Verbose | CliVerbosity::Debug)
             {
-                if self.remove_mod_by_id(&existing_id) {
-                    overwritten += 1;
+                Some(Arc::new(Mutex::new(CliProgressPrinter::new(
+                    options.verbosity,
+                ))))
+            } else {
+                None
+            };
+            let progress: Option<importer::ProgressCallback> = printer.as_ref().map(|printer| {
+                let printer = Arc::clone(printer);
+                let callback: importer::ProgressCallback = Arc::new(
+                    move |progress: importer::ImportProgress| {
+                        if let Ok(mut printer) = printer.lock() {
+                            printer.handle(&progress);
+                        }
+                    },
+                );
+                callback
+            });
+
+            let start = Instant::now();
+            let imports = match importer::import_path_with_progress(
+                &path,
+                &self.config.data_dir,
+                progress,
+            )
+            .with_context(|| format!("import {path:?}"))
+            {
+                Ok(imports) => imports,
+                Err(err) => {
+                    let label = path.display().to_string();
+                    if options.verbosity != CliVerbosity::Quiet {
+                        eprintln!("Import failed: {label} ({})", summarize_error(&err.to_string()));
+                    }
+                    failures.push(importer::ImportFailure {
+                        source: importer::ImportSource { label },
+                        error: err.to_string(),
+                    });
+                    continue;
+                }
+            };
+
+            if imports.unrecognized && imports.batches.is_empty() {
+                let label = path.display().to_string();
+                if options.verbosity != CliVerbosity::Quiet {
+                    eprintln!("Unrecognized mod layout for {label} (skipped)");
+                }
+                failures.push(importer::ImportFailure {
+                    source: importer::ImportSource { label },
+                    error: "unrecognized layout".to_string(),
+                });
+                continue;
+            }
+
+            for failure in &imports.failures {
+                failures.push(failure.clone());
+                if matches!(options.verbosity, CliVerbosity::Verbose | CliVerbosity::Debug) {
+                    eprintln!(
+                        "Import failed: {} ({})",
+                        failure.source.label,
+                        summarize_error(&failure.error)
+                    );
+                }
+            }
+
+            let mut path_imported = 0usize;
+            for batch in imports.batches {
+                let source_label = batch.source.label.clone();
+                if matches!(options.verbosity, CliVerbosity::Verbose | CliVerbosity::Debug) {
+                    println!("  Source: {}", source_label);
+                }
+                let mut approved = Vec::new();
+                for mod_entry in batch.mods {
+                    if let Some(existing) = self.find_duplicate_by_name(&mod_entry.name).cloned() {
+                        let default_overwrite =
+                            duplicate_default_overwrite(&mod_entry, &existing);
+                        let overwrite = if let Some(choice) = apply_all {
+                            choice
+                        } else {
+                            let resolution = prompt_duplicate_cli(
+                                &mod_entry,
+                                &existing,
+                                default_overwrite,
+                                None,
+                            )?;
+                            match resolution {
+                                CliDuplicateAction::Overwrite => true,
+                                CliDuplicateAction::Skip => false,
+                                CliDuplicateAction::OverwriteAll => {
+                                    apply_all = Some(true);
+                                    true
+                                }
+                                CliDuplicateAction::SkipAll => {
+                                    apply_all = Some(false);
+                                    false
+                                }
+                            }
+                        };
+                        if overwrite {
+                            let _ = self.remove_mod_by_id(&existing.id);
+                            approved.push(mod_entry);
+                        } else {
+                            self.remove_mod_root(&mod_entry.id);
+                        }
+                        continue;
+                    }
+
+                    if let Some(similar) = self.find_similar_by_label(&mod_entry) {
+                        let default_overwrite = similar
+                            .new_stamp
+                            .zip(similar.existing_stamp)
+                            .map(|(new_stamp, existing_stamp)| new_stamp > existing_stamp);
+                        let existing = match self
+                            .library
+                            .mods
+                            .iter()
+                            .find(|entry| entry.id == similar.existing_id)
+                            .cloned()
+                        {
+                            Some(existing) => existing,
+                            None => {
+                                approved.push(mod_entry);
+                                continue;
+                            }
+                        };
+                        let overwrite = if let Some(choice) = apply_all {
+                            choice
+                        } else {
+                            let resolution = prompt_duplicate_cli(
+                                &mod_entry,
+                                &existing,
+                                default_overwrite,
+                                Some(similar.similarity),
+                            )?;
+                            match resolution {
+                                CliDuplicateAction::Overwrite => true,
+                                CliDuplicateAction::Skip => false,
+                                CliDuplicateAction::OverwriteAll => {
+                                    apply_all = Some(true);
+                                    true
+                                }
+                                CliDuplicateAction::SkipAll => {
+                                    apply_all = Some(false);
+                                    false
+                                }
+                            }
+                        };
+                        if overwrite {
+                            let _ = self.remove_mod_by_id(&similar.existing_id);
+                            approved.push(mod_entry);
+                        } else {
+                            self.remove_mod_root(&mod_entry.id);
+                        }
+                        continue;
+                    }
+
+                    approved.push(mod_entry);
+                }
+
+                if !approved.is_empty() {
+                    match self.apply_mod_entries(approved) {
+                        Ok(count) => {
+                            path_imported = path_imported.saturating_add(count);
+                        }
+                        Err(err) => {
+                            failures.push(importer::ImportFailure {
+                                source: batch.source.clone(),
+                                error: err.to_string(),
+                            });
+                            if options.verbosity != CliVerbosity::Quiet {
+                                eprintln!(
+                                    "Import apply failed: {} ({})",
+                                    batch.source.label,
+                                    summarize_error(&err.to_string())
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+
+            total_imported = total_imported.saturating_add(path_imported);
+            if options.verbosity != CliVerbosity::Quiet {
+                let elapsed = start.elapsed().as_millis();
+                println!(
+                    "Imported {} mod(s) from {} in {}ms",
+                    path_imported,
+                    path.display(),
+                    elapsed
+                );
+            }
+        }
+
+        if options.verbosity != CliVerbosity::Quiet {
+            if failures.is_empty() {
+                println!("Import complete: {} mod(s) imported", total_imported);
+            } else {
+                println!(
+                    "Import complete: {} mod(s) imported, {} failure(s)",
+                    total_imported,
+                    failures.len()
+                );
+                for failure in failures.iter().take(8) {
+                    println!(
+                        "  - {}: {}",
+                        failure.source.label,
+                        summarize_error(&failure.error)
+                    );
+                }
+                if failures.len() > 8 {
+                    println!("  ...and {} more (see log)", failures.len() - 8);
                 }
             }
         }
-        if overwritten > 0 {
-            self.log_warn(format!("Overwrote {overwritten} duplicate mod(s)"));
+
+        if options.deploy {
+            if !self.paths_ready() {
+                if options.verbosity != CliVerbosity::Quiet {
+                    eprintln!("Deploy skipped: game paths not set");
+                }
+                return Ok(());
+            }
+            if total_imported == 0 {
+                if options.verbosity != CliVerbosity::Quiet {
+                    println!("No imports to deploy");
+                }
+                return Ok(());
+            }
+
+            if options.verbosity != CliVerbosity::Quiet {
+                println!("Deploying imported mods...");
+            }
+            let mut library = self.library.clone();
+            match deploy::deploy_with_options(
+                &self.config,
+                &mut library,
+                deploy::DeployOptions {
+                    backup: true,
+                    reason: Some("cli import".to_string()),
+                },
+            ) {
+                Ok(report) => {
+                    if options.verbosity != CliVerbosity::Quiet {
+                        println!(
+                            "Deploy complete: {} pak, {} loose ({} files)",
+                            report.pak_count, report.loose_count, report.file_count
+                        );
+                    }
+                    self.library = library;
+                }
+                Err(err) => {
+                    if options.verbosity != CliVerbosity::Quiet {
+                        eprintln!("Deploy failed: {}", summarize_error(&err.to_string()));
+                    }
+                    return Err(err);
+                }
+            }
         }
 
-        let count = self.apply_mod_entries(mods)?;
-        self.log_info(format!(
-            "Import complete: {} mod(s) from {}",
-            count,
-            path.display()
-        ));
-        Ok(count)
+        Ok(())
     }
 
     pub fn poll_imports(&mut self) {
@@ -2557,6 +2834,7 @@ impl App {
         }
 
         if self.import_active.is_none() {
+            self.process_next_import_batch();
             self.start_next_import();
         }
 
@@ -2965,6 +3243,7 @@ impl App {
         if self.dialog.is_some()
             || self.pending_duplicate.is_some()
             || !self.duplicate_queue.is_empty()
+            || !self.import_batches.is_empty()
         {
             return;
         }
@@ -2974,14 +3253,19 @@ impl App {
         };
 
         self.import_active = Some(path.clone());
+        self.import_progress = None;
         self.status = format!("Importing {}", display_path(&path));
         self.log_info(format!("Import started: {}", path.display()));
 
         let tx = self.import_tx.clone();
+        let progress_tx = tx.clone();
         let data_dir = self.config.data_dir.clone();
         thread::spawn(move || {
-            let result =
-                importer::import_path(&path, &data_dir).with_context(|| format!("import {path:?}"));
+            let progress = Arc::new(move |progress: importer::ImportProgress| {
+                let _ = progress_tx.send(ImportMessage::Progress(progress));
+            });
+            let result = importer::import_path_with_progress(&path, &data_dir, Some(progress))
+                .with_context(|| format!("import {path:?}"));
             let message = match result {
                 Ok(result) => ImportMessage::Completed { path, result },
                 Err(err) => ImportMessage::Failed {
@@ -2995,22 +3279,39 @@ impl App {
 
     fn handle_import_message(&mut self, message: ImportMessage) {
         match message {
+            ImportMessage::Progress(progress) => {
+                self.import_progress = Some(progress);
+            }
             ImportMessage::Completed { path, result } => {
                 self.import_active = None;
-                if result.mods.is_empty() {
+                self.import_progress = None;
+                if !result.failures.is_empty() {
+                    for failure in &result.failures {
+                        self.log_error(format!(
+                            "Import failed: {} ({})",
+                            failure.source.label, failure.error
+                        ));
+                    }
+                    self.import_failures.extend(result.failures);
+                    self.import_summary_pending = true;
+                }
+                if result.batches.is_empty() {
                     if result.unrecognized {
                         self.prompt_unrecognized(path);
                         return;
                     }
                     self.status = "No mods found to import".to_string();
                     self.log_warn(format!("No mods detected in {}", path.display()));
+                    self.maybe_show_import_summary();
                     return;
                 }
 
-                self.stage_imports(result.mods, &path);
+                self.import_batches.extend(result.batches);
+                self.process_next_import_batch();
             }
             ImportMessage::Failed { path, error } => {
                 self.import_active = None;
+                self.import_progress = None;
                 let display = display_path(&path);
                 let reason = summarize_error(&error);
                 self.status = format!("Import failed: {display} ({reason})");
@@ -3020,24 +3321,36 @@ impl App {
                     ToastLevel::Error,
                     Duration::from_secs(4),
                 );
+                self.import_failures.push(importer::ImportFailure {
+                    source: importer::ImportSource { label: display },
+                    error,
+                });
+                self.import_summary_pending = true;
+                self.maybe_show_import_summary();
             }
         }
     }
 
-    fn stage_imports(&mut self, mods: Vec<ModEntry>, source: &PathBuf) {
+    fn stage_imports(&mut self, mods: Vec<ModEntry>, source: &importer::ImportSource) {
         let mut approved = Vec::new();
         let mut duplicates = VecDeque::new();
 
         for mod_entry in mods {
             if let Some(existing) = self.find_duplicate_by_name(&mod_entry.name) {
+                let default_overwrite = duplicate_default_overwrite(&mod_entry, existing);
                 duplicates.push_back(DuplicateDecision {
                     mod_entry,
                     existing_id: existing.id.clone(),
                     existing_label: existing.display_name(),
                     kind: DuplicateKind::Exact,
+                    default_overwrite,
                 });
             } else if let Some(similar) = self.find_similar_by_label(&mod_entry) {
                 let existing_label = similar.existing_label.clone();
+                let default_overwrite = similar
+                    .new_stamp
+                    .zip(similar.existing_stamp)
+                    .map(|(new_stamp, existing_stamp)| new_stamp > existing_stamp);
                 duplicates.push_back(DuplicateDecision {
                     mod_entry,
                     existing_id: similar.existing_id,
@@ -3049,6 +3362,7 @@ impl App {
                         existing_stamp: similar.existing_stamp,
                         similarity: similar.similarity,
                     },
+                    default_overwrite,
                 });
             } else {
                 approved.push(mod_entry);
@@ -3060,7 +3374,7 @@ impl App {
             self.duplicate_queue.extend(duplicates);
             self.log_warn(format!(
                 "Duplicate or similar mods found in {}. Awaiting confirmation.",
-                source.display()
+                source.label
             ));
             self.prompt_next_duplicate();
             return;
@@ -3072,24 +3386,94 @@ impl App {
                 self.log_info(format!(
                     "Import complete: {} mod(s) from {}",
                     count,
-                    source.display()
+                    source.label
                 ));
+                self.process_next_import_batch();
             }
             Err(err) => {
-                let display = display_path(source);
+                let display = source.label.clone();
                 let reason = summarize_error(&err.to_string());
                 self.status = format!("Import failed: {display} ({reason})");
                 self.log_error(format!(
                     "Import apply failed for {}: {err}",
-                    source.display()
+                    source.label
                 ));
                 self.set_toast(
                     &format!("Import failed: {display} ({reason})"),
                     ToastLevel::Error,
                     Duration::from_secs(4),
                 );
+                self.import_failures.push(importer::ImportFailure {
+                    source: source.clone(),
+                    error: err.to_string(),
+                });
+                self.import_summary_pending = true;
+                self.process_next_import_batch();
             }
         }
+    }
+
+    fn process_next_import_batch(&mut self) {
+        if self.import_active.is_some()
+            || self.dialog.is_some()
+            || self.pending_duplicate.is_some()
+            || !self.duplicate_queue.is_empty()
+        {
+            return;
+        }
+
+        let Some(batch) = self.import_batches.pop_front() else {
+            self.maybe_show_import_summary();
+            return;
+        };
+
+        self.stage_imports(batch.mods, &batch.source);
+    }
+
+    fn maybe_show_import_summary(&mut self) {
+        if !self.import_summary_pending {
+            return;
+        }
+        if self.import_active.is_some()
+            || !self.import_batches.is_empty()
+            || !self.import_queue.is_empty()
+            || self.pending_duplicate.is_some()
+            || !self.duplicate_queue.is_empty()
+            || self.dialog.is_some()
+        {
+            return;
+        }
+        if self.import_failures.is_empty() {
+            self.import_summary_pending = false;
+            return;
+        }
+
+        let total = self.import_failures.len();
+        let mut lines = Vec::new();
+        lines.push(format!("Import completed with {total} failure(s)."));
+        lines.push("".to_string());
+        for failure in self.import_failures.iter().take(6) {
+            lines.push(format!(
+                "- {}: {}",
+                failure.source.label,
+                summarize_error(&failure.error)
+            ));
+        }
+        if total > 6 {
+            lines.push(format!("...and {} more (see log)", total - 6));
+        }
+
+        self.import_summary_pending = false;
+        self.import_failures.clear();
+        self.open_dialog(Dialog {
+            title: "Import Summary".to_string(),
+            message: lines.join("\n"),
+            yes_label: "Close".to_string(),
+            no_label: "Close".to_string(),
+            choice: DialogChoice::Yes,
+            kind: DialogKind::ImportSummary,
+            toggle: None,
+        });
     }
 
     fn apply_mod_entries(&mut self, mods: Vec<ModEntry>) -> Result<usize> {
@@ -3118,9 +3502,17 @@ impl App {
             return;
         }
 
+        if let Some(overwrite_all) = self.duplicate_apply_all {
+            while let Some(next) = self.duplicate_queue.pop_front() {
+                self.apply_duplicate_decision(next, overwrite_all);
+            }
+        }
+
         let Some(next) = self.duplicate_queue.pop_front() else {
             let approved = std::mem::take(&mut self.approved_imports);
             if approved.is_empty() {
+                self.duplicate_apply_all = None;
+                self.process_next_import_batch();
                 return;
             }
 
@@ -3138,8 +3530,17 @@ impl App {
                         ToastLevel::Error,
                         Duration::from_secs(4),
                     );
+                    self.import_failures.push(importer::ImportFailure {
+                        source: importer::ImportSource {
+                            label: "Import batch".to_string(),
+                        },
+                        error: err.to_string(),
+                    });
+                    self.import_summary_pending = true;
                 }
             }
+            self.duplicate_apply_all = None;
+            self.process_next_import_batch();
             return;
         };
 
@@ -3186,23 +3587,41 @@ impl App {
             }
         };
 
+        let default_choice = if matches!(next.default_overwrite, Some(true)) {
+            DialogChoice::Yes
+        } else {
+            DialogChoice::No
+        };
         self.pending_duplicate = Some(next);
         self.open_dialog(Dialog {
             title,
             message,
             yes_label: "Overwrite".to_string(),
             no_label: "Skip".to_string(),
-            choice: DialogChoice::No,
+            choice: default_choice,
             kind,
-            toggle: None,
+            toggle: Some(DialogToggle {
+                label: "Apply this choice to all remaining duplicates".to_string(),
+                checked: false,
+            }),
         });
     }
 
-    pub fn confirm_duplicate(&mut self, overwrite: bool) {
+    pub fn confirm_duplicate(&mut self, overwrite: bool, apply_all: bool) {
         let Some(decision) = self.pending_duplicate.take() else {
             return;
         };
 
+        if apply_all {
+            self.duplicate_apply_all = Some(overwrite);
+        }
+        self.apply_duplicate_decision(decision, overwrite);
+
+        self.input_mode = InputMode::Normal;
+        self.prompt_next_duplicate();
+    }
+
+    fn apply_duplicate_decision(&mut self, decision: DuplicateDecision, overwrite: bool) {
         if overwrite {
             let removed = self.remove_mod_by_id(&decision.existing_id);
             if removed {
@@ -3227,9 +3646,6 @@ impl App {
             ));
             self.remove_mod_root(&decision.mod_entry.id);
         }
-
-        self.input_mode = InputMode::Normal;
-        self.prompt_next_duplicate();
     }
 
     fn prompt_unrecognized(&mut self, path: PathBuf) {
@@ -3284,15 +3700,26 @@ impl App {
         let choice = dialog.choice;
         match dialog.kind {
             DialogKind::Overwrite | DialogKind::Similar => {
-                self.confirm_duplicate(matches!(choice, DialogChoice::Yes));
+                let apply_all = dialog
+                    .toggle
+                    .as_ref()
+                    .map(|toggle| toggle.checked)
+                    .unwrap_or(false);
+                self.confirm_duplicate(matches!(choice, DialogChoice::Yes), apply_all);
             }
             DialogKind::Unrecognized { path, label } => {
                 if matches!(choice, DialogChoice::Yes) {
                     let entry = build_unknown_entry(&path, &label);
                     self.log_warn(format!("Importing unknown layout: {label}"));
-                    self.stage_imports(vec![entry], &path);
+                    self.stage_imports(
+                        vec![entry],
+                        &importer::ImportSource {
+                            label: label.clone(),
+                        },
+                    );
                 } else {
                     self.log_warn(format!("Skipped unrecognized layout: {label}"));
+                    self.process_next_import_batch();
                 }
             }
             DialogKind::DeleteProfile { name } => {
@@ -3349,6 +3776,7 @@ impl App {
                     }
                 }
             }
+            DialogKind::ImportSummary => {}
         }
     }
 
@@ -3395,6 +3823,14 @@ impl App {
         }
 
         best
+    }
+
+    fn mod_stamp(entry: &ModEntry) -> Option<i64> {
+        let label = entry.source_label().unwrap_or(entry.name.as_str());
+        extract_timestamp(label)
+            .map(|stamp| stamp as i64)
+            .or(entry.created_at)
+            .or(entry.modified_at)
     }
 
     fn remove_mod_by_id(&mut self, id: &str) -> bool {
@@ -4745,6 +5181,120 @@ fn display_path(path: &PathBuf) -> String {
         .unwrap_or_else(|| path.display().to_string())
 }
 
+fn duplicate_default_overwrite(new_mod: &ModEntry, existing: &ModEntry) -> Option<bool> {
+    if let (Some(new_version), Some(existing_version)) =
+        (mod_version_stamp(new_mod), mod_version_stamp(existing))
+    {
+        if new_version != existing_version {
+            return Some(new_version > existing_version);
+        }
+    }
+    let new_stamp = App::mod_stamp(new_mod)?;
+    let existing_stamp = App::mod_stamp(existing)?;
+    Some(new_stamp > existing_stamp)
+}
+
+#[derive(Debug, Clone, Copy)]
+enum CliDuplicateAction {
+    Overwrite,
+    Skip,
+    OverwriteAll,
+    SkipAll,
+}
+
+struct CliProgressPrinter {
+    verbosity: CliVerbosity,
+    last_label: Option<String>,
+    last_stage: Option<importer::ImportStage>,
+    last_tick: Instant,
+}
+
+impl CliProgressPrinter {
+    fn new(verbosity: CliVerbosity) -> Self {
+        Self {
+            verbosity,
+            last_label: None,
+            last_stage: None,
+            last_tick: Instant::now(),
+        }
+    }
+
+    fn handle(&mut self, progress: &importer::ImportProgress) {
+        if matches!(self.verbosity, CliVerbosity::Quiet | CliVerbosity::Normal) {
+            return;
+        }
+        let label_changed = self.last_label.as_deref() != Some(progress.label.as_str());
+        if label_changed {
+            println!(
+                "  -> {} ({}/{})",
+                progress.label, progress.unit_index, progress.unit_count
+            );
+            self.last_label = Some(progress.label.clone());
+            self.last_stage = None;
+        }
+
+        let stage_changed = self.last_stage != Some(progress.stage);
+        let should_tick = self.last_tick.elapsed().as_millis() >= 250;
+        if stage_changed || (matches!(self.verbosity, CliVerbosity::Debug) && should_tick) {
+            let mut line = format!("     {}", progress.stage.label());
+            if progress.stage_total > 1 {
+                line.push_str(&format!(
+                    " ({}/{})",
+                    progress.stage_current, progress.stage_total
+                ));
+            }
+            if let Some(detail) = &progress.detail {
+                line.push_str(&format!(" - {}", detail));
+            }
+            println!("{line}");
+            self.last_stage = Some(progress.stage);
+            self.last_tick = Instant::now();
+        }
+    }
+}
+
+fn prompt_duplicate_cli(
+    new_mod: &ModEntry,
+    existing: &ModEntry,
+    default_overwrite: Option<bool>,
+    similarity: Option<f32>,
+) -> Result<CliDuplicateAction> {
+    println!();
+    println!("Duplicate mod detected:");
+    println!("  New: {}", new_mod.display_name());
+    println!("  Existing: {}", existing.display_name());
+    if let Some(similarity) = similarity {
+        println!("  Similarity: {:.0}%", similarity * 100.0);
+    }
+    if let Some(default_overwrite) = default_overwrite {
+        let hint = if default_overwrite {
+            "overwrite (newer)"
+        } else {
+            "skip (existing newer)"
+        };
+        println!("  Default: {}", hint);
+    }
+    print!("Choose [o]verwrite, [s]kip, overwrite [a]ll, skip all [k] (Enter = default): ");
+    io::stdout().flush().ok();
+    let mut input = String::new();
+    io::stdin().read_line(&mut input)?;
+    let choice = input.trim().to_lowercase();
+    if choice.is_empty() {
+        return Ok(if default_overwrite.unwrap_or(false) {
+            CliDuplicateAction::Overwrite
+        } else {
+            CliDuplicateAction::Skip
+        });
+    }
+    match choice.as_str() {
+        "o" | "y" | "yes" => Ok(CliDuplicateAction::Overwrite),
+        "s" | "n" | "no" => Ok(CliDuplicateAction::Skip),
+        "a" | "all" => Ok(CliDuplicateAction::OverwriteAll),
+        "k" | "skipall" | "skip-all" => Ok(CliDuplicateAction::SkipAll),
+        _ => Ok(CliDuplicateAction::Skip),
+    }
+}
+
 fn summarize_error(error: &str) -> String {
     let first_line = error.lines().next().unwrap_or(error).trim();
     let last = first_line.rsplit(": ").next().unwrap_or(first_line).trim();
@@ -4810,7 +5360,7 @@ fn levenshtein(a: &str, b: &str) -> usize {
 }
 
 fn extract_timestamp(label: &str) -> Option<u64> {
-    let mut best = None;
+    let mut best: Option<u64> = None;
     let mut current = String::new();
 
     for ch in label.chars() {
@@ -4833,6 +5383,82 @@ fn extract_timestamp(label: &str) -> Option<u64> {
     }
 
     best
+}
+
+fn mod_version_stamp(entry: &ModEntry) -> Option<u64> {
+    let label = entry.source_label().unwrap_or(entry.name.as_str());
+    if let Some((major, minor, patch, build)) = extract_semver(label) {
+        return Some(semver_stamp(major, minor, patch, build));
+    }
+
+    let mut best: Option<u64> = None;
+    for target in &entry.targets {
+        if let InstallTarget::Pak { info, .. } = target {
+            if info.version > 0 {
+                best = Some(best.map_or(info.version, |current| current.max(info.version)));
+            }
+        }
+    }
+    best
+}
+
+fn extract_semver(label: &str) -> Option<(u64, u64, u64, u64)> {
+    let bytes = label.as_bytes();
+    let mut index = 0;
+    while index < bytes.len() {
+        if !bytes[index].is_ascii_digit() {
+            index += 1;
+            continue;
+        }
+        let start = index;
+        let (major, next) = parse_number(bytes, index)?;
+        index = next;
+        if index >= bytes.len() || bytes[index] != b'.' {
+            index = start + 1;
+            continue;
+        }
+        index += 1;
+        let (minor, next) = parse_number(bytes, index)?;
+        index = next;
+        let mut patch = 0;
+        let mut build = 0;
+        if index < bytes.len() && bytes[index] == b'.' {
+            index += 1;
+            if let Some((value, next)) = parse_number(bytes, index) {
+                patch = value;
+                index = next;
+                if index < bytes.len() && bytes[index] == b'.' {
+                    index += 1;
+                    if let Some((value, next)) = parse_number(bytes, index) {
+                        build = value;
+                        let _ = next;
+                    }
+                }
+            }
+        }
+        return Some((major, minor, patch, build));
+    }
+    None
+}
+
+fn parse_number(bytes: &[u8], mut index: usize) -> Option<(u64, usize)> {
+    if index >= bytes.len() || !bytes[index].is_ascii_digit() {
+        return None;
+    }
+    let mut value = 0u64;
+    while index < bytes.len() && bytes[index].is_ascii_digit() {
+        value = value.saturating_mul(10).saturating_add((bytes[index] - b'0') as u64);
+        index += 1;
+    }
+    Some((value, index))
+}
+
+fn semver_stamp(major: u64, minor: u64, patch: u64, build: u64) -> u64 {
+    major
+        .saturating_mul(1_000_000_000)
+        .saturating_add(minor.saturating_mul(1_000_000))
+        .saturating_add(patch.saturating_mul(1_000))
+        .saturating_add(build)
 }
 
 fn append_log_file(path: &PathBuf, level: LogLevel, message: &str) -> std::io::Result<()> {
