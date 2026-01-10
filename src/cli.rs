@@ -48,6 +48,7 @@ enum CliCommand {
     ProfilesList,
     DepsList,
     DepsMissing,
+    DepsDebug(String),
     Paths,
     Help,
     Version,
@@ -196,8 +197,14 @@ fn parse_subcommand(tokens: &[String], global: &GlobalOptions) -> Result<Option<
             let command = match sub {
                 "list" => CliCommand::DepsList,
                 "missing" => CliCommand::DepsMissing,
+                "debug" => {
+                    let query = tokens.get(2).ok_or_else(|| {
+                        anyhow::anyhow!("deps debug requires a mod id or name")
+                    })?;
+                    CliCommand::DepsDebug(query.to_string())
+                }
                 _ => {
-                    bail!("Unknown deps command: {sub} (use 'list' or 'missing')");
+                    bail!("Unknown deps command: {sub} (use 'list', 'missing', or 'debug')");
                 }
             };
             Ok(Some(CliAction::Command {
@@ -362,6 +369,7 @@ fn run_command(
             let profile = resolve_profile(&app.library, profile.as_deref())?;
             list_missing_dependencies(app, profile, format)
         }
+        CliCommand::DepsDebug(query) => debug_dependencies(app, &query),
         CliCommand::Paths => list_paths(app, format),
         CliCommand::Help | CliCommand::Version => Ok(()),
     }
@@ -651,6 +659,11 @@ fn list_missing_dependencies(app: &App, profile: &Profile, format: OutputFormat)
     Ok(())
 }
 
+fn debug_dependencies(app: &App, query: &str) -> Result<()> {
+    println!("{}", app.debug_dependency_report(query));
+    Ok(())
+}
+
 fn collect_dependencies(
     app: &App,
     mod_entry: &ModEntry,
@@ -782,6 +795,7 @@ fn print_help() {
     println!("  sigilsmith profiles list        List profiles");
     println!("  sigilsmith deps list            List dependencies for installed mods");
     println!("  sigilsmith deps missing         List missing dependencies");
+    println!("  sigilsmith deps debug <mod>     Show dependency matching details");
     println!("  sigilsmith paths                Show detected paths");
     println!("  sigilsmith --import <paths...>  Import mods without the TUI");
     println!();

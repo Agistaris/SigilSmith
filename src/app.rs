@@ -2047,9 +2047,6 @@ impl App {
     }
 
     fn find_dependents(&self, target_id: &str) -> Vec<DependentMod> {
-        if !self.dependency_cache_ready {
-            return Vec::new();
-        }
         let target_keys: HashSet<String> = self
             .library
             .mods
@@ -2064,17 +2061,12 @@ impl App {
             if mod_entry.id == target_id {
                 continue;
             }
-            let deps = self.dependency_cache.get(&mod_entry.id);
-            if deps
-                .map(|deps| {
-                    deps.iter().any(|dep| {
-                        dependency_match_keys(dep)
-                            .iter()
-                            .any(|key| target_keys.contains(key))
-                    })
-                })
-                .unwrap_or(false)
-            {
+            let deps = self.cached_mod_dependencies(mod_entry);
+            if deps.iter().any(|dep| {
+                dependency_match_keys(dep)
+                    .iter()
+                    .any(|key| target_keys.contains(key))
+            }) {
                 out.push(DependentMod {
                     id: mod_entry.id.clone(),
                     name: mod_entry.display_name(),
@@ -2931,6 +2923,20 @@ impl App {
 
     fn block_mod_changes(&mut self, action: &str) -> bool {
         if !self.native_sync_active {
+            if self.smart_rank_active {
+                let label = match self.smart_rank_mode {
+                    Some(SmartRankMode::Warmup) => "Smart rank warmup",
+                    Some(SmartRankMode::Preview) => "Smart rank preview",
+                    None => "Smart ranking",
+                };
+                self.status = format!("{label} running: {action} blocked");
+                self.set_toast(
+                    "Smart ranking in progress - please wait",
+                    ToastLevel::Warn,
+                    Duration::from_secs(2),
+                );
+                return true;
+            }
             return false;
         }
         self.status = format!("Startup sync running: {action} blocked");
@@ -4390,6 +4396,99 @@ impl App {
         self.collect_mod_dependencies(mod_entry)
     }
 
+    pub fn debug_dependency_report(&self, query: &str) -> String {
+        let needle = normalize_label(query);
+        if needle.is_empty() {
+            return "Provide a mod id or name to debug.".to_string();
+        }
+        let lookup = DependencyLookup::new(&self.library.mods);
+        let id_to_name: HashMap<String, String> = self
+            .library
+            .mods
+            .iter()
+            .map(|entry| (entry.id.clone(), entry.display_name()))
+            .collect();
+        let matches: Vec<&ModEntry> = self
+            .library
+            .mods
+            .iter()
+            .filter(|entry| {
+                mod_dependency_keys(entry)
+                    .iter()
+                    .any(|key| key.contains(&needle))
+            })
+            .collect();
+        if matches.is_empty() {
+            return format!("No mods matched \"{}\".", query);
+        }
+        let mut lines = Vec::new();
+        for mod_entry in matches {
+            lines.push(format!(
+                "Mod: {} ({})",
+                mod_entry.display_name(),
+                mod_entry.id
+            ));
+            lines.push(format!("Source: {:?}", mod_entry.source));
+            let managed_root = library_mod_root(&self.config.data_dir).join(&mod_entry.id);
+            lines.push(format!(
+                "Managed root: {} ({})",
+                managed_root.display(),
+                if managed_root.exists() {
+                    "exists"
+                } else {
+                    "missing"
+                }
+            ));
+            let mut targets = Vec::new();
+            for target in &mod_entry.targets {
+                match target {
+                    InstallTarget::Pak { file, info } => {
+                        targets.push(format!(
+                            "Pak:{} (uuid {}, folder {})",
+                            file, info.uuid, info.folder
+                        ));
+                    }
+                    InstallTarget::Generated { dir } => targets.push(format!("Generated:{dir}")),
+                    InstallTarget::Data { dir } => targets.push(format!("Data:{dir}")),
+                    InstallTarget::Bin { dir } => targets.push(format!("Bin:{dir}")),
+                }
+            }
+            if targets.is_empty() {
+                lines.push("Targets: none".to_string());
+            } else {
+                lines.push(format!("Targets: {}", targets.join(", ")));
+            }
+            let keys = mod_dependency_keys(mod_entry);
+            if !keys.is_empty() {
+                lines.push(format!("Dependency keys: {}", keys.join(", ")));
+            }
+            let deps = self.collect_mod_dependencies(mod_entry);
+            if deps.is_empty() {
+                lines.push("Dependencies: none".to_string());
+            } else {
+                lines.push("Dependencies:".to_string());
+                for dep in deps {
+                    let matches = lookup.resolve_ids(&dep);
+                    if matches.is_empty() {
+                        lines.push(format!("  - {dep} (missing)"));
+                    } else {
+                        let labels: Vec<String> = matches
+                            .iter()
+                            .filter_map(|id| id_to_name.get(id).cloned())
+                            .collect();
+                        if labels.is_empty() {
+                            lines.push(format!("  - {dep} (matched)"));
+                        } else {
+                            lines.push(format!("  - {dep} -> {}", labels.join(", ")));
+                        }
+                    }
+                }
+            }
+            lines.push(String::new());
+        }
+        lines.join("\n")
+    }
+
     fn update_dependency_cache_for_entries(&mut self, entries: &[ModEntry]) {
         for mod_entry in entries {
             let deps = self.collect_mod_dependencies(mod_entry);
@@ -5320,33 +5419,48 @@ impl App {
     fn self_heal_missing_paks(&mut self) -> usize {
         let mod_map = self.library.index_by_id();
         let mut actions = Vec::new();
+        let mut restores = Vec::new();
         for (id, mod_entry) in &mod_map {
             if mod_entry.is_native() {
                 continue;
             }
             let mut missing_pak = false;
+            let mut pak_exists = false;
             let mut has_other_enabled = false;
+            let pak_enabled = mod_entry.is_target_enabled(TargetKind::Pak);
             for target in &mod_entry.targets {
                 let kind = target.kind();
-                if !mod_entry.is_target_enabled(kind) {
-                    continue;
-                }
                 match target {
                     InstallTarget::Pak { file, .. } => {
                         let source = library_mod_root(&self.config.data_dir).join(id).join(file);
-                        if !source.exists() {
+                        if source.exists() {
+                            pak_exists = true;
+                        } else if pak_enabled {
                             missing_pak = true;
                         }
                     }
-                    _ => has_other_enabled = true,
+                    _ => {
+                        if mod_entry.is_target_enabled(kind) {
+                            has_other_enabled = true;
+                        }
+                    }
                 }
             }
             if missing_pak {
                 actions.push((id.clone(), mod_entry.display_name(), has_other_enabled));
+                continue;
+            }
+            if pak_exists && !pak_enabled && !has_other_enabled {
+                if mod_entry.target_overrides.len() == 1
+                    && mod_entry.target_overrides[0].kind == TargetKind::Pak
+                    && !mod_entry.target_overrides[0].enabled
+                {
+                    restores.push(id.clone());
+                }
             }
         }
 
-        if actions.is_empty() {
+        if actions.is_empty() && restores.is_empty() {
             return 0;
         }
 
@@ -5372,12 +5486,23 @@ impl App {
                 }
             }
         }
+        for id in &restores {
+            if let Some(mod_entry) = self.library.mods.iter_mut().find(|entry| entry.id == *id) {
+                if mod_entry.target_overrides.len() == 1
+                    && mod_entry.target_overrides[0].kind == TargetKind::Pak
+                    && !mod_entry.target_overrides[0].enabled
+                {
+                    mod_entry.target_overrides.clear();
+                    changed = true;
+                }
+            }
+        }
 
         if changed {
             let _ = self.library.save(&self.config.data_dir);
         }
 
-        actions.len()
+        actions.len() + restores.len()
     }
 
     pub fn deploy(&mut self) -> Result<()> {
@@ -5594,7 +5719,7 @@ impl App {
         else {
             return;
         };
-        if !self.dependency_cache_ready {
+        if self.metadata_active && !self.dependency_cache_ready {
             self.queue_pending_delete(entry.id.clone(), entry.display_name());
             return;
         }
@@ -5635,7 +5760,7 @@ impl App {
             return;
         };
 
-        if !self.dependency_cache_ready {
+        if self.metadata_active && !self.dependency_cache_ready {
             self.queue_pending_delete(entry.id.clone(), entry.display_name());
             return;
         }
@@ -6661,16 +6786,49 @@ fn mod_dependency_keys(mod_entry: &ModEntry) -> Vec<String> {
 
     push_key(&mod_entry.id);
     push_key(&mod_entry.name);
+    for token in mod_entry.name.split(|ch: char| !ch.is_ascii_alphanumeric()) {
+        if token.len() >= 4 {
+            push_key(token);
+        }
+    }
     push_key(&mod_entry.display_name());
+    for token in mod_entry
+        .display_name()
+        .split(|ch: char| !ch.is_ascii_alphanumeric())
+    {
+        if token.len() >= 4 {
+            push_key(token);
+        }
+    }
     if let Some(label) = mod_entry.source_label() {
         push_key(label);
+        for token in label.split(|ch: char| !ch.is_ascii_alphanumeric()) {
+            if token.len() >= 4 {
+                push_key(token);
+            }
+        }
     }
     for target in &mod_entry.targets {
         if let InstallTarget::Pak { file, info } = target {
             push_key(file);
+            for token in file.split(|ch: char| !ch.is_ascii_alphanumeric()) {
+                if token.len() >= 4 {
+                    push_key(token);
+                }
+            }
             push_key(&info.uuid);
             push_key(&info.folder);
+            for token in info.folder.split(|ch: char| !ch.is_ascii_alphanumeric()) {
+                if token.len() >= 4 {
+                    push_key(token);
+                }
+            }
             push_key(&info.name);
+            for token in info.name.split(|ch: char| !ch.is_ascii_alphanumeric()) {
+                if token.len() >= 4 {
+                    push_key(token);
+                }
+            }
         }
     }
     keys.sort();

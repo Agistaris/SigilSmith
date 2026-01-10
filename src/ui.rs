@@ -2671,7 +2671,13 @@ fn build_dialog_message_lines(dialog: &crate::app::Dialog, theme: &Theme) -> Vec
             ));
             vec![line1, line2]
         }
-        DialogKind::DeleteMod { name, native, .. } => {
+        DialogKind::DeleteMod {
+            name,
+            native,
+            dependents,
+            ..
+        } => {
+            let mut lines = Vec::new();
             if *native {
                 let line1 = Line::from(vec![
                     Span::styled("Remove native mod \"", Style::default().fg(theme.text)),
@@ -2682,7 +2688,11 @@ fn build_dialog_message_lines(dialog: &crate::app::Dialog, theme: &Theme) -> Vec
                     "Unsubscribe in-game to stop updates.",
                     Style::default().fg(theme.muted),
                 )]);
-                vec![line1, line2]
+                let line3 = Line::from(Span::styled(
+                    "Local file will be deleted from the Larian Mods folder.",
+                    Style::default().fg(theme.warning),
+                ));
+                lines.extend([line1, line2, line3]);
             } else {
                 let line1 = Line::from(vec![
                     Span::styled("Remove mod \"", Style::default().fg(theme.text)),
@@ -2702,8 +2712,13 @@ fn build_dialog_message_lines(dialog: &crate::app::Dialog, theme: &Theme) -> Vec
                     ),
                     Span::styled(".", Style::default().fg(theme.text)),
                 ]);
-                vec![line1, line2]
+                lines.extend([line1, line2]);
             }
+            if !dependents.is_empty() {
+                lines.push(Line::from(""));
+                lines.extend(delete_dependents_lines(dependents, theme));
+            }
+            lines
         }
         _ => dialog
             .message
@@ -2711,6 +2726,41 @@ fn build_dialog_message_lines(dialog: &crate::app::Dialog, theme: &Theme) -> Vec
             .map(|line| Line::from(line.to_string()))
             .collect(),
     }
+}
+
+fn delete_dependents_lines(
+    dependents: &[crate::app::DependentMod],
+    theme: &Theme,
+) -> Vec<Line<'static>> {
+    if dependents.is_empty() {
+        return Vec::new();
+    }
+    let mut lines = Vec::new();
+    let max_list = 4usize;
+    if dependents.len() == 1 {
+        lines.push(Line::from(Span::styled(
+            format!("Will disable: {}", dependents[0].name),
+            Style::default().fg(theme.warning),
+        )));
+        return lines;
+    }
+    lines.push(Line::from(Span::styled(
+        format!("Will disable {} mods:", dependents.len()),
+        Style::default().fg(theme.warning),
+    )));
+    for dependent in dependents.iter().take(max_list) {
+        lines.push(Line::from(Span::styled(
+            dependent.name.clone(),
+            Style::default().fg(theme.warning),
+        )));
+    }
+    if dependents.len() > max_list {
+        lines.push(Line::from(Span::styled(
+            format!("...and {} more", dependents.len() - max_list),
+            Style::default().fg(theme.warning),
+        )));
+    }
+    lines
 }
 
 fn padded_modal(area: Rect, width: u16, height: u16, pad: u16) -> (Rect, Rect) {
