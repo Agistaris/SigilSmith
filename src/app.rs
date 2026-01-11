@@ -37,6 +37,7 @@ const SEARCH_DEBOUNCE_MS: u64 = 250;
 const HOTKEY_DEBOUNCE_MS: u64 = 200;
 const HOTKEY_FADE_MS: u64 = 200;
 const METADATA_CACHE_VERSION: u32 = 1;
+const SMART_RANK_DEBOUNCE_MS: u64 = 600;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum InputPurpose {
@@ -518,6 +519,7 @@ pub struct App {
     smart_rank_mode: Option<SmartRankMode>,
     smart_rank_interrupt: bool,
     smart_rank_refresh_pending: bool,
+    smart_rank_refresh_at: Option<Instant>,
     startup_dependency_check_pending: bool,
     smart_rank_tx: Sender<SmartRankMessage>,
     smart_rank_rx: Receiver<SmartRankMessage>,
@@ -814,6 +816,7 @@ impl App {
             smart_rank_cache: None,
             smart_rank_interrupt: false,
             smart_rank_refresh_pending: false,
+            smart_rank_refresh_at: None,
             startup_dependency_check_pending: matches!(mode, StartupMode::Ui),
             smart_rank_tx,
             smart_rank_rx,
@@ -1220,6 +1223,7 @@ impl App {
     pub fn clear_smart_rank_cache(&mut self) {
         self.smart_rank_cache = None;
         self.clear_smart_rank_cache_file();
+        self.smart_rank_refresh_at = None;
         if self.smart_rank_active {
             self.status = "Smart rank cache cleared; warming up after scan".to_string();
             self.smart_rank_refresh_pending = true;
@@ -1388,12 +1392,14 @@ impl App {
             let fingerprint = self.smart_rank_fingerprint();
             if cache.fingerprint == fingerprint {
                 self.smart_rank_refresh_pending = false;
+                self.smart_rank_refresh_at = None;
                 self.status = "Smart ranking warmup cached".to_string();
                 self.log_info("Smart rank warmup: cache hit".to_string());
                 return;
             }
         }
         self.smart_rank_refresh_pending = true;
+        self.smart_rank_refresh_at = None;
     }
 
     fn prompt_startup_dependency_notice(&mut self, disabled: Vec<String>) {
@@ -1423,6 +1429,10 @@ impl App {
         self.smart_rank_refresh_pending = restart;
         self.smart_rank_cache = None;
         self.clear_smart_rank_cache_file();
+        if restart {
+            self.smart_rank_refresh_at =
+                Some(Instant::now() + Duration::from_millis(SMART_RANK_DEBOUNCE_MS));
+        }
         if !self.smart_rank_active {
             return;
         }
@@ -1433,12 +1443,17 @@ impl App {
     }
 
     fn invalidate_smart_rank_cache(&mut self, reason: &str) {
-        self.interrupt_smart_rank(reason, false);
+        self.interrupt_smart_rank(reason, true);
     }
 
     fn maybe_restart_smart_rank(&mut self) {
         if !self.smart_rank_refresh_pending {
             return;
+        }
+        if let Some(ready_at) = self.smart_rank_refresh_at {
+            if Instant::now() < ready_at {
+                return;
+            }
         }
         if self.smart_rank_active || self.is_busy() {
             return;
@@ -1447,6 +1462,7 @@ impl App {
             return;
         }
         self.smart_rank_refresh_pending = false;
+        self.smart_rank_refresh_at = None;
         self.start_smart_rank_scan(SmartRankMode::Warmup);
     }
 

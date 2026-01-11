@@ -10,7 +10,8 @@ use anyhow::Result;
 use arboard::Clipboard;
 use crossterm::{
     event::{
-        self, DisableBracketedPaste, EnableBracketedPaste, Event, KeyCode, KeyEvent, KeyModifiers,
+        self, DisableBracketedPaste, EnableBracketedPaste, Event, KeyCode, KeyEvent, KeyEventKind,
+        KeyModifiers,
     },
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
@@ -697,7 +698,31 @@ fn handle_explorer_mode(app: &mut App, key: KeyEvent) -> Result<()> {
     Ok(())
 }
 
+fn ignore_repeat_toggle(key: &KeyEvent) -> bool {
+    if key.kind != KeyEventKind::Repeat {
+        return false;
+    }
+    matches!(
+        key.code,
+        KeyCode::Char(' ')
+            | KeyCode::Enter
+            | KeyCode::Char('a')
+            | KeyCode::Char('A')
+            | KeyCode::Char('s')
+            | KeyCode::Char('S')
+            | KeyCode::Char('x')
+            | KeyCode::Char('X')
+            | KeyCode::Char('c')
+            | KeyCode::Char('C')
+            | KeyCode::Delete
+            | KeyCode::Backspace
+    )
+}
+
 fn handle_mods_mode(app: &mut App, key: KeyEvent) -> Result<()> {
+    if ignore_repeat_toggle(&key) {
+        return Ok(());
+    }
     match (key.code, key.modifiers) {
         (KeyCode::Char('f'), mods) | (KeyCode::Char('F'), mods)
             if mods.contains(KeyModifiers::CONTROL) =>
