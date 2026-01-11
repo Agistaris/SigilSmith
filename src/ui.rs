@@ -4441,7 +4441,7 @@ fn build_rows(app: &App, theme: &Theme) -> (Vec<Row<'static>>, ModCounts, usize)
     let profile_entries = app.visible_profile_entries();
     let mod_map = app.library.index_by_id();
     let dep_lookup = app.dependency_lookup();
-    let loading = app.mod_list_loading();
+    let total_rows = profile_entries.len();
 
     for (row_index, (order_index, entry)) in profile_entries.iter().enumerate() {
         let Some(mod_entry) = mod_map.get(&entry.id) else {
@@ -4450,6 +4450,7 @@ fn build_rows(app: &App, theme: &Theme) -> (Vec<Row<'static>>, ModCounts, usize)
         if entry.enabled {
             visible_enabled += 1;
         }
+        let loading = app.mod_row_loading(&entry.id, row_index, total_rows);
         let (row, target_len) = row_for_entry(
             app,
             row_index,
@@ -4507,14 +4508,14 @@ fn mod_header_cell_static(label: &str, theme: &Theme) -> Cell<'static> {
     )
 }
 
-fn loading_frame(row_index: usize) -> &'static str {
-    const FRAMES: [&str; 4] = ["|", "/", "-", "\\"];
+fn loading_frame(row_index: usize, column_index: usize) -> &'static str {
+    const FRAMES: [&str; 6] = [" ", ".", "o", "O", "o", "."];
     let tick = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis()
-        / 140;
-    let idx = (tick as usize + row_index) % FRAMES.len();
+        / 110;
+    let idx = (tick as usize + row_index + column_index * 2) % FRAMES.len();
     FRAMES[idx]
 }
 
@@ -4531,19 +4532,14 @@ fn row_for_entry(
     let (state_label, state_style) = mod_path_label(app, mod_entry, theme, true);
     let target_len = state_label.chars().count();
     let mut row = if loading {
-        let frame = loading_frame(row_index);
         let loading_style = Style::default().fg(theme.muted);
-        Row::new(vec![
-            Cell::from(frame.to_string()).style(loading_style),
-            Cell::from(frame.to_string()).style(loading_style),
-            Cell::from(frame.to_string()).style(loading_style),
-            Cell::from(frame.to_string()).style(loading_style),
-            Cell::from(frame.to_string()).style(loading_style),
-            Cell::from(frame.to_string()).style(loading_style),
-            Cell::from(frame.to_string()).style(loading_style),
-            Cell::from(frame.to_string()).style(loading_style),
-            Cell::from(mod_entry.display_name()),
-        ])
+        let mut cells = Vec::with_capacity(9);
+        for column_index in 0..8 {
+            let frame = loading_frame(row_index, column_index);
+            cells.push(Cell::from(frame.to_string()).style(loading_style));
+        }
+        cells.push(Cell::from(mod_entry.display_name()));
+        Row::new(cells)
     } else {
         let (enabled_text, enabled_style) = if enabled {
             ("[x]", Style::default().fg(theme.success))

@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     fs,
     path::{Path, PathBuf},
     time::{SystemTime, UNIX_EPOCH},
@@ -12,6 +12,8 @@ pub struct Library {
     pub mods: Vec<ModEntry>,
     pub profiles: Vec<Profile>,
     pub active_profile: String,
+    #[serde(default)]
+    pub dependency_blocks: HashSet<String>,
 }
 
 impl Library {
@@ -39,6 +41,7 @@ impl Library {
             mods: Vec::new(),
             profiles: vec![Profile::new("Default")],
             active_profile: "Default".to_string(),
+            dependency_blocks: HashSet::new(),
         };
         library.save(data_dir)?;
         Ok(library)
@@ -65,9 +68,12 @@ impl Library {
 
     pub fn ensure_mods_in_profiles(&mut self) {
         let mod_ids: Vec<String> = self.mods.iter().map(|m| m.id.clone()).collect();
+        let mod_set: HashSet<&str> = mod_ids.iter().map(|id| id.as_str()).collect();
         for profile in &mut self.profiles {
             profile.ensure_mods(&mod_ids);
         }
+        self.dependency_blocks
+            .retain(|id| mod_set.contains(id.as_str()));
     }
 
     pub fn index_by_id(&self) -> HashMap<String, ModEntry> {

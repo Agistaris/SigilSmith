@@ -293,7 +293,12 @@ struct MetadataUpdate {
 }
 
 enum MetadataMessage {
-    Completed { updates: Vec<MetadataUpdate> },
+    Progress {
+        update: MetadataUpdate,
+        current: usize,
+        total: usize,
+    },
+    Completed,
     Failed { error: String },
 }
 
@@ -521,6 +526,10 @@ pub struct App {
     metadata_tx: Sender<MetadataMessage>,
     metadata_rx: Receiver<MetadataMessage>,
     metadata_active: bool,
+    metadata_processed: usize,
+    metadata_total: usize,
+    metadata_processed_ids: HashSet<String>,
+    metadata_dirty: bool,
     update_tx: Sender<UpdateMessage>,
     update_rx: Receiver<UpdateMessage>,
     update_active: bool,
@@ -811,6 +820,10 @@ impl App {
             metadata_tx,
             metadata_rx,
             metadata_active: false,
+            metadata_processed: 0,
+            metadata_total: 0,
+            metadata_processed_ids: HashSet::new(),
+            metadata_dirty: false,
             update_tx,
             update_rx,
             update_active: false,
@@ -949,7 +962,9 @@ impl App {
                 Some(index)
             })
             .collect();
-        sort_mod_indices(&mut indices, profile, &mod_map, self.mod_sort);
+        if !self.mod_list_loading() {
+            sort_mod_indices(&mut indices, profile, &mod_map, self.mod_sort);
+        }
         indices
     }
 
@@ -1216,6 +1231,29 @@ impl App {
         self.start_smart_rank_scan(SmartRankMode::Warmup);
     }
 
+    fn compute_missing_dependency_blocks(&self) -> HashSet<String> {
+        if !self.dependency_cache_ready {
+            return HashSet::new();
+        }
+        let lookup = DependencyLookup::new(&self.library.mods);
+        let mut missing = HashSet::new();
+        for mod_entry in &self.library.mods {
+            if self.missing_dependency_count_for_mod(mod_entry, &lookup) > 0 {
+                missing.insert(mod_entry.id.clone());
+            }
+        }
+        missing
+    }
+
+    fn refresh_dependency_blocks(&mut self) -> HashSet<String> {
+        let missing = self.compute_missing_dependency_blocks();
+        if missing != self.library.dependency_blocks {
+            self.library.dependency_blocks = missing.clone();
+            let _ = self.library.save(&self.config.data_dir);
+        }
+        missing
+    }
+
     fn run_startup_dependency_check(&mut self) {
         if !self.startup_dependency_check_pending {
             return;
@@ -1224,10 +1262,10 @@ impl App {
             return;
         }
         self.startup_dependency_check_pending = false;
+        let missing_blocks = self.refresh_dependency_blocks();
         let Some(profile) = self.library.active_profile() else {
             return;
         };
-        let lookup = DependencyLookup::new(&self.library.mods);
         let mut to_disable = Vec::new();
         let mut disabled_names = Vec::new();
         for entry in &profile.order {
@@ -1242,8 +1280,7 @@ impl App {
             else {
                 continue;
             };
-            let missing = self.missing_dependency_count_for_mod(mod_entry, &lookup);
-            if missing > 0 {
+            if missing_blocks.contains(&mod_entry.id) {
                 to_disable.push(entry.id.clone());
                 disabled_names.push(mod_entry.display_name());
             }
@@ -1518,6 +1555,7 @@ impl App {
             || self.conflict_active
             || self.conflict_pending
             || self.smart_rank_active
+            || self.metadata_active
     }
 
     pub fn startup_pending(&self) -> bool {
@@ -3736,14 +3774,19 @@ impl App {
             return;
         }
         self.metadata_active = true;
+        self.metadata_processed = 0;
+        self.metadata_total = self.library.mods.len();
+        self.metadata_processed_ids.clear();
+        self.metadata_dirty = false;
+        self.dependency_cache_ready = false;
         let tx = self.metadata_tx.clone();
         let config = self.config.clone();
         let library = self.library.clone();
         let game_id = self.game_id;
         thread::spawn(move || {
-            let result = collect_metadata_updates(game_id, &config, &library);
+            let result = collect_metadata_updates(game_id, &config, &library, Some(&tx));
             let message = match result {
-                Ok(updates) => MetadataMessage::Completed { updates },
+                Ok(_) => MetadataMessage::Completed,
                 Err(err) => MetadataMessage::Failed {
                     error: err.to_string(),
                 },
@@ -4030,43 +4073,43 @@ impl App {
         loop {
             match self.metadata_rx.try_recv() {
                 Ok(message) => match message {
-                    MetadataMessage::Completed { updates } => {
-                        self.metadata_active = false;
-                        if updates.is_empty() {
-                            self.dependency_cache_ready = !self.dependency_cache.is_empty();
-                            self.run_startup_dependency_check();
-                            self.maybe_restart_smart_rank();
-                            self.maybe_prompt_pending_delete();
-                            continue;
-                        }
-                        let mut updated = false;
-                        let mut cache_updated = false;
-                        for update in updates {
-                            self.dependency_cache
-                                .insert(update.id.clone(), update.dependencies);
-                            cache_updated = true;
-                            if let Some(mod_entry) = self
-                                .library
-                                .mods
-                                .iter_mut()
-                                .find(|entry| entry.id == update.id)
-                            {
-                                if mod_entry.created_at != update.created_at {
-                                    mod_entry.created_at = update.created_at;
-                                    updated = true;
-                                }
-                                if mod_entry.modified_at != update.modified_at {
-                                    mod_entry.modified_at = update.modified_at;
-                                    updated = true;
-                                }
+                    MetadataMessage::Progress {
+                        update,
+                        current,
+                        total,
+                    } => {
+                        self.metadata_processed = current;
+                        self.metadata_total = total;
+                        self.metadata_processed_ids.insert(update.id.clone());
+                        self.dependency_cache
+                            .insert(update.id.clone(), update.dependencies);
+                        if let Some(mod_entry) = self
+                            .library
+                            .mods
+                            .iter_mut()
+                            .find(|entry| entry.id == update.id)
+                        {
+                            if mod_entry.created_at != update.created_at {
+                                mod_entry.created_at = update.created_at;
+                                self.metadata_dirty = true;
+                            }
+                            if mod_entry.modified_at != update.modified_at {
+                                mod_entry.modified_at = update.modified_at;
+                                self.metadata_dirty = true;
                             }
                         }
-                        if cache_updated {
-                            self.dependency_cache_ready = true;
+                    }
+                    MetadataMessage::Completed => {
+                        self.metadata_active = false;
+                        self.dependency_cache_ready =
+                            self.metadata_total == 0 || !self.dependency_cache.is_empty();
+                        if self.dependency_cache_ready {
+                            self.refresh_dependency_blocks();
                         }
-                        if updated {
+                        if self.metadata_dirty {
                             let _ = self.library.save(&self.config.data_dir);
                             self.log_info("Metadata refresh applied".to_string());
+                            self.metadata_dirty = false;
                         }
                         self.run_startup_dependency_check();
                         self.maybe_restart_smart_rank();
@@ -4689,10 +4732,36 @@ impl App {
         Some(DependencyLookup::new(&self.library.mods))
     }
 
+    fn smart_rank_warmup_active(&self) -> bool {
+        self.smart_rank_active && matches!(self.smart_rank_mode, Some(SmartRankMode::Warmup))
+    }
+
     pub fn mod_list_loading(&self) -> bool {
         self.metadata_active
+            || self.native_sync_active
             || self.startup_dependency_check_pending
             || !self.dependency_cache_ready
+            || self.smart_rank_warmup_active()
+    }
+
+    pub fn mod_row_loading(&self, mod_id: &str, row_index: usize, total_rows: usize) -> bool {
+        if self.metadata_active {
+            return !self.metadata_processed_ids.contains(mod_id);
+        }
+        if self.native_sync_active || self.startup_dependency_check_pending || !self.dependency_cache_ready
+        {
+            return true;
+        }
+        if self.smart_rank_warmup_active() {
+            let Some(progress) = &self.smart_rank_progress else {
+                return true;
+            };
+            let total = progress.total.max(1);
+            let ratio = (progress.scanned.min(total) as f32) / (total as f32);
+            let reveal = ((ratio * total_rows as f32).ceil() as usize).min(total_rows);
+            return row_index >= reveal;
+        }
+        false
     }
 
     pub fn missing_dependency_count_for_mod(
@@ -5394,6 +5463,7 @@ impl App {
         if before == self.library.mods.len() {
             return false;
         }
+        self.library.dependency_blocks.remove(id);
 
         for profile in &mut self.library.profiles {
             profile.order.retain(|entry| entry.id != id);
@@ -5584,13 +5654,17 @@ impl App {
                     )
                 })
                 .collect();
+            let dependency_blocks = self.library.dependency_blocks.clone();
             if let Some(profile) = self.library.active_profile_mut() {
                 for entry in &mut profile.order {
                     let has_pak = mod_has_pak.get(&entry.id).copied().unwrap_or(false);
                     if !has_pak {
                         continue;
                     }
-                    let desired = delta.enabled_set.contains(&entry.id);
+                    let mut desired = delta.enabled_set.contains(&entry.id);
+                    if desired && dependency_blocks.contains(&entry.id) {
+                        desired = false;
+                    }
                     if entry.enabled != desired {
                         entry.enabled = desired;
                         updated_enabled = true;
@@ -7426,6 +7500,7 @@ fn collect_metadata_updates(
     game_id: GameId,
     config: &GameConfig,
     library: &Library,
+    progress: Option<&Sender<MetadataMessage>>,
 ) -> Result<Vec<MetadataUpdate>> {
     let paths = game::detect_paths(game_id, Some(&config.game_root), Some(&config.larian_dir)).ok();
     let native_index = paths
@@ -7433,7 +7508,8 @@ fn collect_metadata_updates(
         .map(|paths| native_pak::build_native_pak_index(&paths.larian_mods_dir));
 
     let mut updates = Vec::new();
-    for mod_entry in &library.mods {
+    let total = library.mods.len();
+    for (index, mod_entry) in library.mods.iter().enumerate() {
         let should_refresh_created =
             mod_entry.created_at.is_none() || mod_entry.created_at == Some(mod_entry.added_at);
         let should_refresh_modified = mod_entry.modified_at.is_none()
@@ -7582,12 +7658,20 @@ fn collect_metadata_updates(
             }
         }
 
-        updates.push(MetadataUpdate {
+        let update = MetadataUpdate {
             id: mod_entry.id.clone(),
             created_at: next_created,
             modified_at: next_modified,
             dependencies,
-        });
+        };
+        if let Some(tx) = progress {
+            let _ = tx.send(MetadataMessage::Progress {
+                update: update.clone(),
+                current: index + 1,
+                total,
+            });
+        }
+        updates.push(update);
     }
 
     Ok(updates)
