@@ -772,6 +772,15 @@ fn import_single_pak(
         .and_then(|entry| entry.created_at);
 
     let mod_id = pak_info.uuid.clone();
+    let mut dependencies = meta_info.dependencies.clone();
+    for info in json_mods {
+        if !info.dependencies.is_empty() {
+            dependencies.extend(info.dependencies.clone());
+        }
+    }
+    dependencies.sort();
+    dependencies.dedup();
+    dependencies.retain(|dep| !dep.eq_ignore_ascii_case(&mod_id));
     let mod_root = library_mod_root(data_dir).join(&mod_id);
     fs::create_dir_all(&mod_root).context("create mod storage")?;
 
@@ -801,6 +810,7 @@ fn import_single_pak(
         target_overrides: Vec::new(),
         source_label: source_label.map(|label| label.to_string()),
         source: ModSource::Managed,
+        dependencies,
     })
 }
 
@@ -871,6 +881,7 @@ fn import_override_pak(
         target_overrides: Vec::new(),
         source_label: source_label.map(|label| label.to_string()),
         source: ModSource::Managed,
+        dependencies: Vec::new(),
     })
 }
 
@@ -985,6 +996,7 @@ fn import_loose(
         target_overrides: Vec::new(),
         source_label: source_label.map(|label| label.to_string()),
         source: ModSource::Managed,
+        dependencies: Vec::new(),
     })
 }
 

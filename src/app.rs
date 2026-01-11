@@ -36,6 +36,7 @@ use blake3::Hasher;
 const SEARCH_DEBOUNCE_MS: u64 = 250;
 const HOTKEY_DEBOUNCE_MS: u64 = 200;
 const HOTKEY_FADE_MS: u64 = 200;
+const METADATA_CACHE_VERSION: u32 = 1;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum InputPurpose {
@@ -928,7 +929,7 @@ impl App {
         if self.normalize_mod_sources() {
             let _ = self.library.save(&self.config.data_dir);
         }
-        self.start_metadata_refresh();
+        self.maybe_start_metadata_refresh();
         self.queue_conflict_scan("startup");
         self.start_update_check();
     }
@@ -1301,6 +1302,78 @@ impl App {
         if self.app_config.show_startup_dependency_notice {
             self.prompt_startup_dependency_notice(disabled_names);
         }
+    }
+
+    fn maybe_start_metadata_refresh(&mut self) {
+        if self.metadata_cache_valid() {
+            self.log_info("Metadata cache valid; skipping refresh".to_string());
+            self.prime_dependency_cache_from_library();
+            self.run_startup_dependency_check();
+            self.schedule_smart_rank_warmup();
+            return;
+        }
+        self.start_metadata_refresh();
+    }
+
+    fn metadata_cache_valid(&self) -> bool {
+        if self.library.metadata_cache_version != METADATA_CACHE_VERSION {
+            return false;
+        }
+        let Some(expected) = self.library.metadata_cache_key.as_deref() else {
+            return false;
+        };
+        expected == self.metadata_cache_key()
+    }
+
+    fn metadata_cache_key(&self) -> String {
+        let mut hasher = Hasher::new();
+        hasher.update(b"metadata-cache-v1");
+        let mut mods: Vec<&ModEntry> = self.library.mods.iter().collect();
+        mods.sort_by(|a, b| a.id.cmp(&b.id));
+        for mod_entry in mods {
+            hasher.update(mod_entry.id.as_bytes());
+            hasher.update(mod_entry.name.as_bytes());
+            if let Some(label) = mod_entry.source_label.as_deref() {
+                hasher.update(label.as_bytes());
+            }
+            let source_tag = match mod_entry.source {
+                ModSource::Managed => 0u8,
+                ModSource::Native => 1u8,
+            };
+            hasher.update(&[source_tag]);
+            let mut targets: Vec<String> = Vec::new();
+            for target in &mod_entry.targets {
+                let key = match target {
+                    InstallTarget::Pak { file, info } => {
+                        format!("pak|{}|{}|{}", file, info.uuid, info.folder)
+                    }
+                    InstallTarget::Generated { dir } => format!("gen|{dir}"),
+                    InstallTarget::Data { dir } => format!("data|{dir}"),
+                    InstallTarget::Bin { dir } => format!("bin|{dir}"),
+                };
+                targets.push(key);
+            }
+            targets.sort();
+            for target in targets {
+                hasher.update(target.as_bytes());
+            }
+        }
+        hasher.finalize().to_hex().to_string()
+    }
+
+    fn prime_dependency_cache_from_library(&mut self) {
+        self.dependency_cache.clear();
+        for mod_entry in &self.library.mods {
+            if !mod_entry.dependencies.is_empty() {
+                self.dependency_cache
+                    .insert(mod_entry.id.clone(), mod_entry.dependencies.clone());
+            } else {
+                self.dependency_cache
+                    .insert(mod_entry.id.clone(), Vec::new());
+            }
+        }
+        self.dependency_cache_ready = true;
+        self.refresh_dependency_blocks();
     }
 
     fn schedule_smart_rank_warmup(&mut self) {
@@ -2177,7 +2250,7 @@ impl App {
 
     fn queue_pending_delete(&mut self, id: String, name: String) {
         self.pending_delete_mod = Some((id, name));
-        if !self.metadata_active {
+        if !self.metadata_active && !self.dependency_cache_ready {
             self.start_metadata_refresh();
         }
         self.status = "Checking dependencies...".to_string();
@@ -4090,8 +4163,9 @@ impl App {
                         self.metadata_processed = current;
                         self.metadata_total = total;
                         self.metadata_processed_ids.insert(update.id.clone());
+                        let dependencies = update.dependencies;
                         self.dependency_cache
-                            .insert(update.id.clone(), update.dependencies);
+                            .insert(update.id.clone(), dependencies.clone());
                         if let Some(mod_entry) = self
                             .library
                             .mods
@@ -4106,6 +4180,10 @@ impl App {
                                 mod_entry.modified_at = update.modified_at;
                                 self.metadata_dirty = true;
                             }
+                            if mod_entry.dependencies != dependencies {
+                                mod_entry.dependencies = dependencies;
+                                self.metadata_dirty = true;
+                            }
                         }
                     }
                     MetadataMessage::Completed => {
@@ -4114,6 +4192,14 @@ impl App {
                             self.metadata_total == 0 || !self.dependency_cache.is_empty();
                         if self.dependency_cache_ready {
                             self.refresh_dependency_blocks();
+                        }
+                        let cache_key = self.metadata_cache_key();
+                        if self.library.metadata_cache_key.as_deref() != Some(&cache_key)
+                            || self.library.metadata_cache_version != METADATA_CACHE_VERSION
+                        {
+                            self.library.metadata_cache_key = Some(cache_key);
+                            self.library.metadata_cache_version = METADATA_CACHE_VERSION;
+                            self.metadata_dirty = true;
                         }
                         if self.metadata_dirty {
                             let _ = self.library.save(&self.config.data_dir);
@@ -4733,6 +4819,9 @@ impl App {
         if let Some(deps) = self.dependency_cache.get(&mod_entry.id) {
             return deps.clone();
         }
+        if self.library.metadata_cache_version == METADATA_CACHE_VERSION {
+            return mod_entry.dependencies.clone();
+        }
         self.collect_mod_dependencies(mod_entry)
     }
 
@@ -5001,9 +5090,31 @@ impl App {
     }
 
     fn update_dependency_cache_for_entries(&mut self, entries: &[ModEntry]) {
+        let mut changed = false;
         for mod_entry in entries {
             let deps = self.collect_mod_dependencies(mod_entry);
             self.dependency_cache.insert(mod_entry.id.clone(), deps);
+            if let Some(entry) = self
+                .library
+                .mods
+                .iter_mut()
+                .find(|entry| entry.id == mod_entry.id)
+            {
+                let deps = self
+                    .dependency_cache
+                    .get(&mod_entry.id)
+                    .cloned()
+                    .unwrap_or_default();
+                if entry.dependencies != deps {
+                    entry.dependencies = deps;
+                    changed = true;
+                }
+            }
+        }
+        if changed {
+            self.library.metadata_cache_key = Some(self.metadata_cache_key());
+            self.library.metadata_cache_version = METADATA_CACHE_VERSION;
+            let _ = self.library.save(&self.config.data_dir);
         }
     }
 
@@ -5143,6 +5254,9 @@ impl App {
         self.library.ensure_mods_in_profiles();
         self.library.save(&self.config.data_dir)?;
         self.update_dependency_cache_for_entries(&added);
+        self.library.metadata_cache_key = Some(self.metadata_cache_key());
+        self.library.metadata_cache_version = METADATA_CACHE_VERSION;
+        self.library.save(&self.config.data_dir)?;
         if self.normalize_mod_sources() {
             let _ = self.library.save(&self.config.data_dir);
         }
@@ -5570,6 +5684,8 @@ impl App {
 
         self.queue_remove_mod_root(id);
         self.dependency_cache.remove(id);
+        self.library.metadata_cache_key = Some(self.metadata_cache_key());
+        self.library.metadata_cache_version = METADATA_CACHE_VERSION;
         let _ = self.library.save(&self.config.data_dir);
         self.queue_conflict_scan("mod removed");
         true
@@ -5830,6 +5946,8 @@ impl App {
             if changed {
                 self.smart_rank_cache = None;
             }
+            self.library.metadata_cache_key = Some(self.metadata_cache_key());
+            self.library.metadata_cache_version = METADATA_CACHE_VERSION;
             if let Err(err) = self.library.save(&self.config.data_dir) {
                 self.log_warn(format!("Native mod sync save failed: {err}"));
             }
@@ -7519,6 +7637,7 @@ fn build_unknown_entry(path: &PathBuf, label: &str) -> ModEntry {
         target_overrides: Vec::new(),
         source_label: Some(label.to_string()),
         source: ModSource::Managed,
+        dependencies: Vec::new(),
     }
 }
 
@@ -8004,6 +8123,7 @@ fn sync_native_mods_delta(
             target_overrides: Vec::new(),
             source_label: None,
             source: ModSource::Native,
+            dependencies: Vec::new(),
         };
         added.push(mod_entry);
         existing_ids.insert(uuid);

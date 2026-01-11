@@ -14,6 +14,10 @@ pub struct Library {
     pub active_profile: String,
     #[serde(default)]
     pub dependency_blocks: HashSet<String>,
+    #[serde(default)]
+    pub metadata_cache_version: u32,
+    #[serde(default)]
+    pub metadata_cache_key: Option<String>,
 }
 
 impl Library {
@@ -42,6 +46,8 @@ impl Library {
             profiles: vec![Profile::new("Default")],
             active_profile: "Default".to_string(),
             dependency_blocks: HashSet::new(),
+            metadata_cache_version: 0,
+            metadata_cache_key: None,
         };
         library.save(data_dir)?;
         Ok(library)
@@ -160,6 +166,8 @@ pub struct ModEntry {
     pub source_label: Option<String>,
     #[serde(default)]
     pub source: ModSource,
+    #[serde(default)]
+    pub dependencies: Vec<String>,
 }
 
 impl ModEntry {
