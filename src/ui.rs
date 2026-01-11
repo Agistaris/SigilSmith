@@ -1300,13 +1300,22 @@ fn draw(frame: &mut Frame<'_>, app: &mut App) {
     let profile_label = app.active_profile_label();
     let renaming_active = app.is_renaming_active_profile();
     let filter_active = app.mod_filter_active();
-    let mods_label = format_visible_count(counts.visible_total, counts.total);
-    let enabled_label = format_enabled_count(
-        counts.visible_enabled,
-        counts.visible_total,
-        counts.enabled,
-        filter_active,
-    );
+    let loading_mods = app.mod_list_loading();
+    let mods_label = if loading_mods {
+        "...".to_string()
+    } else {
+        format_visible_count(counts.visible_total, counts.total)
+    };
+    let enabled_label = if loading_mods {
+        "...".to_string()
+    } else {
+        format_enabled_count(
+            counts.visible_enabled,
+            counts.visible_total,
+            counts.enabled,
+            filter_active,
+        )
+    };
     let status_color = status_color(app, &theme);
     let overrides_total = app.conflicts.len();
     let overrides_manual = app
@@ -4432,6 +4441,7 @@ fn build_rows(app: &App, theme: &Theme) -> (Vec<Row<'static>>, ModCounts, usize)
     let profile_entries = app.visible_profile_entries();
     let mod_map = app.library.index_by_id();
     let dep_lookup = app.dependency_lookup();
+    let loading = app.mod_list_loading();
 
     for (row_index, (order_index, entry)) in profile_entries.iter().enumerate() {
         let Some(mod_entry) = mod_map.get(&entry.id) else {
@@ -4448,6 +4458,7 @@ fn build_rows(app: &App, theme: &Theme) -> (Vec<Row<'static>>, ModCounts, usize)
             mod_entry,
             theme,
             dep_lookup.as_ref(),
+            loading,
         );
         target_width = target_width.max(target_len);
         rows.push(row);
@@ -4496,6 +4507,17 @@ fn mod_header_cell_static(label: &str, theme: &Theme) -> Cell<'static> {
     )
 }
 
+fn loading_frame(row_index: usize) -> &'static str {
+    const FRAMES: [&str; 4] = ["|", "/", "-", "\\"];
+    let tick = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+        / 140;
+    let idx = (tick as usize + row_index) % FRAMES.len();
+    FRAMES[idx]
+}
+
 fn row_for_entry(
     app: &App,
     row_index: usize,
@@ -4504,52 +4526,69 @@ fn row_for_entry(
     mod_entry: &ModEntry,
     theme: &Theme,
     dep_lookup: Option<&crate::app::DependencyLookup>,
+    loading: bool,
 ) -> (Row<'static>, usize) {
-    let (enabled_text, enabled_style) = if enabled {
-        ("[x]", Style::default().fg(theme.success))
-    } else {
-        ("[ ]", Style::default().fg(theme.muted))
-    };
-    let kind = mod_kind_label(mod_entry);
-    let kind_style = match kind {
-        "Pak" => Style::default().fg(theme.accent),
-        "Loose" => Style::default().fg(theme.success),
-        _ => Style::default().fg(theme.text),
-    };
     let (state_label, state_style) = mod_path_label(app, mod_entry, theme, true);
     let target_len = state_label.chars().count();
-    let native_marker = if mod_entry.is_native() { "✓" } else { " " };
-    let native_style = if mod_entry.is_native() {
-        Style::default().fg(theme.success)
+    let mut row = if loading {
+        let frame = loading_frame(row_index);
+        let loading_style = Style::default().fg(theme.muted);
+        Row::new(vec![
+            Cell::from(frame.to_string()).style(loading_style),
+            Cell::from(frame.to_string()).style(loading_style),
+            Cell::from(frame.to_string()).style(loading_style),
+            Cell::from(frame.to_string()).style(loading_style),
+            Cell::from(frame.to_string()).style(loading_style),
+            Cell::from(frame.to_string()).style(loading_style),
+            Cell::from(frame.to_string()).style(loading_style),
+            Cell::from(frame.to_string()).style(loading_style),
+            Cell::from(mod_entry.display_name()),
+        ])
     } else {
-        Style::default().fg(theme.muted)
+        let (enabled_text, enabled_style) = if enabled {
+            ("[x]", Style::default().fg(theme.success))
+        } else {
+            ("[ ]", Style::default().fg(theme.muted))
+        };
+        let kind = mod_kind_label(mod_entry);
+        let kind_style = match kind {
+            "Pak" => Style::default().fg(theme.accent),
+            "Loose" => Style::default().fg(theme.success),
+            _ => Style::default().fg(theme.text),
+        };
+        let native_marker = if mod_entry.is_native() { "✓" } else { " " };
+        let native_style = if mod_entry.is_native() {
+            Style::default().fg(theme.success)
+        } else {
+            Style::default().fg(theme.muted)
+        };
+        let created_text = format_date_cell(mod_entry.created_at);
+        let added_text = format_date_cell(Some(mod_entry.added_at));
+        let missing = dep_lookup
+            .map(|lookup| app.missing_dependency_count_for_mod(mod_entry, lookup))
+            .unwrap_or(0);
+        let dep_text = if missing == 0 {
+            String::new()
+        } else {
+            missing.to_string()
+        };
+        let dep_style = if missing == 0 {
+            Style::default().fg(theme.muted)
+        } else {
+            Style::default().fg(theme.warning)
+        };
+        Row::new(vec![
+            Cell::from(enabled_text.to_string()).style(enabled_style),
+            Cell::from(native_marker.to_string()).style(native_style),
+            Cell::from(dep_text).style(dep_style),
+            Cell::from((order_index + 1).to_string()),
+            Cell::from(kind.to_string()).style(kind_style),
+            Cell::from(state_label).style(state_style),
+            Cell::from(created_text).style(Style::default().fg(theme.muted)),
+            Cell::from(added_text).style(Style::default().fg(theme.muted)),
+            Cell::from(mod_entry.display_name()),
+        ])
     };
-    let created_text = format_date_cell(mod_entry.created_at);
-    let added_text = format_date_cell(Some(mod_entry.added_at));
-    let missing = dep_lookup
-        .map(|lookup| app.missing_dependency_count_for_mod(mod_entry, lookup))
-        .unwrap_or(0);
-    let dep_text = if missing == 0 {
-        String::new()
-    } else {
-        missing.to_string()
-    };
-    let dep_style = if missing == 0 {
-        Style::default().fg(theme.muted)
-    } else {
-        Style::default().fg(theme.warning)
-    };
-    let mut row = Row::new(vec![
-        Cell::from(enabled_text.to_string()).style(enabled_style),
-        Cell::from(native_marker.to_string()).style(native_style),
-        Cell::from(dep_text).style(dep_style),
-        Cell::from((order_index + 1).to_string()),
-        Cell::from(kind.to_string()).style(kind_style),
-        Cell::from(state_label).style(state_style),
-        Cell::from(created_text).style(Style::default().fg(theme.muted)),
-        Cell::from(added_text).style(Style::default().fg(theme.muted)),
-        Cell::from(mod_entry.display_name()),
-    ]);
     if row_index % 2 == 1 {
         row = row.style(Style::default().bg(theme.row_alt_bg));
     }

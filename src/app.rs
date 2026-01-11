@@ -1325,7 +1325,8 @@ impl App {
             return;
         }
         if let Some(cache) = &self.smart_rank_cache {
-            if cache.fingerprint == self.smart_rank_fingerprint() {
+            let fingerprint = self.smart_rank_fingerprint();
+            if cache.fingerprint == fingerprint {
                 self.smart_rank_progress = None;
                 self.smart_rank_mode = None;
                 self.smart_rank_active = false;
@@ -1340,6 +1341,7 @@ impl App {
                 }
                 return;
             }
+            self.log_info("Smart rank cache miss (fingerprint mismatch)".to_string());
         }
         self.smart_rank_mode = Some(mode);
         self.smart_rank_active = true;
@@ -3801,6 +3803,10 @@ impl App {
 
     fn load_smart_rank_cache(&mut self) {
         let path = self.smart_rank_cache_path();
+        if !path.exists() {
+            self.log_info("Smart rank cache not found".to_string());
+            return;
+        }
         let raw = match fs::read_to_string(&path) {
             Ok(raw) => raw,
             Err(_) => return,
@@ -4681,6 +4687,12 @@ impl App {
             return None;
         }
         Some(DependencyLookup::new(&self.library.mods))
+    }
+
+    pub fn mod_list_loading(&self) -> bool {
+        self.metadata_active
+            || self.startup_dependency_check_pending
+            || !self.dependency_cache_ready
     }
 
     pub fn missing_dependency_count_for_mod(
