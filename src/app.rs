@@ -3253,6 +3253,15 @@ impl App {
     }
 
     fn block_mod_changes(&mut self, action: &str) -> bool {
+        if self.metadata_active {
+            self.status = format!("Metadata scan running: {action} blocked");
+            self.set_toast(
+                "Metadata scan in progress - please wait",
+                ToastLevel::Warn,
+                Duration::from_secs(2),
+            );
+            return true;
+        }
         if !self.native_sync_active {
             if self.smart_rank_active {
                 let label = match self.smart_rank_mode {
@@ -3263,6 +3272,24 @@ impl App {
                 self.status = format!("{label} running: {action} blocked");
                 self.set_toast(
                     "Smart ranking in progress - please wait",
+                    ToastLevel::Warn,
+                    Duration::from_secs(2),
+                );
+                return true;
+            }
+            if self.deploy_active {
+                self.status = format!("Deploy running: {action} blocked");
+                self.set_toast(
+                    "Deploy in progress - please wait",
+                    ToastLevel::Warn,
+                    Duration::from_secs(2),
+                );
+                return true;
+            }
+            if self.import_active.is_some() {
+                self.status = format!("Import running: {action} blocked");
+                self.set_toast(
+                    "Import in progress - please wait",
                     ToastLevel::Warn,
                     Duration::from_secs(2),
                 );
