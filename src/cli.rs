@@ -63,6 +63,7 @@ enum DebugCommand {
     SmartRankCacheSimulate,
     SmartRankScenario,
     SmartRankWarmupBlock,
+    SmartRankRestartCheck,
 }
 
 struct ModsListOptions {
@@ -259,9 +260,12 @@ fn parse_subcommand(tokens: &[String], global: &GlobalOptions) -> Result<Option<
                 "warmup-block" | "warmup_block" | "warmup-blocking" => {
                     DebugCommand::SmartRankWarmupBlock
                 }
+                "restart-check" | "restart_check" | "restart" => {
+                    DebugCommand::SmartRankRestartCheck
+                }
                 _ => {
                     bail!(
-                        "Unknown debug command: {sub} (use 'smart-rank', 'warmup', 'cache', 'cache-validate', 'cache-sim', 'scenario', or 'warmup-block')"
+                        "Unknown debug command: {sub} (use 'smart-rank', 'warmup', 'cache', 'cache-validate', 'cache-sim', 'scenario', 'warmup-block', or 'restart-check')"
                     );
                 }
             };
@@ -436,6 +440,7 @@ fn run_command(
             DebugCommand::SmartRankCacheSimulate => debug_smart_rank_cache_simulate(app),
             DebugCommand::SmartRankScenario => debug_smart_rank_scenario(app),
             DebugCommand::SmartRankWarmupBlock => debug_smart_rank_warmup_block(app),
+            DebugCommand::SmartRankRestartCheck => debug_smart_rank_restart_check(app),
         },
         CliCommand::Paths => list_paths(app, format),
         CliCommand::Help | CliCommand::Version => Ok(()),
@@ -785,6 +790,17 @@ fn debug_smart_rank_warmup_block(_app: &mut App) -> Result<()> {
 }
 
 #[cfg(debug_assertions)]
+fn debug_smart_rank_restart_check(app: &App) -> Result<()> {
+    println!("{}", app.debug_smart_rank_restart_check());
+    Ok(())
+}
+
+#[cfg(not(debug_assertions))]
+fn debug_smart_rank_restart_check(_app: &App) -> Result<()> {
+    bail!("Debug commands require a debug build");
+}
+
+#[cfg(debug_assertions)]
 fn debug_smart_rank_cache_validate(app: &App) -> Result<()> {
     println!("{}", app.debug_smart_rank_cache_validate());
     Ok(())
@@ -941,6 +957,7 @@ fn print_help() {
     println!("  sigilsmith debug cache-sim      Simulate smart rank edits (debug builds)");
     println!("  sigilsmith debug scenario       Run smart-rank edit scenario (debug builds)");
     println!("  sigilsmith debug warmup-block   Report warmup edit gating (debug builds)");
+    println!("  sigilsmith debug restart-check  Validate cache hit on restart (debug builds)");
     println!("  sigilsmith paths                Show detected paths");
     println!("  sigilsmith --import <paths...>  Import mods without the TUI");
     println!();
