@@ -38,6 +38,7 @@ const HOTKEY_DEBOUNCE_MS: u64 = 200;
 const HOTKEY_FADE_MS: u64 = 200;
 const METADATA_CACHE_VERSION: u32 = 1;
 const SMART_RANK_DEBOUNCE_MS: u64 = 600;
+const SMART_RANK_CACHE_SAVE_DEBOUNCE_MS: u64 = 400;
 const SMART_RANK_CACHE_VERSION: u32 = 2;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -522,9 +523,12 @@ pub struct App {
     smart_rank_refresh_pending: Option<smart_rank::SmartRankRefreshMode>,
     smart_rank_refresh_kind: Option<smart_rank::SmartRankRefreshMode>,
     smart_rank_refresh_at: Option<Instant>,
+    smart_rank_cache_last_saved: Option<Instant>,
     smart_rank_scan_id: u64,
     smart_rank_scan_active: Option<u64>,
     smart_rank_scan_profile_key: Option<String>,
+    #[cfg(debug_assertions)]
+    debug_suppress_persistence: bool,
     startup_dependency_check_pending: bool,
     smart_rank_tx: Sender<SmartRankMessage>,
     smart_rank_rx: Receiver<SmartRankMessage>,
@@ -838,9 +842,12 @@ impl App {
             smart_rank_refresh_pending: None,
             smart_rank_refresh_kind: None,
             smart_rank_refresh_at: None,
+            smart_rank_cache_last_saved: None,
             smart_rank_scan_id: 0,
             smart_rank_scan_active: None,
             smart_rank_scan_profile_key: None,
+            #[cfg(debug_assertions)]
+            debug_suppress_persistence: false,
             startup_dependency_check_pending: matches!(mode, StartupMode::Ui),
             smart_rank_tx,
             smart_rank_rx,
@@ -1612,6 +1619,17 @@ impl App {
         self.smart_rank_interrupt = false;
         self.smart_rank_scan_active = None;
         self.smart_rank_scan_profile_key = None;
+    }
+
+    fn allow_persistence(&self) -> bool {
+        #[cfg(debug_assertions)]
+        {
+            return !self.debug_suppress_persistence;
+        }
+        #[cfg(not(debug_assertions))]
+        {
+            return true;
+        }
     }
 
     fn smart_rank_scan_matches(&self, scan_id: u64) -> bool {
@@ -4087,7 +4105,7 @@ impl App {
                                 mod_cache,
                                 result: existing_result,
                             });
-                            self.save_smart_rank_cache();
+                            self.maybe_save_smart_rank_cache(false);
                         }
                         if self.smart_rank_interrupt {
                             continue;
@@ -4129,7 +4147,7 @@ impl App {
                             mod_cache: computed.cache.clone(),
                             result: Some(result.clone()),
                         });
-                        self.save_smart_rank_cache();
+                        self.maybe_save_smart_rank_cache(true);
                         match self.smart_rank_mode.unwrap_or(SmartRankMode::Preview) {
                             SmartRankMode::Preview => {
                                 self.finalize_smart_rank_preview(result);
@@ -4272,6 +4290,20 @@ impl App {
         if let Err(err) = fs::write(&path, raw) {
             self.log_warn(format!("Smart rank cache write failed: {err}"));
         }
+    }
+
+    fn maybe_save_smart_rank_cache(&mut self, force: bool) {
+        if !force {
+            if let Some(last_saved) = self.smart_rank_cache_last_saved {
+                if last_saved.elapsed()
+                    < Duration::from_millis(SMART_RANK_CACHE_SAVE_DEBOUNCE_MS)
+                {
+                    return;
+                }
+            }
+        }
+        self.save_smart_rank_cache();
+        self.smart_rank_cache_last_saved = Some(Instant::now());
     }
 
     fn clear_smart_rank_cache_file(&mut self) {
@@ -5489,7 +5521,7 @@ impl App {
             mod_cache: result.cache.clone(),
             result: Some(result.result),
         });
-        self.save_smart_rank_cache();
+        self.maybe_save_smart_rank_cache(true);
         Ok(())
     }
 
@@ -5824,6 +5856,179 @@ impl App {
             lines.push("remove/add: skipped (no managed mod root found)".to_string());
         }
 
+        lines.join("\n")
+    }
+
+    #[cfg(debug_assertions)]
+    pub fn debug_smart_rank_warmup_flow(&mut self) -> String {
+        use smart_rank::SmartRankRefreshMode;
+
+        let mut lines = Vec::new();
+        lines.push("Smart rank warmup flow (app edits)".to_string());
+
+        let original_library = self.library.clone();
+        let original_dependency_cache = self.dependency_cache.clone();
+        let original_dependency_ready = self.dependency_cache_ready;
+        let original_selected = self.selected;
+        let original_suppress = self.debug_suppress_persistence;
+        let original_data_dir = self.config.data_dir.clone();
+        let temp_data_dir = std::env::temp_dir().join("sigilsmith-debug-warmup");
+        let _ = fs::create_dir_all(&temp_data_dir);
+
+        let mut trimmed = self.library.clone();
+        let keep = 8usize.min(trimmed.mods.len());
+        let keep_ids: HashSet<String> = trimmed
+            .mods
+            .iter()
+            .take(keep)
+            .map(|entry| entry.id.clone())
+            .collect();
+        trimmed.mods.retain(|entry| keep_ids.contains(&entry.id));
+        for profile in &mut trimmed.profiles {
+            profile.order.retain(|entry| keep_ids.contains(&entry.id));
+        }
+        if let Some(profile) = trimmed.active_profile_mut() {
+            if let Some(entry) = profile.order.get_mut(0) {
+                entry.enabled = true;
+            }
+        }
+
+        self.library = trimmed;
+        self.config.data_dir = temp_data_dir;
+        self.dependency_cache.clear();
+        self.dependency_cache_ready = false;
+        self.prime_dependency_cache_from_library();
+
+        let Some(profile) = self.library.active_profile() else {
+            lines.push("No active profile".to_string());
+            self.library = original_library;
+            self.dependency_cache = original_dependency_cache;
+            self.dependency_cache_ready = original_dependency_ready;
+            self.selected = original_selected;
+            self.config.data_dir = original_data_dir;
+            return lines.join("\n");
+        };
+        if profile.order.len() < 2 {
+            lines.push("Need at least 2 mods for warmup flow".to_string());
+            self.library = original_library;
+            self.dependency_cache = original_dependency_cache;
+            self.dependency_cache_ready = original_dependency_ready;
+            self.selected = original_selected;
+            self.config.data_dir = original_data_dir;
+            return lines.join("\n");
+        }
+
+        self.debug_suppress_persistence = true;
+        let seed_profile_key = self.smart_rank_profile_key();
+        let seed_cache = self
+            .smart_rank_cache
+            .as_ref()
+            .map(|cache| cache.mod_cache.clone())
+            .unwrap_or_default();
+        self.smart_rank_cache = Some(SmartRankCache {
+            version: SMART_RANK_CACHE_VERSION,
+            profile_key: seed_profile_key,
+            mod_cache: seed_cache,
+            result: None,
+        });
+        self.startup_pending = false;
+        self.native_sync_active = false;
+        self.import_active = None;
+        self.deploy_active = false;
+        self.deploy_pending = false;
+        self.conflict_active = false;
+        self.conflict_pending = false;
+        self.metadata_active = false;
+        self.update_active = false;
+
+        self.start_smart_rank_scan(SmartRankMode::Warmup, SmartRankRefreshMode::Full);
+        lines.push(format!("warmup active: {}", self.smart_rank_warmup_active()));
+        lines.push(format!(
+            "start scan id={:?} kind={:?}",
+            self.smart_rank_scan_active, self.smart_rank_refresh_kind
+        ));
+
+        self.selected = 0;
+        self.toggle_selected();
+        lines.push(format!(
+            "after toggle pending={:?}",
+            self.smart_rank_refresh_pending
+        ));
+
+        self.selected = 0;
+        self.move_selected_down();
+        lines.push(format!(
+            "after reorder pending={:?}",
+            self.smart_rank_refresh_pending
+        ));
+
+        self.selected = 0;
+        self.remove_selected();
+        lines.push(format!(
+            "after remove pending={:?}",
+            self.smart_rank_refresh_pending
+        ));
+
+        let mut refresh_events = Vec::new();
+        let mut full_rebuilds = 0usize;
+        let mut last_scan_id: Option<u64> = None;
+        let started = Instant::now();
+        let timeout = Duration::from_secs(60);
+        loop {
+            self.poll_smart_rank();
+            if !self.smart_rank_active {
+                if let Some(pending) = self.smart_rank_refresh_pending {
+                    if let Some(ready_at) = self.smart_rank_refresh_at {
+                        if Instant::now() >= ready_at {
+                            self.smart_rank_refresh_pending = None;
+                            self.smart_rank_refresh_at = None;
+                            let refresh = self.resolve_smart_rank_refresh_kind(pending);
+                            self.start_smart_rank_scan(SmartRankMode::Warmup, refresh);
+                        }
+                    } else {
+                        self.smart_rank_refresh_pending = None;
+                        let refresh = self.resolve_smart_rank_refresh_kind(pending);
+                        self.start_smart_rank_scan(SmartRankMode::Warmup, refresh);
+                    }
+                }
+            }
+            if let Some(scan_id) = self.smart_rank_scan_active {
+                if last_scan_id != Some(scan_id) {
+                    if let Some(kind) = self.smart_rank_refresh_kind {
+                        refresh_events.push(format!("scan kind={kind:?}"));
+                        if matches!(kind, SmartRankRefreshMode::Full) {
+                            full_rebuilds += 1;
+                        }
+                    }
+                    last_scan_id = Some(scan_id);
+                }
+            }
+            if !self.smart_rank_active && self.smart_rank_refresh_pending.is_none() {
+                break;
+            }
+            if started.elapsed() > timeout {
+                lines.push(format!(
+                    "timeout waiting for warmup flow scans (active={} pending={:?} interrupt={} scan_id={:?})",
+                    self.smart_rank_active,
+                    self.smart_rank_refresh_pending,
+                    self.smart_rank_interrupt,
+                    self.smart_rank_scan_active
+                ));
+                break;
+            }
+            thread::sleep(Duration::from_millis(50));
+        }
+
+        lines.push(format!("refresh events: {}", refresh_events.len()));
+        lines.extend(refresh_events);
+        lines.push(format!("full rebuilds: {full_rebuilds}"));
+
+        self.debug_suppress_persistence = original_suppress;
+        self.library = original_library;
+        self.dependency_cache = original_dependency_cache;
+        self.dependency_cache_ready = original_dependency_ready;
+        self.selected = original_selected;
+        self.config.data_dir = original_data_dir;
         lines.join("\n")
     }
 
@@ -6464,7 +6669,7 @@ impl App {
             Some(entry) => entry.clone(),
             None => return false,
         };
-        if delete_native_files && mod_entry.is_native() {
+        if delete_native_files && mod_entry.is_native() && self.allow_persistence() {
             self.remove_native_mod_files(&mod_entry);
         }
 
@@ -6482,11 +6687,15 @@ impl App {
                 .retain(|override_entry| override_entry.mod_id != id);
         }
 
-        self.queue_remove_mod_root(id);
+        if self.allow_persistence() {
+            self.queue_remove_mod_root(id);
+        }
         self.dependency_cache.remove(id);
         self.library.metadata_cache_key = Some(self.metadata_cache_key());
         self.library.metadata_cache_version = METADATA_CACHE_VERSION;
-        let _ = self.library.save(&self.config.data_dir);
+        if self.allow_persistence() {
+            let _ = self.library.save(&self.config.data_dir);
+        }
         self.queue_conflict_scan("mod removed");
         true
     }
@@ -6506,7 +6715,9 @@ impl App {
             }
         }
         if changed > 0 {
-            let _ = self.library.save(&self.config.data_dir);
+            if self.allow_persistence() {
+                let _ = self.library.save(&self.config.data_dir);
+            }
         }
         changed
     }
@@ -7059,7 +7270,9 @@ impl App {
                 if enabled { "enable" } else { "disable" },
                 true,
             );
-            let _ = self.library.save(&self.config.data_dir);
+            if self.allow_persistence() {
+                let _ = self.library.save(&self.config.data_dir);
+            }
         }
         changed
     }
@@ -7402,6 +7615,9 @@ impl App {
     }
 
     fn queue_auto_deploy(&mut self, reason: &str) {
+        if !self.allow_persistence() {
+            return;
+        }
         self.queue_deploy(&format!("auto: {reason}"));
         self.queue_conflict_scan(reason);
     }
