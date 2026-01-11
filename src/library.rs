@@ -20,6 +20,8 @@ pub struct Library {
     pub metadata_cache_key: Option<String>,
     #[serde(default)]
     pub modsettings_hash: Option<String>,
+    #[serde(default = "default_true")]
+    pub modsettings_sync_enabled: bool,
 }
 
 impl Library {
@@ -51,6 +53,7 @@ impl Library {
             metadata_cache_version: 0,
             metadata_cache_key: None,
             modsettings_hash: None,
+            modsettings_sync_enabled: true,
         };
         library.save(data_dir)?;
         Ok(library)
@@ -171,6 +174,10 @@ pub struct ModEntry {
     pub source: ModSource,
     #[serde(default)]
     pub dependencies: Vec<String>,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 impl ModEntry {

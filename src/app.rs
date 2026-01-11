@@ -5108,6 +5108,10 @@ impl App {
             "Modsettings hash (stored): {}",
             self.library.modsettings_hash.as_deref().unwrap_or("none")
         ));
+        lines.push(format!(
+            "Modsettings sync enabled: {}",
+            self.library.modsettings_sync_enabled
+        ));
 
         match game::detect_paths(self.game_id, Some(&self.config.game_root), Some(&self.config.larian_dir)) {
             Ok(paths) => {
@@ -5911,7 +5915,9 @@ impl App {
 
         let mut updated_enabled = false;
         let mut reordered = false;
-        let should_apply_modsettings = delta.modsettings_exists && modsettings_hash_changed;
+        let should_apply_modsettings = delta.modsettings_exists
+            && modsettings_hash_changed
+            && self.library.modsettings_sync_enabled;
         if should_apply_modsettings {
             let mod_has_pak: HashMap<String, bool> = self
                 .library
@@ -6300,6 +6306,7 @@ impl App {
             }
         }
         if changed > 0 {
+            self.library.modsettings_sync_enabled = false;
             self.invalidate_smart_rank_cache(if enabled { "enable" } else { "disable" });
             let _ = self.library.save(&self.config.data_dir);
         }
