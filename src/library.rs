@@ -18,6 +18,8 @@ pub struct Library {
     pub metadata_cache_version: u32,
     #[serde(default)]
     pub metadata_cache_key: Option<String>,
+    #[serde(default)]
+    pub modsettings_hash: Option<String>,
 }
 
 impl Library {
@@ -48,6 +50,7 @@ impl Library {
             dependency_blocks: HashSet::new(),
             metadata_cache_version: 0,
             metadata_cache_key: None,
+            modsettings_hash: None,
         };
         library.save(data_dir)?;
         Ok(library)

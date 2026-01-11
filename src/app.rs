@@ -712,6 +712,7 @@ pub struct NativeSyncDelta {
     pub updated_native_files: usize,
     pub adopted_native: usize,
     pub modsettings_exists: bool,
+    pub modsettings_hash: Option<String>,
     pub enabled_set: HashSet<String>,
     pub order: Vec<String>,
 }
@@ -5089,6 +5090,56 @@ impl App {
         Ok(())
     }
 
+    #[cfg(debug_assertions)]
+    pub fn debug_cache_report(&self) -> String {
+        let mut lines = Vec::new();
+        lines.push(format!(
+            "Metadata cache key (stored): {}",
+            self.library
+                .metadata_cache_key
+                .as_deref()
+                .unwrap_or("none")
+        ));
+        lines.push(format!(
+            "Metadata cache key (current): {}",
+            self.metadata_cache_key()
+        ));
+        lines.push(format!(
+            "Modsettings hash (stored): {}",
+            self.library.modsettings_hash.as_deref().unwrap_or("none")
+        ));
+
+        match game::detect_paths(self.game_id, Some(&self.config.game_root), Some(&self.config.larian_dir)) {
+            Ok(paths) => {
+                if paths.modsettings_path.exists() {
+                    match deploy::read_modsettings_snapshot(&paths.modsettings_path) {
+                        Ok(snapshot) => {
+                            let current = modsettings_fingerprint(&snapshot);
+                            lines.push(format!("Modsettings hash (current): {current}"));
+                            let matches = self
+                                .library
+                                .modsettings_hash
+                                .as_ref()
+                                .map(|stored| stored == &current)
+                                .unwrap_or(false);
+                            lines.push(format!("Modsettings hash match: {matches}"));
+                        }
+                        Err(err) => {
+                            lines.push(format!("Modsettings read failed: {err}"));
+                        }
+                    }
+                } else {
+                    lines.push("Modsettings path missing".to_string());
+                }
+            }
+            Err(err) => {
+                lines.push(format!("Path detection failed: {err}"));
+            }
+        }
+
+        lines.join("\n")
+    }
+
     fn update_dependency_cache_for_entries(&mut self, entries: &[ModEntry]) {
         let mut changed = false;
         for mod_entry in entries {
@@ -5852,9 +5903,16 @@ impl App {
             }
         }
 
+        let modsettings_hash_changed =
+            delta.modsettings_hash != self.library.modsettings_hash;
+        if modsettings_hash_changed {
+            self.library.modsettings_hash = delta.modsettings_hash.clone();
+        }
+
         let mut updated_enabled = false;
         let mut reordered = false;
-        if delta.modsettings_exists {
+        let should_apply_modsettings = delta.modsettings_exists && modsettings_hash_changed;
+        if should_apply_modsettings {
             let mod_has_pak: HashMap<String, bool> = self
                 .library
                 .mods
@@ -5942,6 +6000,7 @@ impl App {
             || updated_native_files > 0
             || adopted_native > 0
             || changed
+            || modsettings_hash_changed
         {
             if changed {
                 self.smart_rank_cache = None;
@@ -6474,18 +6533,18 @@ impl App {
             self.status = "No visible mods to disable".to_string();
             return;
         }
-        let Some(profile) = self.library.active_profile_mut() else {
+        let Some(profile) = self.library.active_profile() else {
             return;
         };
-        let mut changed = 0;
+        let mut ids = Vec::new();
         for index in indices {
-            if let Some(entry) = profile.order.get_mut(index) {
+            if let Some(entry) = profile.order.get(index) {
                 if entry.enabled {
-                    entry.enabled = false;
-                    changed += 1;
+                    ids.push(entry.id.clone());
                 }
             }
         }
+        let changed = self.set_mods_enabled_in_active(&ids, false);
         if changed == 0 {
             self.status = "Visible mods already disabled".to_string();
             return;
@@ -6504,17 +6563,38 @@ impl App {
             self.status = "No visible mods to invert".to_string();
             return;
         }
-        let Some(profile) = self.library.active_profile_mut() else {
+        let Some(profile) = self.library.active_profile() else {
             return;
         };
+        let mut to_disable = Vec::new();
+        let mut to_enable = Vec::new();
         for index in indices {
-            if let Some(entry) = profile.order.get_mut(index) {
-                entry.enabled = !entry.enabled;
+            if let Some(entry) = profile.order.get(index) {
+                if entry.enabled {
+                    to_disable.push(entry.id.clone());
+                } else {
+                    to_enable.push(entry.id.clone());
+                }
             }
+        }
+        let disabled = self.set_mods_enabled_in_active(&to_disable, false);
+        if !to_enable.is_empty() {
+            self.enable_mods_with_dependencies(to_enable);
+            if self.dependency_queue.is_some() || self.pending_dependency_enable.is_some() {
+                if disabled > 0 {
+                    self.queue_auto_deploy("invert selection");
+                }
+                return;
+            }
+        } else if disabled == 0 {
+            self.status = "No visible mods to invert".to_string();
+            return;
         }
         self.status = "Toggled visible mods".to_string();
         self.log_info("Toggled visible mods".to_string());
-        self.queue_auto_deploy("invert selection");
+        if disabled > 0 {
+            self.queue_auto_deploy("invert selection");
+        }
     }
 
     pub fn clear_visible_overrides(&mut self) {
@@ -7892,6 +7972,25 @@ fn collect_metadata_updates(
     Ok(updates)
 }
 
+fn modsettings_fingerprint(snapshot: &deploy::ModSettingsSnapshot) -> String {
+    let mut hasher = Hasher::new();
+    hasher.update(b"modsettings-v1");
+    let mut module_ids: Vec<&str> = snapshot
+        .modules
+        .iter()
+        .map(|module| module.info.uuid.as_str())
+        .collect();
+    module_ids.sort();
+    for id in module_ids {
+        hasher.update(id.as_bytes());
+    }
+    hasher.update(b"|order|");
+    for id in &snapshot.order {
+        hasher.update(id.as_bytes());
+    }
+    hasher.finalize().to_hex().to_string()
+}
+
 fn sync_native_mods_delta(
     game_id: GameId,
     config: &GameConfig,
@@ -7906,6 +8005,14 @@ fn sync_native_mods_delta(
     let snapshot = deploy::read_modsettings_snapshot(&paths.modsettings_path)
         .map_err(|err| err.to_string())?;
     let deploy::ModSettingsSnapshot { modules, order } = snapshot;
+    let modsettings_hash = if modsettings_exists {
+        Some(modsettings_fingerprint(&deploy::ModSettingsSnapshot {
+            modules: modules.clone(),
+            order: order.clone(),
+        }))
+    } else {
+        None
+    };
     let modules_set: HashSet<String> = modules
         .iter()
         .map(|module| module.info.uuid.clone())
@@ -8135,6 +8242,7 @@ fn sync_native_mods_delta(
         updated_native_files,
         adopted_native,
         modsettings_exists,
+        modsettings_hash,
         enabled_set,
         order,
     })

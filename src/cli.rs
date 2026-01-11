@@ -58,6 +58,7 @@ enum CliCommand {
 enum DebugCommand {
     SmartRank,
     SmartRankWarmup,
+    Cache,
 }
 
 struct ModsListOptions {
@@ -241,8 +242,11 @@ fn parse_subcommand(tokens: &[String], global: &GlobalOptions) -> Result<Option<
                 "smart-rank-warmup" | "smart_rank_warmup" | "warmup" => {
                     DebugCommand::SmartRankWarmup
                 }
+                "cache" | "modsettings" => DebugCommand::Cache,
                 _ => {
-                    bail!("Unknown debug command: {sub} (use 'smart-rank' or 'warmup')");
+                    bail!(
+                        "Unknown debug command: {sub} (use 'smart-rank', 'warmup', or 'cache')"
+                    );
                 }
             };
             Ok(Some(CliAction::Command {
@@ -411,6 +415,7 @@ fn run_command(
         CliCommand::Debug(command) => match command {
             DebugCommand::SmartRank => debug_smart_rank(app),
             DebugCommand::SmartRankWarmup => debug_smart_rank_warmup(app),
+            DebugCommand::Cache => debug_cache(app),
         },
         CliCommand::Paths => list_paths(app, format),
         CliCommand::Help | CliCommand::Version => Ok(()),
@@ -726,6 +731,17 @@ fn debug_smart_rank_warmup(_app: &mut App) -> Result<()> {
     bail!("Debug commands require a debug build");
 }
 
+#[cfg(debug_assertions)]
+fn debug_cache(app: &App) -> Result<()> {
+    println!("{}", app.debug_cache_report());
+    Ok(())
+}
+
+#[cfg(not(debug_assertions))]
+fn debug_cache(_app: &App) -> Result<()> {
+    bail!("Debug commands require a debug build");
+}
+
 fn collect_dependencies(app: &App, mod_entry: &ModEntry, paths: Option<&GamePaths>) -> Vec<String> {
     let mut out = Vec::new();
     let mod_root = library_mod_root(&app.config.data_dir).join(&mod_entry.id);
@@ -855,6 +871,7 @@ fn print_help() {
     println!("  sigilsmith deps missing         List missing dependencies");
     println!("  sigilsmith deps debug <mod>     Show dependency matching details");
     println!("  sigilsmith debug smart-rank     Debug smart rank cache (debug builds)");
+    println!("  sigilsmith debug cache          Debug cache + modsettings state (debug builds)");
     println!("  sigilsmith paths                Show detected paths");
     println!("  sigilsmith --import <paths...>  Import mods without the TUI");
     println!();
