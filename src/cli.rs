@@ -59,6 +59,8 @@ enum DebugCommand {
     SmartRank,
     SmartRankWarmup,
     Cache,
+    SmartRankCacheValidate,
+    SmartRankCacheSimulate,
 }
 
 struct ModsListOptions {
@@ -243,9 +245,15 @@ fn parse_subcommand(tokens: &[String], global: &GlobalOptions) -> Result<Option<
                     DebugCommand::SmartRankWarmup
                 }
                 "cache" | "modsettings" => DebugCommand::Cache,
+                "cache-validate" | "cache_validate" | "validate" => {
+                    DebugCommand::SmartRankCacheValidate
+                }
+                "cache-sim" | "cache-simulate" | "simulate" => {
+                    DebugCommand::SmartRankCacheSimulate
+                }
                 _ => {
                     bail!(
-                        "Unknown debug command: {sub} (use 'smart-rank', 'warmup', or 'cache')"
+                        "Unknown debug command: {sub} (use 'smart-rank', 'warmup', 'cache', 'cache-validate', or 'cache-sim')"
                     );
                 }
             };
@@ -416,6 +424,8 @@ fn run_command(
             DebugCommand::SmartRank => debug_smart_rank(app),
             DebugCommand::SmartRankWarmup => debug_smart_rank_warmup(app),
             DebugCommand::Cache => debug_cache(app),
+            DebugCommand::SmartRankCacheValidate => debug_smart_rank_cache_validate(app),
+            DebugCommand::SmartRankCacheSimulate => debug_smart_rank_cache_simulate(app),
         },
         CliCommand::Paths => list_paths(app, format),
         CliCommand::Help | CliCommand::Version => Ok(()),
@@ -742,6 +752,28 @@ fn debug_cache(_app: &App) -> Result<()> {
     bail!("Debug commands require a debug build");
 }
 
+#[cfg(debug_assertions)]
+fn debug_smart_rank_cache_validate(app: &App) -> Result<()> {
+    println!("{}", app.debug_smart_rank_cache_validate());
+    Ok(())
+}
+
+#[cfg(not(debug_assertions))]
+fn debug_smart_rank_cache_validate(_app: &App) -> Result<()> {
+    bail!("Debug commands require a debug build");
+}
+
+#[cfg(debug_assertions)]
+fn debug_smart_rank_cache_simulate(app: &App) -> Result<()> {
+    println!("{}", app.debug_smart_rank_cache_simulate());
+    Ok(())
+}
+
+#[cfg(not(debug_assertions))]
+fn debug_smart_rank_cache_simulate(_app: &App) -> Result<()> {
+    bail!("Debug commands require a debug build");
+}
+
 fn collect_dependencies(app: &App, mod_entry: &ModEntry, paths: Option<&GamePaths>) -> Vec<String> {
     let mut out = Vec::new();
     let mod_root = library_mod_root(&app.config.data_dir).join(&mod_entry.id);
@@ -871,7 +903,10 @@ fn print_help() {
     println!("  sigilsmith deps missing         List missing dependencies");
     println!("  sigilsmith deps debug <mod>     Show dependency matching details");
     println!("  sigilsmith debug smart-rank     Debug smart rank cache (debug builds)");
+    println!("  sigilsmith debug warmup         Build smart rank cache (debug builds)");
     println!("  sigilsmith debug cache          Debug cache + modsettings state (debug builds)");
+    println!("  sigilsmith debug cache-validate Validate smart rank cache (debug builds)");
+    println!("  sigilsmith debug cache-sim      Simulate smart rank edits (debug builds)");
     println!("  sigilsmith paths                Show detected paths");
     println!("  sigilsmith --import <paths...>  Import mods without the TUI");
     println!();

@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+## 0.6.1
+
+- Smart-rank cache updates incrementally on toggles, moves, imports, and removals with per-mod scan reuse, plus debug cache validation and simulation helpers.
+
 ## 0.5.1
 
 - CLI import now accepts multiple paths per `--import`, with `--deploy`/`--no-deploy` and standard verbosity flags (`-v/-vv/-vvv`, `--verbosity`).

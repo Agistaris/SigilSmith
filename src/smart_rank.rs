@@ -15,6 +15,7 @@ use std::{
     time::Instant,
 };
 use walkdir::WalkDir;
+use blake3::Hasher;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SmartRankReport {
@@ -62,6 +63,39 @@ pub struct SmartRankResult {
     pub report: SmartRankReport,
     pub warnings: Vec<String>,
     pub explain: SmartRankExplain,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SmartRankRefreshMode {
+    Full,
+    Incremental,
+    ReorderOnly,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SmartRankModCache {
+    pub key: String,
+    pub file_paths: Vec<String>,
+    pub file_count: usize,
+    pub total_bytes: u64,
+    pub has_data: bool,
+    pub dependencies: Vec<String>,
+    pub patch_score: u8,
+    pub patch_reasons: Vec<String>,
+    pub date_hint: i64,
+    pub warning: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct SmartRankCacheData {
+    pub mods: HashMap<String, SmartRankModCache>,
+}
+
+#[derive(Debug, Clone)]
+pub struct SmartRankComputed {
+    pub result: SmartRankResult,
+    pub cache: SmartRankCacheData,
+    pub scanned_mods: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -113,6 +147,42 @@ pub enum ExplainLineKind {
     Muted,
 }
 
+pub fn mod_cache_key(mod_entry: &ModEntry) -> String {
+    let mut hasher = Hasher::new();
+    hasher.update(mod_entry.id.as_bytes());
+    hasher.update(mod_entry.name.as_bytes());
+    if let Some(label) = &mod_entry.source_label {
+        hasher.update(label.as_bytes());
+    }
+    let created = mod_entry.created_at.unwrap_or(0);
+    let modified = mod_entry.modified_at.unwrap_or(mod_entry.added_at);
+    hasher.update(&created.to_le_bytes());
+    hasher.update(&modified.to_le_bytes());
+    hasher.update(&mod_entry.added_at.to_le_bytes());
+    let source_tag = match mod_entry.source {
+        crate::library::ModSource::Managed => 0u8,
+        crate::library::ModSource::Native => 1u8,
+    };
+    hasher.update(&[source_tag]);
+    let mut targets: Vec<String> = Vec::new();
+    for target in &mod_entry.targets {
+        let key = match target {
+            InstallTarget::Pak { file, info } => {
+                format!("pak|{}|{}|{}", file, info.uuid, info.folder)
+            }
+            InstallTarget::Generated { dir } => format!("gen|{dir}"),
+            InstallTarget::Data { dir } => format!("data|{dir}"),
+            InstallTarget::Bin { dir } => format!("bin|{dir}"),
+        };
+        targets.push(key);
+    }
+    targets.sort();
+    for target in targets {
+        hasher.update(target.as_bytes());
+    }
+    hasher.finalize().to_hex().to_string()
+}
+
 #[allow(dead_code)]
 pub fn smart_rank_profile(config: &GameConfig, library: &Library) -> Result<SmartRankResult> {
     smart_rank_profile_with_progress(config, library, |_| {})
@@ -123,6 +193,26 @@ pub fn smart_rank_profile_with_progress<F>(
     library: &Library,
     mut progress: F,
 ) -> Result<SmartRankResult>
+where
+    F: FnMut(SmartRankProgress),
+{
+    let computed = smart_rank_profile_cached_with_progress(
+        config,
+        library,
+        None,
+        SmartRankRefreshMode::Full,
+        &mut progress,
+    )?;
+    Ok(computed.result)
+}
+
+pub fn smart_rank_profile_cached_with_progress<F>(
+    config: &GameConfig,
+    library: &Library,
+    cache: Option<&SmartRankCacheData>,
+    refresh: SmartRankRefreshMode,
+    mut progress: F,
+) -> Result<SmartRankComputed>
 where
     F: FnMut(SmartRankProgress),
 {
@@ -137,6 +227,7 @@ where
     let mut warnings = Vec::new();
     let native_pak_index = native_pak::build_native_pak_index(&paths.larian_mods_dir);
     let mut items = Vec::new();
+    let mut cache_out = SmartRankCacheData::default();
     let mut missing = 0usize;
     let mut missing_loose = 0usize;
     let mut missing_pak = 0usize;
@@ -146,6 +237,7 @@ where
     let mut progress_pak = 0usize;
     let mut enabled_loose = 0usize;
     let mut enabled_pak = 0usize;
+    let mut scanned_mods = 0usize;
 
     let mut group_by_id: HashMap<String, RankGroup> = HashMap::new();
     for entry in &profile.order {
@@ -170,109 +262,137 @@ where
         }
     }
 
+    let mut scan_needed: HashMap<String, bool> = HashMap::new();
+    let mut scan_total_loose = 0usize;
+    let mut scan_total_pak = 0usize;
+    for entry in &profile.order {
+        if !entry.enabled {
+            continue;
+        }
+        let Some(mod_entry) = mod_map.get(&entry.id) else {
+            continue;
+        };
+        let group = *group_by_id.get(&entry.id).unwrap_or(&RankGroup::Pak);
+        let key = mod_cache_key(mod_entry);
+        let cached_ok = cache
+            .and_then(|cache| cache.mods.get(&entry.id))
+            .map(|entry| entry.key == key)
+            .unwrap_or(false);
+        let need_scan = match refresh {
+            SmartRankRefreshMode::Full => true,
+            SmartRankRefreshMode::Incremental => !cached_ok,
+            SmartRankRefreshMode::ReorderOnly => !cached_ok,
+        };
+        scan_needed.insert(entry.id.clone(), need_scan);
+        if need_scan {
+            match group {
+                RankGroup::Loose => scan_total_loose += 1,
+                RankGroup::Pak => scan_total_pak += 1,
+            }
+        }
+    }
+
     for (index, entry) in profile.order.iter().enumerate() {
         let Some(mod_entry) = mod_map.get(&entry.id) else {
             continue;
         };
         let group = *group_by_id.get(&entry.id).unwrap_or(&RankGroup::Pak);
+        let key = mod_cache_key(mod_entry);
+        let mut cache_entry = cache
+            .and_then(|cache| cache.mods.get(&entry.id))
+            .filter(|entry| entry.key == key)
+            .cloned();
+        let mut warning = None;
+        if entry.enabled {
+            let need_scan = *scan_needed.get(&entry.id).unwrap_or(&false);
+            if need_scan {
+                let scanned = scan_mod_cache_entry(
+                    mod_entry,
+                    config,
+                    &paths.larian_mods_dir,
+                    group,
+                    &native_pak_index,
+                    key.clone(),
+                );
+                cache_entry = Some(scanned.clone());
+                warning = scanned.warning.clone();
+                scanned_mods = scanned_mods.saturating_add(1);
+                let (progress_scanned, total) = match group {
+                    RankGroup::Loose => {
+                        progress_loose = progress_loose.saturating_add(1);
+                        (progress_loose, scan_total_loose)
+                    }
+                    RankGroup::Pak => {
+                        progress_pak = progress_pak.saturating_add(1);
+                        (progress_pak, scan_total_pak)
+                    }
+                };
+                progress(SmartRankProgress {
+                    group: if matches!(group, RankGroup::Loose) {
+                        SmartRankGroup::Loose
+                    } else {
+                        SmartRankGroup::Pak
+                    },
+                    scanned: progress_scanned,
+                    total,
+                    name: mod_entry.display_name(),
+                });
+            }
+        }
+
+        if let Some(entry_cache) = cache_entry.clone() {
+            cache_out.mods.insert(entry.id.clone(), entry_cache);
+        }
 
         let mut file_paths = HashSet::new();
         let mut total_bytes = 0u64;
         let mut has_data = false;
         let mut dependencies = Vec::new();
-        let mut tags = Vec::new();
-        let mut meta_created = None;
+        let mut patch_value = 0u8;
+        let mut patch_notes = Vec::new();
+        let mut date_hint = mod_entry
+            .created_at
+            .or(mod_entry.modified_at)
+            .unwrap_or(mod_entry.added_at);
 
         if entry.enabled {
-            match group {
-                RankGroup::Loose => {}
-                RankGroup::Pak => {}
-            }
-            match scan_mod_files(
-                mod_entry,
-                config,
-                &paths.larian_mods_dir,
-                group,
-                &native_pak_index,
-            ) {
-                Ok(files) => {
-                    for file in files {
-                        total_bytes = total_bytes.saturating_add(file.size);
-                        file_paths.insert(file.key);
-                    }
-                    if file_paths.is_empty() {
-                        missing += 1;
-                        match group {
-                            RankGroup::Loose => missing_loose += 1,
-                            RankGroup::Pak => missing_pak += 1,
-                        }
-                        warnings.push(format!(
-                            "Smart rank scan empty for {}",
-                            mod_entry.display_name()
-                        ));
-                    } else {
-                        has_data = true;
-                        match group {
-                            RankGroup::Loose => scanned_loose += 1,
-                            RankGroup::Pak => scanned_pak += 1,
-                        }
-                    }
+            if let Some(entry_cache) = cache_entry.as_ref() {
+                for path in &entry_cache.file_paths {
+                    file_paths.insert(path.clone());
                 }
-                Err(err) => {
-                    missing += 1;
-                    match group {
-                        RankGroup::Loose => missing_loose += 1,
-                        RankGroup::Pak => missing_pak += 1,
-                    }
-                    warnings.push(format!(
-                        "Smart rank scan failed for {}: {err}",
-                        mod_entry.display_name()
-                    ));
-                }
+                total_bytes = entry_cache.total_bytes;
+                has_data = entry_cache.has_data;
+                dependencies = entry_cache.dependencies.clone();
+                patch_value = entry_cache.patch_score;
+                patch_notes = entry_cache.patch_reasons.clone();
+                date_hint = entry_cache.date_hint;
+                warning = warning.or_else(|| entry_cache.warning.clone());
             }
-
-            if matches!(group, RankGroup::Pak) {
-                if let Ok(meta) =
-                    read_mod_metadata(mod_entry, config, &paths.larian_mods_dir, &native_pak_index)
-                {
-                    dependencies = meta.dependencies;
-                    tags = meta.tags;
-                    meta_created = meta.created_at;
-                }
-            }
+        } else {
+            let (score, notes) = patch_score(mod_entry, &[]);
+            patch_value = score;
+            patch_notes = notes;
         }
 
-        let (patch_score, patch_notes) = patch_score(mod_entry, &tags);
-
         if entry.enabled {
-            let (progress_scanned, total) = match group {
-                RankGroup::Loose => {
-                    progress_loose = progress_loose.saturating_add(1);
-                    (progress_loose, enabled_loose)
+            if let Some(message) = warning {
+                warnings.push(message);
+            }
+            if !has_data {
+                missing += 1;
+                match group {
+                    RankGroup::Loose => missing_loose += 1,
+                    RankGroup::Pak => missing_pak += 1,
                 }
-                RankGroup::Pak => {
-                    progress_pak = progress_pak.saturating_add(1);
-                    (progress_pak, enabled_pak)
+            } else {
+                match group {
+                    RankGroup::Loose => scanned_loose += 1,
+                    RankGroup::Pak => scanned_pak += 1,
                 }
-            };
-            progress(SmartRankProgress {
-                group: if matches!(group, RankGroup::Loose) {
-                    SmartRankGroup::Loose
-                } else {
-                    SmartRankGroup::Pak
-                },
-                scanned: progress_scanned,
-                total,
-                name: mod_entry.display_name(),
-            });
+            }
         }
 
         let file_count = file_paths.len();
-        let date_hint = mod_entry
-            .created_at
-            .or(meta_created)
-            .or(mod_entry.modified_at)
-            .unwrap_or(mod_entry.added_at);
         items.push(RankItem {
             id: entry.id.clone(),
             enabled: entry.enabled,
@@ -284,7 +404,7 @@ where
             conflict_partners: 0,
             original_index: index,
             has_data,
-            patch_score,
+            patch_score: patch_value,
             patch_reasons: patch_notes,
             dependencies,
             dependents: 0,
@@ -391,7 +511,7 @@ where
 
     let explain = build_explain_lines(&items, &top_paths, &mod_map, profile);
 
-    Ok(SmartRankResult {
+    let result = SmartRankResult {
         order: new_order,
         report: SmartRankReport {
             moved,
@@ -410,6 +530,12 @@ where
         },
         warnings,
         explain,
+    };
+
+    Ok(SmartRankComputed {
+        result,
+        cache: cache_out,
+        scanned_mods,
     })
 }
 
@@ -577,6 +703,78 @@ fn scan_mod_files(
     match group {
         RankGroup::Pak => scan_pak_files(mod_entry, data_dir, larian_mods_dir, native_pak_index),
         RankGroup::Loose => scan_loose_files(mod_entry, data_dir),
+    }
+}
+
+fn scan_mod_cache_entry(
+    mod_entry: &ModEntry,
+    config: &GameConfig,
+    larian_mods_dir: &Path,
+    group: RankGroup,
+    native_pak_index: &[native_pak::NativePakEntry],
+    key: String,
+) -> SmartRankModCache {
+    let mut file_paths = HashSet::new();
+    let mut total_bytes = 0u64;
+    let mut has_data = false;
+    let mut warning = None;
+    let mut dependencies = Vec::new();
+    let mut tags = Vec::new();
+    let mut meta_created = None;
+
+    match scan_mod_files(mod_entry, config, larian_mods_dir, group, native_pak_index) {
+        Ok(files) => {
+            for file in files {
+                total_bytes = total_bytes.saturating_add(file.size);
+                file_paths.insert(file.key);
+            }
+            if file_paths.is_empty() {
+                warning = Some(format!(
+                    "Smart rank scan empty for {}",
+                    mod_entry.display_name()
+                ));
+            } else {
+                has_data = true;
+            }
+        }
+        Err(err) => {
+            warning = Some(format!(
+                "Smart rank scan failed for {}: {err}",
+                mod_entry.display_name()
+            ));
+        }
+    }
+
+    if matches!(group, RankGroup::Pak) {
+        if let Ok(meta) = read_mod_metadata(mod_entry, config, larian_mods_dir, native_pak_index) {
+            dependencies = meta.dependencies;
+            tags = meta.tags;
+            meta_created = meta.created_at;
+        }
+    }
+
+    let (patch_score, patch_reasons) = patch_score(mod_entry, &tags);
+    let date_hint = mod_entry
+        .created_at
+        .or(meta_created)
+        .or(mod_entry.modified_at)
+        .unwrap_or(mod_entry.added_at);
+
+    let mut file_paths_vec: Vec<String> = file_paths.into_iter().collect();
+    file_paths_vec.sort();
+    let file_count = file_paths_vec.len();
+
+    SmartRankModCache {
+        key,
+        file_paths: file_paths_vec,
+        file_count,
+        total_bytes,
+        has_data,
+        dependencies,
+        patch_score,
+        patch_reasons,
+        date_hint,
+        warning,
     }
 }
 
