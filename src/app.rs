@@ -4087,6 +4087,7 @@ impl App {
                                 mod_cache,
                                 result: existing_result,
                             });
+                            self.save_smart_rank_cache();
                         }
                         if self.smart_rank_interrupt {
                             continue;
@@ -4238,8 +4239,11 @@ impl App {
                     return;
                 }
                 if cache.result.is_none() {
-                    self.log_warn("Smart rank cache missing result".to_string());
-                    return;
+                    if cache.mod_cache.mods.is_empty() {
+                        self.log_warn("Smart rank cache empty".to_string());
+                        return;
+                    }
+                    self.log_warn("Smart rank cache missing result; using cached mod data".to_string());
                 }
                 self.smart_rank_cache = Some(cache);
                 self.log_info("Smart rank cache loaded".to_string());
@@ -4254,7 +4258,7 @@ impl App {
         let Some(cache) = &self.smart_rank_cache else {
             return;
         };
-        if cache.result.is_none() {
+        if cache.mod_cache.mods.is_empty() {
             return;
         }
         let raw = match serde_json::to_string_pretty(cache) {
