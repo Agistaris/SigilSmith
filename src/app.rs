@@ -5039,12 +5039,125 @@ impl App {
         self.smart_rank_active && matches!(self.smart_rank_mode, Some(SmartRankMode::Warmup))
     }
 
+    #[cfg(debug_assertions)]
+    pub fn debug_smart_rank_warmup_block_report(&self) -> String {
+        fn blocked(
+            action: &str,
+            metadata_active: bool,
+            smart_rank_active: bool,
+            smart_rank_mode: Option<SmartRankMode>,
+            deploy_active: bool,
+            import_active: bool,
+            native_sync_active: bool,
+        ) -> bool {
+            if metadata_active {
+                return true;
+            }
+            if !native_sync_active {
+                if smart_rank_active {
+                    let allow_during_warmup =
+                        matches!(smart_rank_mode, Some(SmartRankMode::Warmup))
+                            && matches!(action, "toggle" | "enable" | "disable");
+                    if !allow_during_warmup {
+                        return true;
+                    }
+                }
+                if deploy_active {
+                    return true;
+                }
+                if import_active {
+                    return true;
+                }
+                return false;
+            }
+            true
+        }
+
+        fn busy_state(
+            startup_pending: bool,
+            native_sync_active: bool,
+            import_active: bool,
+            deploy_active: bool,
+            deploy_pending: bool,
+            conflict_active: bool,
+            conflict_pending: bool,
+            smart_rank_active: bool,
+            metadata_active: bool,
+        ) -> bool {
+            startup_pending
+                || native_sync_active
+                || import_active
+                || deploy_active
+                || deploy_pending
+                || conflict_active
+                || conflict_pending
+                || smart_rank_active
+                || metadata_active
+        }
+
+        let mut lines = Vec::new();
+        lines.push("Smart rank warmup gating".to_string());
+
+        let warmup_active = true;
+        let warmup_mode = Some(SmartRankMode::Warmup);
+
+        let warmup_only = |action: &str| {
+            blocked(
+                action,
+                false,
+                warmup_active,
+                warmup_mode,
+                false,
+                false,
+                false,
+            )
+        };
+
+        let current_state = |action: &str| {
+            blocked(
+                action,
+                self.metadata_active,
+                warmup_active,
+                warmup_mode,
+                self.deploy_active,
+                self.import_active.is_some(),
+                self.native_sync_active,
+            )
+        };
+
+        lines.push(format!(
+            "is_busy with warmup: {}",
+            busy_state(
+                self.startup_pending,
+                self.native_sync_active,
+                self.import_active.is_some(),
+                self.deploy_active,
+                self.deploy_pending,
+                self.conflict_active,
+                self.conflict_pending,
+                true,
+                self.metadata_active,
+            )
+        ));
+        lines.push("Warmup-only gating:".to_string());
+        lines.push(format!("  toggle blocked: {}", warmup_only("toggle")));
+        lines.push(format!("  enable blocked: {}", warmup_only("enable")));
+        lines.push(format!("  disable blocked: {}", warmup_only("disable")));
+        lines.push(format!("  remove blocked: {}", warmup_only("remove")));
+        lines.push("Current-state + warmup gating:".to_string());
+        lines.push(format!("  toggle blocked: {}", current_state("toggle")));
+        lines.push(format!("  enable blocked: {}", current_state("enable")));
+        lines.push(format!("  disable blocked: {}", current_state("disable")));
+        lines.push(format!("  remove blocked: {}", current_state("remove")));
+        lines.push("Reorder (move up/down) is not gated by block_mod_changes".to_string());
+        lines.join("\n")
+    }
+
     pub fn mod_list_loading(&self) -> bool {
         self.metadata_active
             || self.native_sync_active
             || self.startup_dependency_check_pending
             || !self.dependency_cache_ready
-            || self.smart_rank_warmup_active()
     }
 
     pub fn status_line(&self) -> String {
@@ -5114,22 +5227,13 @@ impl App {
         Some("Smart ranking: warmup...".to_string())
     }
 
-    pub fn mod_row_loading(&self, mod_id: &str, row_index: usize, total_rows: usize) -> bool {
+    pub fn mod_row_loading(&self, mod_id: &str, _row_index: usize, _total_rows: usize) -> bool {
         if self.metadata_active {
             return !self.metadata_processed_ids.contains(mod_id);
         }
         if self.native_sync_active || self.startup_dependency_check_pending || !self.dependency_cache_ready
         {
             return true;
-        }
-        if self.smart_rank_warmup_active() {
-            let Some(progress) = &self.smart_rank_progress else {
-                return true;
-            };
-            let total = progress.total.max(1);
-            let ratio = (progress.scanned.min(total) as f32) / (total as f32);
-            let reveal = ((ratio * total_rows as f32).ceil() as usize).min(total_rows);
-            return row_index >= reveal;
         }
         false
     }
@@ -5523,6 +5627,69 @@ impl App {
             );
         } else {
             lines.push("reorder: skipped (need >=2 mods)".to_string());
+        }
+
+        if library
+            .active_profile()
+            .map(|profile| !profile.order.is_empty())
+            .unwrap_or(false)
+        {
+            let iterations = library
+                .active_profile()
+                .map(|profile| 12usize.min(profile.order.len().max(1)))
+                .unwrap_or(0);
+            let mut stress_scans = 0usize;
+            let mut stress_full = 0usize;
+            for step in 0..iterations {
+                if let Some(profile) = library.active_profile_mut() {
+                    if let Some(entry) = profile.order.get_mut(0) {
+                        entry.enabled = !entry.enabled;
+                    }
+                    if profile.order.len() > 1 {
+                        profile.order.swap(0, 1);
+                    }
+                }
+                let requested = if step % 2 == 0 {
+                    SmartRankRefreshMode::Incremental
+                } else {
+                    SmartRankRefreshMode::ReorderOnly
+                };
+                let resolved = if matches!(requested, SmartRankRefreshMode::Full) {
+                    SmartRankRefreshMode::Full
+                } else if cache.version != SMART_RANK_CACHE_VERSION || cache.result.is_none() {
+                    SmartRankRefreshMode::Full
+                } else if matches!(requested, SmartRankRefreshMode::ReorderOnly)
+                    && !App::smart_rank_cache_ready_for(&library, &cache)
+                {
+                    SmartRankRefreshMode::Incremental
+                } else {
+                    requested
+                };
+                let cache_data = Some(&cache.mod_cache);
+                if let Ok(computed) = smart_rank::smart_rank_profile_cached_with_progress(
+                    &config,
+                    &library,
+                    cache_data,
+                    resolved,
+                    |_| {},
+                ) {
+                    stress_scans += computed.scanned_mods;
+                    if matches!(resolved, SmartRankRefreshMode::Full) {
+                        stress_full += 1;
+                    }
+                    let profile_key = App::smart_rank_profile_key_for(&library);
+                    cache = SmartRankCache {
+                        version: SMART_RANK_CACHE_VERSION,
+                        profile_key,
+                        mod_cache: computed.cache.clone(),
+                        result: Some(computed.result),
+                    };
+                }
+            }
+            lines.push(format!(
+                "stress: iterations={} full_rebuilds={} scanned_mods={}",
+                iterations, stress_full, stress_scans
+            ));
         }
 
         let mut remove_entry = None;
