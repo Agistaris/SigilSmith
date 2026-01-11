@@ -1313,7 +1313,8 @@ fn draw(frame: &mut Frame<'_>, app: &mut App) {
             filter_active,
         )
     };
-    let status_color = status_color(app, &theme);
+    let status_text = app.status_line();
+    let status_color = status_color_text(&status_text, &theme);
     let overrides_total = app.conflicts.len();
     let overrides_manual = app
         .conflicts
@@ -2023,7 +2024,7 @@ fn draw(frame: &mut Frame<'_>, app: &mut App) {
             bar_area,
         );
     }
-    let status_text = truncate_text(&app.status, status_inner.width as usize);
+    let status_text = truncate_text(&status_text, status_inner.width as usize);
     let status_widget = Paragraph::new(status_text)
         .style(Style::default().fg(status_color))
         .alignment(Alignment::Center);
@@ -2235,8 +2236,8 @@ fn format_enabled_count(
     }
 }
 
-fn status_color(app: &App, theme: &Theme) -> Color {
-    let lower = app.status.to_lowercase();
+fn status_color_text(status: &str, theme: &Theme) -> Color {
+    let lower = status.to_lowercase();
     if lower.contains("failed")
         || lower.contains("error")
         || lower.contains("denied")
@@ -4498,14 +4499,17 @@ fn mod_header_cell_static(label: &str, theme: &Theme) -> Cell<'static> {
 }
 
 fn loading_frame(_row_index: usize, column_index: usize) -> &'static str {
-    const FRAMES: [&str; 6] = [" ", ".", "o", "O", "o", "."];
     let tick = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis()
-        / 110;
-    let idx = (tick as usize + column_index) % FRAMES.len();
-    FRAMES[idx]
+        / 240;
+    let pos = (tick as usize) % 8;
+    if column_index == pos {
+        "·"
+    } else {
+        " "
+    }
 }
 
 fn row_for_entry(

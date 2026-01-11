@@ -57,6 +57,7 @@ enum CliCommand {
 
 enum DebugCommand {
     SmartRank,
+    SmartRankWarmup,
 }
 
 struct ModsListOptions {
@@ -237,8 +238,11 @@ fn parse_subcommand(tokens: &[String], global: &GlobalOptions) -> Result<Option<
                 .unwrap_or("smart-rank");
             let command = match sub {
                 "smart-rank" | "smart_rank" | "smart" => DebugCommand::SmartRank,
+                "smart-rank-warmup" | "smart_rank_warmup" | "warmup" => {
+                    DebugCommand::SmartRankWarmup
+                }
                 _ => {
-                    bail!("Unknown debug command: {sub} (use 'smart-rank')");
+                    bail!("Unknown debug command: {sub} (use 'smart-rank' or 'warmup')");
                 }
             };
             Ok(Some(CliAction::Command {
@@ -406,6 +410,7 @@ fn run_command(
         CliCommand::DepsDebug(query) => debug_dependencies(app, &query),
         CliCommand::Debug(command) => match command {
             DebugCommand::SmartRank => debug_smart_rank(app),
+            DebugCommand::SmartRankWarmup => debug_smart_rank_warmup(app),
         },
         CliCommand::Paths => list_paths(app, format),
         CliCommand::Help | CliCommand::Version => Ok(()),
@@ -706,6 +711,18 @@ fn debug_smart_rank(app: &App) -> Result<()> {
 
 #[cfg(not(debug_assertions))]
 fn debug_smart_rank(_app: &App) -> Result<()> {
+    bail!("Debug commands require a debug build");
+}
+
+#[cfg(debug_assertions)]
+fn debug_smart_rank_warmup(app: &mut App) -> Result<()> {
+    app.debug_smart_rank_warmup()?;
+    println!("Smart rank warmup cached");
+    Ok(())
+}
+
+#[cfg(not(debug_assertions))]
+fn debug_smart_rank_warmup(_app: &mut App) -> Result<()> {
     bail!("Debug commands require a debug build");
 }
 

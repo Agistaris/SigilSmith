@@ -930,9 +930,6 @@ impl App {
         }
         self.start_metadata_refresh();
         self.queue_conflict_scan("startup");
-        if self.paths_ready() {
-            self.smart_rank_refresh_pending = true;
-        }
         self.start_update_check();
     }
 
@@ -1304,6 +1301,25 @@ impl App {
         if self.app_config.show_startup_dependency_notice {
             self.prompt_startup_dependency_notice(disabled_names);
         }
+    }
+
+    fn schedule_smart_rank_warmup(&mut self) {
+        if !self.paths_ready() {
+            return;
+        }
+        if self.smart_rank_cache.is_none() {
+            self.load_smart_rank_cache();
+        }
+        if let Some(cache) = &self.smart_rank_cache {
+            let fingerprint = self.smart_rank_fingerprint();
+            if cache.fingerprint == fingerprint {
+                self.smart_rank_refresh_pending = false;
+                self.status = "Smart ranking warmup cached".to_string();
+                self.log_info("Smart rank warmup: cache hit".to_string());
+                return;
+            }
+        }
+        self.smart_rank_refresh_pending = true;
     }
 
     fn prompt_startup_dependency_notice(&mut self, disabled: Vec<String>) {
@@ -4105,12 +4121,14 @@ impl App {
                             self.metadata_dirty = false;
                         }
                         self.run_startup_dependency_check();
+                        self.schedule_smart_rank_warmup();
                         self.maybe_restart_smart_rank();
                         self.maybe_prompt_pending_delete();
                     }
                     MetadataMessage::Failed { error } => {
                         self.metadata_active = false;
                         self.log_warn(format!("Metadata refresh failed: {error}"));
+                        self.schedule_smart_rank_warmup();
                         self.maybe_restart_smart_rank();
                     }
                 },
@@ -4737,6 +4755,73 @@ impl App {
             || self.smart_rank_warmup_active()
     }
 
+    pub fn status_line(&self) -> String {
+        if let Some(line) = self.native_sync_status_line() {
+            return line;
+        }
+        if let Some(line) = self.metadata_status_line() {
+            return line;
+        }
+        if let Some(line) = self.smart_rank_status_line() {
+            return line;
+        }
+        self.status.clone()
+    }
+
+    fn native_sync_status_line(&self) -> Option<String> {
+        if !self.native_sync_active {
+            return None;
+        }
+        if let Some(progress) = &self.native_sync_progress {
+            if progress.total > 0 {
+                return Some(format!(
+                    "{}: {}/{}",
+                    progress.stage.label(),
+                    progress.current,
+                    progress.total
+                ));
+            }
+            return Some(format!("{}: working...", progress.stage.label()));
+        }
+        Some("Native mods prepass: working...".to_string())
+    }
+
+    fn metadata_status_line(&self) -> Option<String> {
+        if !self.metadata_active {
+            return None;
+        }
+        if self.metadata_total > 0 {
+            return Some(format!(
+                "Metadata scan: {}/{}",
+                self.metadata_processed, self.metadata_total
+            ));
+        }
+        Some("Metadata scan: working...".to_string())
+    }
+
+    fn smart_rank_status_line(&self) -> Option<String> {
+        if !self.smart_rank_warmup_active() {
+            return None;
+        }
+        if let Some(progress) = &self.smart_rank_progress {
+            if progress.total > 0 {
+                return Some(format!(
+                    "Smart ranking: {} {}/{} ({})",
+                    progress.group.label(),
+                    progress.scanned,
+                    progress.total,
+                    progress.name
+                ));
+            }
+            return Some(format!(
+                "Smart ranking: {} ({})",
+                progress.group.label(),
+                progress.name
+            ));
+        }
+        Some("Smart ranking: warmup...".to_string())
+    }
+
     pub fn mod_row_loading(&self, mod_id: &str, row_index: usize, total_rows: usize) -> bool {
         if self.metadata_active {
             return !self.metadata_processed_ids.contains(mod_id);
@@ -4895,6 +4980,24 @@ impl App {
                 .unwrap_or(false)
         ));
         lines.join("\n")
+    }
+
+    #[cfg(debug_assertions)]
+    pub fn debug_smart_rank_warmup(&mut self) -> Result<()> {
+        if !self.paths_ready() {
+            return Err(anyhow::anyhow!(
+                "Paths not set (configure game root + Larian dir)"
+            ));
+        }
+        let result =
+            smart_rank::smart_rank_profile_with_progress(&self.config, &self.library, |_| {});
+        let result = result?;
+        self.smart_rank_cache = Some(SmartRankCache {
+            fingerprint: self.smart_rank_fingerprint(),
+            result,
+        });
+        self.save_smart_rank_cache();
+        Ok(())
     }
 
     fn update_dependency_cache_for_entries(&mut self, entries: &[ModEntry]) {
