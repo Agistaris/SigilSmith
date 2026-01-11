@@ -373,14 +373,11 @@ fn handle_dependency_queue(app: &mut App, key: KeyEvent) -> Result<()> {
     match key.code {
         KeyCode::Up | KeyCode::Char('k') | KeyCode::Char('K') => app.dependency_queue_move(-1),
         KeyCode::Down | KeyCode::Char('j') | KeyCode::Char('J') => app.dependency_queue_move(1),
-        KeyCode::PageUp => app.dependency_queue_move(-6),
-        KeyCode::PageDown => app.dependency_queue_move(6),
+        KeyCode::PageUp => app.dependency_queue_move(-app.dependency_queue_page_step()),
+        KeyCode::PageDown => app.dependency_queue_move(app.dependency_queue_page_step()),
         KeyCode::Home => app.dependency_queue_home(),
         KeyCode::End => app.dependency_queue_end(),
         KeyCode::Enter => app.dependency_queue_open_selected(),
-        KeyCode::Char('i') | KeyCode::Char('I') => {
-            app.dependency_queue_ignore();
-        }
         KeyCode::Char('g') | KeyCode::Char('G') => {
             app.dependency_queue_continue();
         }
@@ -741,7 +738,7 @@ fn handle_mods_mode(app: &mut App, key: KeyEvent) -> Result<()> {
             }
         }
         (KeyCode::Enter, _) | (KeyCode::Esc, _) if app.move_mode => app.toggle_move_mode(),
-        (KeyCode::Char(' '), _) => app.toggle_selected(),
+        (KeyCode::Char(' '), _) | (KeyCode::Enter, _) => app.toggle_selected(),
         (KeyCode::Char('a'), _) | (KeyCode::Char('A'), _) => app.enable_visible_mods(),
         (KeyCode::Char('s'), _) | (KeyCode::Char('S'), _) => app.disable_visible_mods(),
         (KeyCode::Char('x'), _) | (KeyCode::Char('X'), _) => app.invert_visible_mods(),
@@ -2033,7 +2030,7 @@ fn draw(frame: &mut Frame<'_>, app: &mut App) {
     frame.render_widget(status_widget, status_inner);
 
     if app.dependency_queue_active() {
-        draw_dependency_queue(frame, app, &theme);
+    draw_dependency_queue(frame, app, &theme);
     }
     if app.dialog.is_some() {
         draw_dialog(frame, app, &theme);
@@ -2669,7 +2666,7 @@ fn draw_dialog(frame: &mut Frame<'_>, app: &mut App, theme: &Theme) {
     if height > area.height.saturating_sub(2) {
         height = area.height.saturating_sub(2);
     }
-    let (outer_area, dialog_area) = padded_modal(area, width, height, 1);
+    let (outer_area, dialog_area) = padded_modal(area, width, height, 2, 1);
     render_modal_backdrop(frame, outer_area, theme);
     let dialog_block = Block::default()
         .borders(Borders::ALL)
@@ -2859,18 +2856,19 @@ fn delete_dependents_lines(
     lines
 }
 
-fn padded_modal(area: Rect, width: u16, height: u16, pad: u16) -> (Rect, Rect) {
-    let outer_width = width.saturating_add(pad.saturating_mul(2)).min(area.width);
+fn padded_modal(area: Rect, width: u16, height: u16, pad_x: u16, pad_y: u16) -> (Rect, Rect) {
+    let outer_width = width.saturating_add(pad_x.saturating_mul(2)).min(area.width);
     let outer_height = height
-        .saturating_add(pad.saturating_mul(2))
+        .saturating_add(pad_y.saturating_mul(2))
         .min(area.height);
     let x = area.x + (area.width.saturating_sub(outer_width)) / 2;
     let y = area.y + (area.height.saturating_sub(outer_height)) / 2;
     let outer = Rect::new(x, y, outer_width, outer_height);
-    let pad = pad.min(outer_width / 2).min(outer_height / 2);
-    let inner_width = outer_width.saturating_sub(pad.saturating_mul(2)).max(1);
-    let inner_height = outer_height.saturating_sub(pad.saturating_mul(2)).max(1);
-    let inner = Rect::new(outer.x + pad, outer.y + pad, inner_width, inner_height);
+    let pad_x = pad_x.min(outer_width / 2);
+    let pad_y = pad_y.min(outer_height / 2);
+    let inner_width = outer_width.saturating_sub(pad_x.saturating_mul(2)).max(1);
+    let inner_height = outer_height.saturating_sub(pad_y.saturating_mul(2)).max(1);
+    let inner = Rect::new(outer.x + pad_x, outer.y + pad_y, inner_width, inner_height);
     (outer, inner)
 }
 
@@ -2906,7 +2904,7 @@ fn draw_settings_menu(frame: &mut Frame<'_>, app: &App, theme: &Theme) {
     }
     let max_width = area.width.saturating_sub(2).max(1);
     let width = (max_line as u16 + 6).clamp(34, max_width.min(58));
-    let (outer_area, menu_area) = padded_modal(area, width, height, 1);
+    let (outer_area, menu_area) = padded_modal(area, width, height, 2, 1);
 
     render_modal_backdrop(frame, outer_area, theme);
     let menu_block = Block::default()
@@ -2946,7 +2944,7 @@ fn draw_help_menu(frame: &mut Frame<'_>, app: &mut App, theme: &Theme) {
     if height > max_height {
         height = max_height;
     }
-    let (outer_area, modal) = padded_modal(area, width, height, 1);
+    let (outer_area, modal) = padded_modal(area, width, height, 2, 1);
 
     let view_height = modal.height.saturating_sub(2) as usize;
     let max_scroll = lines.len().saturating_sub(view_height);
@@ -3026,9 +3024,18 @@ fn dependency_status_style(theme: &Theme, status: DependencyStatus) -> Style {
     }
 }
 
-fn draw_dependency_queue(frame: &mut Frame<'_>, app: &App, theme: &Theme) {
-    let Some(queue) = app.dependency_queue() else {
-        return;
+fn draw_dependency_queue(frame: &mut Frame<'_>, app: &mut App, theme: &Theme) {
+    let (total, missing) = {
+        let Some(queue) = app.dependency_queue() else {
+            return;
+        };
+        let total = queue.items.len();
+        let missing = queue
+            .items
+            .iter()
+            .filter(|item| item.status == DependencyStatus::Missing)
+            .count();
+        (total, missing)
     };
 
     let area = frame.size();
@@ -3037,7 +3044,7 @@ fn draw_dependency_queue(frame: &mut Frame<'_>, app: &App, theme: &Theme) {
     let width = max_width.clamp(60, 112);
     let max_height = area.height.saturating_sub(4).max(1);
     let height = max_height.clamp(16, 26);
-    let (outer_area, modal) = padded_modal(area, width, height, 1);
+    let (outer_area, modal) = padded_modal(area, width, height, 2, 1);
 
     render_modal_backdrop(frame, outer_area, theme);
     let panel_block = Block::default()
@@ -3054,28 +3061,6 @@ fn draw_dependency_queue(frame: &mut Frame<'_>, app: &App, theme: &Theme) {
     let inner = panel_block.inner(modal);
     frame.render_widget(panel_block, modal);
 
-    let total = queue.items.len();
-    let missing = queue
-        .items
-        .iter()
-        .filter(|item| item.status == DependencyStatus::Missing)
-        .count();
-    let waiting = queue
-        .items
-        .iter()
-        .filter(|item| item.status == DependencyStatus::Waiting)
-        .count();
-    let ready = queue
-        .items
-        .iter()
-        .filter(|item| item.status == DependencyStatus::Downloaded)
-        .count();
-    let skipped = queue
-        .items
-        .iter()
-        .filter(|item| item.status == DependencyStatus::Skipped)
-        .count();
-
     let mut header_lines = Vec::new();
     let header_text = if app.dependency_queue_enable_pending() {
         "Resolve missing dependencies before enabling mods."
@@ -3086,9 +3071,7 @@ fn draw_dependency_queue(frame: &mut Frame<'_>, app: &App, theme: &Theme) {
         header_text,
         Style::default().fg(theme.text),
     )));
-    let summary = format!(
-        "Missing {missing} of {total} (Waiting {waiting}, Ready {ready}, Skipped {skipped})"
-    );
+    let summary = format!("Missing {missing} of {total}");
     header_lines.push(Line::from(Span::styled(
         truncate_text(&summary, inner.width as usize),
         Style::default().fg(theme.muted),
@@ -3115,57 +3098,68 @@ fn draw_dependency_queue(frame: &mut Frame<'_>, app: &App, theme: &Theme) {
 
     let list_area = chunks[1];
     let list_width = list_area.width as usize;
-    let mut items = Vec::new();
-    for (index, item) in queue.items.iter().enumerate() {
-        let status_label = dependency_status_label(item.status);
-        let status_text = format!("{status_label:<9}");
-        let status_style = dependency_status_style(theme, item.status);
-        let index_label = format!("{:>2}. ", index + 1);
-        let label_width = list_width
-            .saturating_sub(status_text.chars().count() + 1 + index_label.chars().count());
-        let label_value = if item.display_label.trim().is_empty() {
-            item.label.clone()
-        } else {
-            item.display_label.clone()
+    let item_height = 3usize;
+    let view_items = (list_area.height as usize / item_height).max(1);
+    app.set_dependency_queue_view(view_items);
+    let (items, total_items, selected) = {
+        let Some(queue) = app.dependency_queue() else {
+            return;
         };
-        let label_text = truncate_text(&label_value, label_width);
-        let label_line = Line::from(vec![
-            Span::styled(status_text, status_style),
-            Span::raw(" "),
-            Span::styled(index_label, Style::default().fg(theme.muted)),
-            Span::styled(label_text, Style::default().fg(theme.text)),
-        ]);
-        let uuid_text = item
-            .uuid
-            .as_ref()
-            .map(|uuid| format!("UUID: {uuid}"))
-            .unwrap_or_else(|| "UUID: unknown".to_string());
-        let uuid_line = Line::from(Span::styled(
-            truncate_text(&uuid_text, list_width),
-            Style::default().fg(theme.muted),
-        ));
-        let required_by = if item.required_by.is_empty() {
-            "Required by: Unknown".to_string()
-        } else {
-            format!("Required by: {}", item.required_by.join(", "))
-        };
-        let link_label = if item.link.is_some() {
-            "Link: available".to_string()
-        } else {
-            "Link: none".to_string()
-        };
-        let search_label = if item.search_link.is_some() {
-            format!("Search: {}", item.search_label)
-        } else {
-            "Search: none".to_string()
-        };
-        let details = format!("{required_by} | {link_label} | {search_label}");
-        let required_line = Line::from(Span::styled(
-            truncate_text(&details, list_width),
-            Style::default().fg(theme.muted),
-        ));
-        items.push(ListItem::new(vec![label_line, uuid_line, required_line]));
-    }
+        let total_items = queue.items.len();
+        let selected = queue.selected;
+        let mut items = Vec::new();
+        for (index, item) in queue.items.iter().enumerate() {
+            let status_label = dependency_status_label(item.status);
+            let status_text = format!("{status_label:<9}");
+            let status_style = dependency_status_style(theme, item.status);
+            let index_label = format!("{:>2}. ", index + 1);
+            let label_width = list_width
+                .saturating_sub(status_text.chars().count() + 1 + index_label.chars().count());
+            let label_value = if item.display_label.trim().is_empty() {
+                item.label.clone()
+            } else {
+                item.display_label.clone()
+            };
+            let label_text = truncate_text(&label_value, label_width);
+            let label_line = Line::from(vec![
+                Span::styled(status_text, status_style),
+                Span::raw(" "),
+                Span::styled(index_label, Style::default().fg(theme.muted)),
+                Span::styled(label_text, Style::default().fg(theme.text)),
+            ]);
+            let uuid_text = item
+                .uuid
+                .as_ref()
+                .map(|uuid| format!("UUID: {uuid}"))
+                .unwrap_or_else(|| "UUID: unknown".to_string());
+            let uuid_line = Line::from(Span::styled(
+                truncate_text(&uuid_text, list_width),
+                Style::default().fg(theme.muted),
+            ));
+            let required_by = if item.required_by.is_empty() {
+                "Required by: Unknown".to_string()
+            } else {
+                format!("Required by: {}", item.required_by.join(", "))
+            };
+            let link_label = if item.link.is_some() {
+                "Link: available".to_string()
+            } else {
+                "Link: none".to_string()
+            };
+            let search_label = if item.search_link.is_some() {
+                format!("Search: {}", item.search_label)
+            } else {
+                "Search: none".to_string()
+            };
+            let details = format!("{required_by} | {link_label} | {search_label}");
+            let required_line = Line::from(Span::styled(
+                truncate_text(&details, list_width),
+                Style::default().fg(theme.muted),
+            ));
+            items.push(ListItem::new(vec![label_line, uuid_line, required_line]));
+        }
+        (items, total_items, selected)
+    };
 
     let highlight_style = Style::default()
         .bg(theme.accent_soft)
@@ -3177,13 +3171,10 @@ fn draw_dependency_queue(frame: &mut Frame<'_>, app: &App, theme: &Theme) {
         .highlight_symbol("");
 
     let mut state = ListState::default();
-    let total_items = queue.items.len();
-    let item_height = 3usize;
-    let view_items = (list_area.height as usize / item_height).max(1);
     let mut offset = 0usize;
     if total_items > view_items {
-        if queue.selected >= view_items {
-            offset = queue.selected + 1 - view_items;
+        if selected >= view_items {
+            offset = selected + 1 - view_items;
         }
         let max_offset = total_items.saturating_sub(view_items);
         if offset > max_offset {
@@ -3191,8 +3182,8 @@ fn draw_dependency_queue(frame: &mut Frame<'_>, app: &App, theme: &Theme) {
         }
     }
     if total_items > 0 {
-        let selected = queue.selected.saturating_sub(offset);
-        state.select(Some(selected));
+        let selected_index = selected.saturating_sub(offset);
+        state.select(Some(selected_index));
         *state.offset_mut() = offset;
     }
 
@@ -3240,8 +3231,6 @@ fn draw_dependency_queue(frame: &mut Frame<'_>, app: &App, theme: &Theme) {
         Span::styled(" Copy link/id", text_style),
     ]);
     let footer_line_two = vec![
-        Span::styled("[I]", key_style),
-        Span::styled(" Skip  ", text_style),
         Span::styled("[G]", key_style),
         Span::styled(
             if app.dependency_queue_enable_pending() {
@@ -3265,7 +3254,7 @@ fn draw_path_browser(frame: &mut Frame<'_>, _app: &App, theme: &Theme, browser: 
     let area = frame.size();
     let width = (area.width.saturating_sub(4)).clamp(46, 86);
     let height = (area.height.saturating_sub(4)).clamp(12, 22);
-    let (outer_area, modal) = padded_modal(area, width, height, 1);
+    let (outer_area, modal) = padded_modal(area, width, height, 2, 1);
 
     render_modal_backdrop(frame, outer_area, theme);
 
@@ -3497,7 +3486,7 @@ fn draw_smart_rank_preview(frame: &mut Frame<'_>, app: &mut App, theme: &Theme) 
     let width = max_width.min(120).max(60).min(max_width);
     let max_height = area.height.saturating_sub(2).max(1);
     let height = max_height.min(22).max(10);
-    let (outer_area, preview_area) = padded_modal(area, width, height, 1);
+    let (outer_area, preview_area) = padded_modal(area, width, height, 2, 1);
 
     let inner_width = preview_area.width.saturating_sub(3) as usize;
     let inner_height = preview_area.height.saturating_sub(2) as usize;
@@ -4226,7 +4215,7 @@ fn draw_import_overlay(frame: &mut Frame<'_>, app: &App, theme: &Theme) {
     let text_height = lines.len().max(1) as u16;
     let width = area.width.saturating_sub(10).clamp(42, 78);
     let height = (text_height + 4).min(area.height.saturating_sub(2)).max(9);
-    let (outer_area, panel_area) = padded_modal(area, width, height, 1);
+    let (outer_area, panel_area) = padded_modal(area, width, height, 2, 1);
 
     render_modal_backdrop(frame, outer_area, theme);
     let panel_block = Block::default()
@@ -4292,7 +4281,7 @@ fn draw_startup_overlay(frame: &mut Frame<'_>, app: &App, theme: &Theme) {
     let text_height = lines.len() as u16;
     let width = area.width.saturating_sub(10).clamp(42, 72);
     let height = (text_height + 4).min(area.height.saturating_sub(2)).max(9);
-    let (outer_area, panel_area) = padded_modal(area, width, height, 1);
+    let (outer_area, panel_area) = padded_modal(area, width, height, 2, 1);
 
     render_modal_backdrop(frame, outer_area, theme);
     let panel_block = Block::default()
@@ -4508,14 +4497,14 @@ fn mod_header_cell_static(label: &str, theme: &Theme) -> Cell<'static> {
     )
 }
 
-fn loading_frame(row_index: usize, column_index: usize) -> &'static str {
+fn loading_frame(_row_index: usize, column_index: usize) -> &'static str {
     const FRAMES: [&str; 6] = [" ", ".", "o", "O", "o", "."];
     let tick = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis()
         / 110;
-    let idx = (tick as usize + row_index + column_index * 2) % FRAMES.len();
+    let idx = (tick as usize + column_index) % FRAMES.len();
     FRAMES[idx]
 }
 
@@ -5928,12 +5917,8 @@ fn help_sections() -> Vec<HelpSection> {
                     action: "Open link/search".to_string(),
                 },
                 LegendRow {
-                    key: "I".to_string(),
-                    action: "Skip dependency".to_string(),
-                },
-                LegendRow {
                     key: "G".to_string(),
-                    action: "Continue import".to_string(),
+                    action: "Continue import/enable".to_string(),
                 },
                 LegendRow {
                     key: "C".to_string(),

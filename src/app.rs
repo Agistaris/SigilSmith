@@ -153,6 +153,7 @@ pub struct Dialog {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)]
 pub enum DependencyStatus {
     Missing,
     Waiting,
@@ -548,6 +549,7 @@ pub struct App {
     pending_import_batch: Option<importer::ImportBatch>,
     dependency_queue: Option<DependencyQueue>,
     pending_dependency_enable: Option<Vec<String>>,
+    dependency_queue_view: usize,
     dependency_cache: HashMap<String, Vec<String>>,
     dependency_cache_ready: bool,
     pending_delete_mod: Option<(String, String)>,
@@ -842,6 +844,7 @@ impl App {
             pending_import_batch: None,
             dependency_queue: None,
             pending_dependency_enable: None,
+            dependency_queue_view: 1,
             dependency_cache: HashMap::new(),
             dependency_cache_ready: false,
             pending_delete_mod: None,
@@ -2937,6 +2940,15 @@ impl App {
         self.pending_dependency_enable.is_some()
     }
 
+    pub fn set_dependency_queue_view(&mut self, view_items: usize) {
+        self.dependency_queue_view = view_items.max(1);
+    }
+
+    pub fn dependency_queue_page_step(&self) -> isize {
+        let step = self.dependency_queue_view.saturating_sub(1).max(1);
+        step as isize
+    }
+
     pub fn dependency_queue_move(&mut self, delta: isize) {
         let Some(queue) = &mut self.dependency_queue else {
             return;
@@ -2968,14 +2980,6 @@ impl App {
                 queue.selected = queue.items.len() - 1;
             }
         }
-    }
-
-    pub fn dependency_queue_ignore(&mut self) {
-        let Some(item) = self.dependency_queue_selected_mut() else {
-            return;
-        };
-        item.status = DependencyStatus::Skipped;
-        self.status = format!("Skipped dependency: {}", item.label);
     }
 
     pub fn dependency_queue_continue(&mut self) {
@@ -3188,11 +3192,6 @@ impl App {
     fn dependency_queue_selected(&self) -> Option<&DependencyItem> {
         let queue = self.dependency_queue.as_ref()?;
         queue.items.get(queue.selected)
-    }
-
-    fn dependency_queue_selected_mut(&mut self) -> Option<&mut DependencyItem> {
-        let queue = self.dependency_queue.as_mut()?;
-        queue.items.get_mut(queue.selected)
     }
 
     pub fn handle_submit(&mut self, purpose: InputPurpose, value: String) -> Result<()> {
@@ -3812,27 +3811,21 @@ impl App {
                         ModSource::Native => 1u8,
                     };
                     hasher.update(&[source_tag]);
+                    let mut targets: Vec<String> = Vec::new();
                     for target in &mod_entry.targets {
-                        match target {
+                        let key = match target {
                             InstallTarget::Pak { file, info } => {
-                                hasher.update(b"pak");
-                                hasher.update(file.as_bytes());
-                                hasher.update(info.uuid.as_bytes());
-                                hasher.update(info.folder.as_bytes());
+                                format!("pak|{}|{}|{}", file, info.uuid, info.folder)
                             }
-                            InstallTarget::Generated { dir } => {
-                                hasher.update(b"gen");
-                                hasher.update(dir.as_bytes());
-                            }
-                            InstallTarget::Data { dir } => {
-                                hasher.update(b"data");
-                                hasher.update(dir.as_bytes());
-                            }
-                            InstallTarget::Bin { dir } => {
-                                hasher.update(b"bin");
-                                hasher.update(dir.as_bytes());
-                            }
-                        }
+                            InstallTarget::Generated { dir } => format!("gen|{dir}"),
+                            InstallTarget::Data { dir } => format!("data|{dir}"),
+                            InstallTarget::Bin { dir } => format!("bin|{dir}"),
+                        };
+                        targets.push(key);
+                    }
+                    targets.sort();
+                    for target in targets {
+                        hasher.update(target.as_bytes());
                     }
                 }
             }
