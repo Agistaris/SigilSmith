@@ -774,13 +774,13 @@ fn debug_smart_rank_scenario(_app: &App) -> Result<()> {
 }
 
 #[cfg(debug_assertions)]
-fn debug_smart_rank_warmup_block(app: &App) -> Result<()> {
+fn debug_smart_rank_warmup_block(app: &mut App) -> Result<()> {
     println!("{}", app.debug_smart_rank_warmup_block_report());
     Ok(())
 }
 
 #[cfg(not(debug_assertions))]
-fn debug_smart_rank_warmup_block(_app: &App) -> Result<()> {
+fn debug_smart_rank_warmup_block(_app: &mut App) -> Result<()> {
     bail!("Debug commands require a debug build");
 }
 
@@ -940,7 +940,7 @@ fn print_help() {
     println!("  sigilsmith debug cache-validate Validate smart rank cache (debug builds)");
     println!("  sigilsmith debug cache-sim      Simulate smart rank edits (debug builds)");
     println!("  sigilsmith debug scenario       Run smart-rank edit scenario (debug builds)");
-    println!("  sigilsmith debug warmup-block   Report mod action blocking during warmup (debug builds)");
+    println!("  sigilsmith debug warmup-block   Report warmup edit gating (debug builds)");
     println!("  sigilsmith paths                Show detected paths");
     println!("  sigilsmith --import <paths...>  Import mods without the TUI");
     println!();

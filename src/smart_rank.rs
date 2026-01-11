@@ -55,6 +55,10 @@ pub struct SmartRankProgress {
     pub scanned: usize,
     pub total: usize,
     pub name: String,
+    #[serde(default)]
+    pub mod_id: String,
+    #[serde(default)]
+    pub cache: Option<SmartRankModCache>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -336,6 +340,8 @@ where
                     scanned: progress_scanned,
                     total,
                     name: mod_entry.display_name(),
+                    mod_id: mod_entry.id.clone(),
+                    cache: Some(scanned),
                 });
             }
         }

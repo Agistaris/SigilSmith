@@ -1414,8 +1414,11 @@ impl App {
         let profile_key = self.smart_rank_profile_key();
         let mut desired = smart_rank::SmartRankRefreshMode::Full;
         if let Some(cache) = &self.smart_rank_cache {
-            if cache.version == SMART_RANK_CACHE_VERSION && cache.result.is_some() {
-                if cache.profile_key == profile_key && self.smart_rank_cache_ready(cache) {
+            if cache.version == SMART_RANK_CACHE_VERSION {
+                if cache.result.is_some()
+                    && cache.profile_key == profile_key
+                    && self.smart_rank_cache_ready(cache)
+                {
                     self.smart_rank_refresh_pending = None;
                     self.smart_rank_refresh_at = None;
                     self.status = "Smart ranking warmup cached".to_string();
@@ -1424,6 +1427,8 @@ impl App {
                 }
                 if cache.profile_key == profile_key {
                     desired = smart_rank::SmartRankRefreshMode::Incremental;
+                } else if cache.result.is_some() && self.smart_rank_cache_ready(cache) {
+                    desired = smart_rank::SmartRankRefreshMode::ReorderOnly;
                 } else {
                     desired = smart_rank::SmartRankRefreshMode::Incremental;
                 }
@@ -3436,7 +3441,7 @@ impl App {
         if !self.native_sync_active {
             if self.smart_rank_active {
                 let allow_during_warmup = matches!(self.smart_rank_mode, Some(SmartRankMode::Warmup))
-                    && matches!(action, "toggle" | "enable" | "disable");
+                    && matches!(action, "toggle" | "enable" | "disable" | "reorder" | "remove");
                 if !allow_during_warmup {
                     let label = match self.smart_rank_mode {
                         Some(SmartRankMode::Warmup) => "Smart rank warmup",
@@ -3478,6 +3483,30 @@ impl App {
             ToastLevel::Warn,
             Duration::from_secs(2),
         );
+        true
+    }
+
+    #[cfg(debug_assertions)]
+    fn block_mod_changes_warmup(&self, action: &str) -> bool {
+        if self.metadata_active {
+            return true;
+        }
+        if !self.native_sync_active {
+            if self.smart_rank_active {
+                let allow_during_warmup = matches!(self.smart_rank_mode, Some(SmartRankMode::Warmup))
+                    && matches!(action, "toggle" | "enable" | "disable" | "reorder" | "remove");
+                if !allow_during_warmup {
+                    return true;
+                }
+            }
+            if self.deploy_active {
+                return true;
+            }
+            if self.import_active.is_some() {
+                return true;
+            }
+            return false;
+        }
         true
     }
 
@@ -3988,6 +4017,24 @@ impl App {
                     SmartRankMessage::Progress(progress) => {
                         if self.smart_rank_interrupt {
                             continue;
+                        }
+                        if let Some(cache) = progress.cache.clone() {
+                            let profile_key = self.smart_rank_profile_key();
+                            let mod_cache = if let Some(existing) = &self.smart_rank_cache {
+                                let mut next = existing.mod_cache.clone();
+                                next.mods.insert(progress.mod_id.clone(), cache);
+                                next
+                            } else {
+                                let mut next = smart_rank::SmartRankCacheData::default();
+                                next.mods.insert(progress.mod_id.clone(), cache);
+                                next
+                            };
+                            self.smart_rank_cache = Some(SmartRankCache {
+                                version: SMART_RANK_CACHE_VERSION,
+                                profile_key,
+                                mod_cache,
+                                result: None,
+                            });
                         }
                         self.smart_rank_progress = Some(progress.clone());
                         let label = progress.group.label();
@@ -5040,116 +5087,60 @@ impl App {
     }
 
     #[cfg(debug_assertions)]
-    pub fn debug_smart_rank_warmup_block_report(&self) -> String {
-        fn blocked(
-            action: &str,
-            metadata_active: bool,
-            smart_rank_active: bool,
-            smart_rank_mode: Option<SmartRankMode>,
-            deploy_active: bool,
-            import_active: bool,
-            native_sync_active: bool,
-        ) -> bool {
-            if metadata_active {
-                return true;
-            }
-            if !native_sync_active {
-                if smart_rank_active {
-                    let allow_during_warmup =
-                        matches!(smart_rank_mode, Some(SmartRankMode::Warmup))
-                            && matches!(action, "toggle" | "enable" | "disable");
-                    if !allow_during_warmup {
-                        return true;
-                    }
-                }
-                if deploy_active {
-                    return true;
-                }
-                if import_active {
-                    return true;
-                }
-                return false;
-            }
-            true
-        }
+    pub fn debug_smart_rank_warmup_block_report(&mut self) -> String {
+        let original_status = self.status.clone();
+        let original_toast = self.toast.clone();
+        let original_smart_rank_active = self.smart_rank_active;
+        let original_smart_rank_mode = self.smart_rank_mode;
 
-        fn busy_state(
-            startup_pending: bool,
-            native_sync_active: bool,
-            import_active: bool,
-            deploy_active: bool,
-            deploy_pending: bool,
-            conflict_active: bool,
-            conflict_pending: bool,
-            smart_rank_active: bool,
-            metadata_active: bool,
-        ) -> bool {
-            startup_pending
-                || native_sync_active
-                || import_active
-                || deploy_active
-                || deploy_pending
-                || conflict_active
-                || conflict_pending
-                || smart_rank_active
-                || metadata_active
-        }
+        self.smart_rank_active = true;
+        self.smart_rank_mode = Some(SmartRankMode::Warmup);
 
         let mut lines = Vec::new();
-        lines.push("Smart rank warmup gating".to_string());
+        lines.push("Smart rank warmup edit gating".to_string());
 
-        let warmup_active = true;
-        let warmup_mode = Some(SmartRankMode::Warmup);
+        let toggle_blocked = self.block_mod_changes("toggle");
+        if toggle_blocked {
+            lines.push(format!("Toggle: blocked ({})", self.status));
+        } else {
+            lines.push("Toggle: allowed".to_string());
+        }
 
-        let warmup_only = |action: &str| {
-            blocked(
-                action,
-                false,
-                warmup_active,
-                warmup_mode,
-                false,
-                false,
-                false,
-            )
-        };
+        let enable_blocked = self.block_mod_changes("enable");
+        if enable_blocked {
+            lines.push(format!("Enable: blocked ({})", self.status));
+        } else {
+            lines.push("Enable: allowed".to_string());
+        }
 
-        let current_state = |action: &str| {
-            blocked(
-                action,
-                self.metadata_active,
-                warmup_active,
-                warmup_mode,
-                self.deploy_active,
-                self.import_active.is_some(),
-                self.native_sync_active,
-            )
-        };
+        let disable_blocked = self.block_mod_changes("disable");
+        if disable_blocked {
+            lines.push(format!("Disable: blocked ({})", self.status));
+        } else {
+            lines.push("Disable: allowed".to_string());
+        }
 
-        lines.push(format!(
-            "is_busy with warmup: {}",
-            busy_state(
-                self.startup_pending,
-                self.native_sync_active,
-                self.import_active.is_some(),
-                self.deploy_active,
-                self.deploy_pending,
-                self.conflict_active,
-                self.conflict_pending,
-                true,
-                self.metadata_active,
-            )
-        ));
-        lines.push("Warmup-only gating:".to_string());
-        lines.push(format!("  toggle blocked: {}", warmup_only("toggle")));
-        lines.push(format!("  enable blocked: {}", warmup_only("enable")));
-        lines.push(format!("  disable blocked: {}", warmup_only("disable")));
-        lines.push(format!("  remove blocked: {}", warmup_only("remove")));
-        lines.push("Current-state + warmup gating:".to_string());
-        lines.push(format!("  toggle blocked: {}", current_state("toggle")));
-        lines.push(format!("  enable blocked: {}", current_state("enable")));
-        lines.push(format!("  disable blocked: {}", current_state("disable")));
-        lines.push(format!("  remove blocked: {}", current_state("remove")));
-        lines.push("Reorder (move up/down) is not gated by block_mod_changes".to_string());
+        let mut reorder_blockers = Vec::new();
+        if self.mod_filter_active() {
+            reorder_blockers.push("filter active");
+        }
+        if !self.mod_sort.is_order_default() {
+            reorder_blockers.push("sort != Order");
+        }
+        if reorder_blockers.is_empty() {
+            lines.push("Reorder: allowed".to_string());
+        } else {
+            lines.push(format!(
+                "Reorder: blocked ({})",
+                reorder_blockers.join(", ")
+            ));
+        }
+
+        self.status = original_status;
+        self.toast = original_toast;
+        self.smart_rank_active = original_smart_rank_active;
+        self.smart_rank_mode = original_smart_rank_mode;
+
         lines.join("\n")
     }
 
