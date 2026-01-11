@@ -1293,7 +1293,7 @@ impl App {
         };
         let mut to_disable = Vec::new();
         let mut disabled_names = Vec::new();
-        for entry in &profile.order {
+        for entry in profile.order.iter().filter(|entry| entry.enabled) {
             if !entry.enabled {
                 continue;
             }
@@ -1424,8 +1424,6 @@ impl App {
                 }
                 if cache.profile_key == profile_key {
                     desired = smart_rank::SmartRankRefreshMode::Incremental;
-                } else if self.smart_rank_cache_ready(cache) {
-                    desired = smart_rank::SmartRankRefreshMode::ReorderOnly;
                 } else {
                     desired = smart_rank::SmartRankRefreshMode::Incremental;
                 }
@@ -1436,18 +1434,21 @@ impl App {
     }
 
     fn smart_rank_cache_ready(&self, cache: &SmartRankCache) -> bool {
+        Self::smart_rank_cache_ready_for(&self.library, cache)
+    }
+
+    fn smart_rank_cache_ready_for(library: &Library, cache: &SmartRankCache) -> bool {
         if cache.version != SMART_RANK_CACHE_VERSION {
             return false;
         }
         if cache.result.is_none() {
             return false;
         }
-        let Some(profile) = self.library.active_profile() else {
+        let Some(profile) = library.active_profile() else {
             return false;
         };
         for entry in profile.order.iter().filter(|entry| entry.enabled) {
-            let Some(mod_entry) = self
-                .library
+            let Some(mod_entry) = library
                 .mods
                 .iter()
                 .find(|mod_entry| mod_entry.id == entry.id)
@@ -1464,13 +1465,16 @@ impl App {
     }
 
     fn smart_rank_cache_missing_ids(&self, cache: &SmartRankCache) -> Vec<String> {
+        Self::smart_rank_cache_missing_ids_for(&self.library, cache)
+    }
+
+    fn smart_rank_cache_missing_ids_for(library: &Library, cache: &SmartRankCache) -> Vec<String> {
         let mut missing = Vec::new();
-        let Some(profile) = self.library.active_profile() else {
+        let Some(profile) = library.active_profile() else {
             return missing;
         };
-        for entry in profile.order.iter().filter(|entry| entry.enabled) {
-            let Some(mod_entry) = self
-                .library
+        for entry in &profile.order {
+            let Some(mod_entry) = library
                 .mods
                 .iter()
                 .find(|mod_entry| mod_entry.id == entry.id)
@@ -2576,6 +2580,7 @@ impl App {
             self.config.active_profile = self.library.active_profile.clone();
             self.selected = 0;
             self.move_mode = false;
+            self.schedule_smart_rank_warmup();
             self.queue_auto_deploy("profile deleted");
         }
 
@@ -2604,6 +2609,7 @@ impl App {
         self.move_mode = false;
         self.status = format!("Profile loaded: {name}");
         self.log_info(format!("Profile loaded: {name}"));
+        self.schedule_smart_rank_warmup();
         self.queue_auto_deploy("profile changed");
         Ok(())
     }
@@ -4090,8 +4096,12 @@ impl App {
     }
 
     fn smart_rank_profile_key(&self) -> String {
+        Self::smart_rank_profile_key_for(&self.library)
+    }
+
+    fn smart_rank_profile_key_for(library: &Library) -> String {
         let mut hasher = Hasher::new();
-        if let Some(profile) = self.library.active_profile() {
+        if let Some(profile) = library.active_profile() {
             hasher.update(profile.name.as_bytes());
             for entry in &profile.order {
                 hasher.update(entry.id.as_bytes());
@@ -5384,6 +5394,188 @@ impl App {
             Err(err) => {
                 lines.push(format!("Simulation failed: {err}"));
             }
+        }
+
+        lines.join("\n")
+    }
+
+    #[cfg(debug_assertions)]
+    pub fn debug_smart_rank_scenario(&self) -> String {
+        use smart_rank::SmartRankRefreshMode;
+
+        let mut lines = Vec::new();
+        lines.push("Smart rank scenario (headless)".to_string());
+
+        let config = self.config.clone();
+        let mut library = self.library.clone();
+        let mut cache = SmartRankCache {
+            version: SMART_RANK_CACHE_VERSION,
+            profile_key: Self::smart_rank_profile_key_for(&library),
+            mod_cache: smart_rank::SmartRankCacheData::default(),
+            result: None,
+        };
+
+        fn run_step(
+            label: &str,
+            requested: SmartRankRefreshMode,
+            config: &GameConfig,
+            library: &Library,
+            cache: &mut SmartRankCache,
+            lines: &mut Vec<String>,
+        ) {
+            let resolved = if matches!(requested, SmartRankRefreshMode::Full) {
+                SmartRankRefreshMode::Full
+            } else if cache.version != SMART_RANK_CACHE_VERSION || cache.result.is_none() {
+                SmartRankRefreshMode::Full
+            } else if matches!(requested, SmartRankRefreshMode::ReorderOnly)
+                && !App::smart_rank_cache_ready_for(library, cache)
+            {
+                SmartRankRefreshMode::Incremental
+            } else {
+                requested
+            };
+
+            let cache_data = Some(&cache.mod_cache);
+            let result = smart_rank::smart_rank_profile_cached_with_progress(
+                config,
+                library,
+                cache_data,
+                resolved,
+                |_| {},
+            );
+
+            match result {
+                Ok(computed) => {
+                    let profile_key = App::smart_rank_profile_key_for(library);
+                    *cache = SmartRankCache {
+                        version: SMART_RANK_CACHE_VERSION,
+                        profile_key,
+                        mod_cache: computed.cache.clone(),
+                        result: Some(computed.result.clone()),
+                    };
+                    lines.push(format!(
+                        "{label}: requested={requested:?} resolved={resolved:?} scanned_mods={} full_rebuild={}",
+                        computed.scanned_mods,
+                        matches!(resolved, SmartRankRefreshMode::Full)
+                    ));
+                }
+                Err(err) => {
+                    lines.push(format!(
+                        "{label}: requested={requested:?} resolved={resolved:?} error={err}"
+                    ));
+                }
+            }
+        }
+
+        run_step(
+            "baseline",
+            SmartRankRefreshMode::Full,
+            &config,
+            &library,
+            &mut cache,
+            &mut lines,
+        );
+
+        if library
+            .active_profile()
+            .map(|profile| profile.order.is_empty())
+            .unwrap_or(true)
+        {
+            lines.push("Scenario aborted: active profile has no mods".to_string());
+            return lines.join("\n");
+        }
+
+        {
+            let Some(profile) = library.active_profile_mut() else {
+                lines.push("Scenario aborted: no active profile".to_string());
+                return lines.join("\n");
+            };
+            if let Some(entry) = profile.order.get_mut(0) {
+                entry.enabled = !entry.enabled;
+            }
+        }
+        run_step(
+            "toggle",
+            SmartRankRefreshMode::Incremental,
+            &config,
+            &library,
+            &mut cache,
+            &mut lines,
+        );
+
+        let mut reordered = false;
+        if let Some(profile) = library.active_profile_mut() {
+            if profile.order.len() > 1 {
+                profile.order.swap(0, 1);
+                reordered = true;
+            }
+        } else {
+            lines.push("reorder: skipped (no active profile)".to_string());
+        }
+        if reordered {
+            run_step(
+                "reorder",
+                SmartRankRefreshMode::ReorderOnly,
+                &config,
+                &library,
+                &mut cache,
+                &mut lines,
+            );
+        } else {
+            lines.push("reorder: skipped (need >=2 mods)".to_string());
+        }
+
+        let mut remove_entry = None;
+        let mut remove_profile_entry = None;
+        if let Some(profile) = library.active_profile() {
+            for entry in &profile.order {
+                let Some(mod_entry) =
+                    library.mods.iter().find(|mod_entry| mod_entry.id == entry.id)
+                else {
+                    continue;
+                };
+                let mod_root = config.data_dir.join("mods").join(&mod_entry.id);
+                if mod_root.exists() {
+                    remove_entry = Some(mod_entry.clone());
+                    remove_profile_entry = Some(entry.clone());
+                    break;
+                }
+            }
+        }
+
+        if let (Some(mod_entry), Some(_profile_entry)) = (remove_entry, remove_profile_entry) {
+            let remove_id = mod_entry.id.clone();
+            library.mods.retain(|entry| entry.id != remove_id);
+            for profile in &mut library.profiles {
+                profile.order.retain(|entry| entry.id != remove_id);
+            }
+            cache.mod_cache.mods.remove(&remove_id);
+            run_step(
+                "remove",
+                SmartRankRefreshMode::Incremental,
+                &config,
+                &library,
+                &mut cache,
+                &mut lines,
+            );
+
+            library.mods.push(mod_entry.clone());
+            if let Some(profile) = library.active_profile_mut() {
+                profile.order.push(ProfileEntry {
+                    id: remove_id,
+                    enabled: true,
+                });
+            }
+            run_step(
+                "add",
+                SmartRankRefreshMode::Incremental,
+                &config,
+                &library,
+                &mut cache,
+                &mut lines,
+            );
+        } else {
+            lines.push("remove/add: skipped (no managed mod root found)".to_string());
         }
 
         lines.join("\n")
@@ -6785,6 +6977,11 @@ impl App {
         if self.move_mode {
             self.move_dirty = true;
         } else {
+            self.schedule_smart_rank_refresh(
+                smart_rank::SmartRankRefreshMode::ReorderOnly,
+                "order changed",
+                true,
+            );
             self.queue_auto_deploy("order changed");
         }
     }
@@ -6817,6 +7014,11 @@ impl App {
         if self.move_mode {
             self.move_dirty = true;
         } else {
+            self.schedule_smart_rank_refresh(
+                smart_rank::SmartRankRefreshMode::ReorderOnly,
+                "order changed",
+                true,
+            );
             self.queue_auto_deploy("order changed");
         }
     }

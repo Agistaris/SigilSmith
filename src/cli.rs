@@ -61,6 +61,7 @@ enum DebugCommand {
     Cache,
     SmartRankCacheValidate,
     SmartRankCacheSimulate,
+    SmartRankScenario,
 }
 
 struct ModsListOptions {
@@ -251,9 +252,12 @@ fn parse_subcommand(tokens: &[String], global: &GlobalOptions) -> Result<Option<
                 "cache-sim" | "cache-simulate" | "simulate" => {
                     DebugCommand::SmartRankCacheSimulate
                 }
+                "smart-rank-scenario" | "smart_rank_scenario" | "scenario" => {
+                    DebugCommand::SmartRankScenario
+                }
                 _ => {
                     bail!(
-                        "Unknown debug command: {sub} (use 'smart-rank', 'warmup', 'cache', 'cache-validate', or 'cache-sim')"
+                        "Unknown debug command: {sub} (use 'smart-rank', 'warmup', 'cache', 'cache-validate', 'cache-sim', or 'scenario')"
                     );
                 }
             };
@@ -426,6 +430,7 @@ fn run_command(
             DebugCommand::Cache => debug_cache(app),
             DebugCommand::SmartRankCacheValidate => debug_smart_rank_cache_validate(app),
             DebugCommand::SmartRankCacheSimulate => debug_smart_rank_cache_simulate(app),
+            DebugCommand::SmartRankScenario => debug_smart_rank_scenario(app),
         },
         CliCommand::Paths => list_paths(app, format),
         CliCommand::Help | CliCommand::Version => Ok(()),
@@ -753,6 +758,17 @@ fn debug_cache(_app: &App) -> Result<()> {
 }
 
 #[cfg(debug_assertions)]
+fn debug_smart_rank_scenario(app: &App) -> Result<()> {
+    println!("{}", app.debug_smart_rank_scenario());
+    Ok(())
+}
+
+#[cfg(not(debug_assertions))]
+fn debug_smart_rank_scenario(_app: &App) -> Result<()> {
+    bail!("Debug commands require a debug build");
+}
+
+#[cfg(debug_assertions)]
 fn debug_smart_rank_cache_validate(app: &App) -> Result<()> {
     println!("{}", app.debug_smart_rank_cache_validate());
     Ok(())
@@ -907,6 +923,7 @@ fn print_help() {
     println!("  sigilsmith debug cache          Debug cache + modsettings state (debug builds)");
     println!("  sigilsmith debug cache-validate Validate smart rank cache (debug builds)");
     println!("  sigilsmith debug cache-sim      Simulate smart rank edits (debug builds)");
+    println!("  sigilsmith debug scenario       Run smart-rank edit scenario (debug builds)");
     println!("  sigilsmith paths                Show detected paths");
     println!("  sigilsmith --import <paths...>  Import mods without the TUI");
     println!();
