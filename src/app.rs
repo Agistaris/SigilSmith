@@ -3429,18 +3429,22 @@ impl App {
         }
         if !self.native_sync_active {
             if self.smart_rank_active {
-                let label = match self.smart_rank_mode {
-                    Some(SmartRankMode::Warmup) => "Smart rank warmup",
-                    Some(SmartRankMode::Preview) => "Smart rank preview",
-                    None => "Smart ranking",
-                };
-                self.status = format!("{label} running: {action} blocked");
-                self.set_toast(
-                    "Smart ranking in progress - please wait",
-                    ToastLevel::Warn,
-                    Duration::from_secs(2),
-                );
-                return true;
+                let allow_during_warmup = matches!(self.smart_rank_mode, Some(SmartRankMode::Warmup))
+                    && matches!(action, "toggle" | "enable" | "disable");
+                if !allow_during_warmup {
+                    let label = match self.smart_rank_mode {
+                        Some(SmartRankMode::Warmup) => "Smart rank warmup",
+                        Some(SmartRankMode::Preview) => "Smart rank preview",
+                        None => "Smart ranking",
+                    };
+                    self.status = format!("{label} running: {action} blocked");
+                    self.set_toast(
+                        "Smart ranking in progress - please wait",
+                        ToastLevel::Warn,
+                        Duration::from_secs(2),
+                    );
+                    return true;
+                }
             }
             if self.deploy_active {
                 self.status = format!("Deploy running: {action} blocked");
