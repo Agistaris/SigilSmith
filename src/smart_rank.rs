@@ -91,6 +91,7 @@ struct RankItem {
     patch_score: u8,
     patch_reasons: Vec<String>,
     dependencies: Vec<String>,
+    dependents: usize,
     date_hint: i64,
 }
 
@@ -286,8 +287,19 @@ where
             patch_score,
             patch_reasons: patch_notes,
             dependencies,
+            dependents: 0,
             date_hint,
         });
+    }
+
+    let mut dependents_count: HashMap<String, usize> = HashMap::new();
+    for item in &items {
+        for dep in &item.dependencies {
+            *dependents_count.entry(dep.clone()).or_insert(0) += 1;
+        }
+    }
+    for item in &mut items {
+        item.dependents = dependents_count.get(&item.id).copied().unwrap_or(0);
     }
 
     let mut conflicts = 0usize;
@@ -542,6 +554,10 @@ fn compare_rank_items(a: &RankItem, b: &RankItem) -> std::cmp::Ordering {
     let count = b.file_count.cmp(&a.file_count);
     if count != std::cmp::Ordering::Equal {
         return count;
+    }
+    let dependents = b.dependents.cmp(&a.dependents);
+    if dependents != std::cmp::Ordering::Equal {
+        return dependents;
     }
     let date = a.date_hint.cmp(&b.date_hint);
     if date != std::cmp::Ordering::Equal {

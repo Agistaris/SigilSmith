@@ -49,9 +49,14 @@ enum CliCommand {
     DepsList,
     DepsMissing,
     DepsDebug(String),
+    Debug(DebugCommand),
     Paths,
     Help,
     Version,
+}
+
+enum DebugCommand {
+    SmartRank,
 }
 
 struct ModsListOptions {
@@ -107,14 +112,20 @@ fn parse_args(args: &[String]) -> Result<CliAction> {
         return Ok(CliAction::Ui);
     }
 
-    if matches!(args.first().map(|s| s.as_str()), Some("--help" | "-h" | "help")) {
+    if matches!(
+        args.first().map(|s| s.as_str()),
+        Some("--help" | "-h" | "help")
+    ) {
         return Ok(CliAction::Command {
             command: CliCommand::Help,
             format: OutputFormat::Text,
             profile: None,
         });
     }
-    if matches!(args.first().map(|s| s.as_str()), Some("--version" | "-V" | "version")) {
+    if matches!(
+        args.first().map(|s| s.as_str()),
+        Some("--version" | "-V" | "version")
+    ) {
         return Ok(CliAction::Command {
             command: CliCommand::Version,
             format: OutputFormat::Text,
@@ -193,14 +204,17 @@ fn parse_subcommand(tokens: &[String], global: &GlobalOptions) -> Result<Option<
             profile: global.profile.clone(),
         })),
         "deps" => {
-            let sub = tokens.get(1).map(|value| value.as_str()).unwrap_or("missing");
+            let sub = tokens
+                .get(1)
+                .map(|value| value.as_str())
+                .unwrap_or("missing");
             let command = match sub {
                 "list" => CliCommand::DepsList,
                 "missing" => CliCommand::DepsMissing,
                 "debug" => {
-                    let query = tokens.get(2).ok_or_else(|| {
-                        anyhow::anyhow!("deps debug requires a mod id or name")
-                    })?;
+                    let query = tokens
+                        .get(2)
+                        .ok_or_else(|| anyhow::anyhow!("deps debug requires a mod id or name"))?;
                     CliCommand::DepsDebug(query.to_string())
                 }
                 _ => {
@@ -209,6 +223,26 @@ fn parse_subcommand(tokens: &[String], global: &GlobalOptions) -> Result<Option<
             };
             Ok(Some(CliAction::Command {
                 command,
+                format: global.format,
+                profile: global.profile.clone(),
+            }))
+        }
+        "debug" => {
+            if !cfg!(debug_assertions) {
+                bail!("Debug commands require a debug build");
+            }
+            let sub = tokens
+                .get(1)
+                .map(|value| value.as_str())
+                .unwrap_or("smart-rank");
+            let command = match sub {
+                "smart-rank" | "smart_rank" | "smart" => DebugCommand::SmartRank,
+                _ => {
+                    bail!("Unknown debug command: {sub} (use 'smart-rank')");
+                }
+            };
+            Ok(Some(CliAction::Command {
+                command: CliCommand::Debug(command),
                 format: global.format,
                 profile: global.profile.clone(),
             }))
@@ -370,6 +404,9 @@ fn run_command(
             list_missing_dependencies(app, profile, format)
         }
         CliCommand::DepsDebug(query) => debug_dependencies(app, &query),
+        CliCommand::Debug(command) => match command {
+            DebugCommand::SmartRank => debug_smart_rank(app),
+        },
         CliCommand::Paths => list_paths(app, format),
         CliCommand::Help | CliCommand::Version => Ok(()),
     }
@@ -416,10 +453,7 @@ fn list_mods(
         .mods
         .iter()
         .map(|mod_entry| {
-            let (order, enabled) = order_map
-                .get(&mod_entry.id)
-                .copied()
-                .unwrap_or((0, false));
+            let (order, enabled) = order_map.get(&mod_entry.id).copied().unwrap_or((0, false));
             ModListItem {
                 id: mod_entry.id.clone(),
                 name: mod_entry.name.clone(),
@@ -664,11 +698,18 @@ fn debug_dependencies(app: &App, query: &str) -> Result<()> {
     Ok(())
 }
 
-fn collect_dependencies(
-    app: &App,
-    mod_entry: &ModEntry,
-    paths: Option<&GamePaths>,
-) -> Vec<String> {
+#[cfg(debug_assertions)]
+fn debug_smart_rank(app: &App) -> Result<()> {
+    println!("{}", app.debug_smart_rank_report());
+    Ok(())
+}
+
+#[cfg(not(debug_assertions))]
+fn debug_smart_rank(_app: &App) -> Result<()> {
+    bail!("Debug commands require a debug build");
+}
+
+fn collect_dependencies(app: &App, mod_entry: &ModEntry, paths: Option<&GamePaths>) -> Vec<String> {
     let mut out = Vec::new();
     let mod_root = library_mod_root(&app.config.data_dir).join(&mod_entry.id);
     let base_dir = if mod_entry.is_native() {
@@ -796,6 +837,7 @@ fn print_help() {
     println!("  sigilsmith deps list            List dependencies for installed mods");
     println!("  sigilsmith deps missing         List missing dependencies");
     println!("  sigilsmith deps debug <mod>     Show dependency matching details");
+    println!("  sigilsmith debug smart-rank     Debug smart rank cache (debug builds)");
     println!("  sigilsmith paths                Show detected paths");
     println!("  sigilsmith --import <paths...>  Import mods without the TUI");
     println!();

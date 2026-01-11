@@ -62,6 +62,7 @@ struct Theme {
     overlay_panel_bg: Color,
     overlay_border: Color,
     overlay_bar: Color,
+    overlay_scrim: Color,
 }
 
 impl Theme {
@@ -85,6 +86,7 @@ impl Theme {
             overlay_panel_bg: Color::Rgb(12, 20, 32),
             overlay_border: Color::Rgb(90, 140, 190),
             overlay_bar: Color::Rgb(120, 198, 255),
+            overlay_scrim: Color::Rgb(10, 14, 22),
         }
     }
 
@@ -247,6 +249,36 @@ fn handle_dialog_mode(app: &mut App, key: KeyEvent) -> Result<()> {
         KeyCode::Right | KeyCode::Char('l') | KeyCode::Char('L') | KeyCode::Tab => {
             app.dialog_choice_right();
         }
+        KeyCode::Up | KeyCode::Char('k') | KeyCode::Char('K') => {
+            if let Some(dialog) = &mut app.dialog {
+                dialog.scroll = dialog.scroll.saturating_sub(1);
+            }
+        }
+        KeyCode::Down | KeyCode::Char('j') | KeyCode::Char('J') => {
+            if let Some(dialog) = &mut app.dialog {
+                dialog.scroll = dialog.scroll.saturating_add(1);
+            }
+        }
+        KeyCode::PageUp => {
+            if let Some(dialog) = &mut app.dialog {
+                dialog.scroll = dialog.scroll.saturating_sub(6);
+            }
+        }
+        KeyCode::PageDown => {
+            if let Some(dialog) = &mut app.dialog {
+                dialog.scroll = dialog.scroll.saturating_add(6);
+            }
+        }
+        KeyCode::Home => {
+            if let Some(dialog) = &mut app.dialog {
+                dialog.scroll = 0;
+            }
+        }
+        KeyCode::End => {
+            if let Some(dialog) = &mut app.dialog {
+                dialog.scroll = usize::MAX;
+            }
+        }
         KeyCode::Char('y') | KeyCode::Char('Y') => {
             app.dialog_set_choice(DialogChoice::Yes);
         }
@@ -341,6 +373,10 @@ fn handle_dependency_queue(app: &mut App, key: KeyEvent) -> Result<()> {
     match key.code {
         KeyCode::Up | KeyCode::Char('k') | KeyCode::Char('K') => app.dependency_queue_move(-1),
         KeyCode::Down | KeyCode::Char('j') | KeyCode::Char('J') => app.dependency_queue_move(1),
+        KeyCode::PageUp => app.dependency_queue_move(-6),
+        KeyCode::PageDown => app.dependency_queue_move(6),
+        KeyCode::Home => app.dependency_queue_home(),
+        KeyCode::End => app.dependency_queue_end(),
         KeyCode::Enter => app.dependency_queue_open_selected(),
         KeyCode::Char('i') | KeyCode::Char('I') => {
             app.dependency_queue_ignore();
@@ -2540,8 +2576,8 @@ fn conflict_line_width(app: &App, _theme: &Theme, width: usize) -> u16 {
     full_len.min(width) as u16
 }
 
-fn draw_dialog(frame: &mut Frame<'_>, app: &App, theme: &Theme) {
-    let Some(dialog) = &app.dialog else {
+fn draw_dialog(frame: &mut Frame<'_>, app: &mut App, theme: &Theme) {
+    let Some(dialog) = &mut app.dialog else {
         return;
     };
 
@@ -2573,33 +2609,38 @@ fn draw_dialog(frame: &mut Frame<'_>, app: &App, theme: &Theme) {
         Span::styled(format!(" {} ", dialog.no_label), no_style),
     ]);
 
-    let mut lines = Vec::new();
-    lines.push(Line::from(Span::styled(
-        dialog.title.clone(),
-        Style::default()
-            .fg(theme.accent)
-            .add_modifier(Modifier::BOLD),
-    )));
-    lines.push(Line::from(""));
-    lines.extend(message_lines);
+    let header_lines = vec![
+        Line::from(Span::styled(
+            dialog.title.clone(),
+            Style::default()
+                .fg(theme.accent)
+                .add_modifier(Modifier::BOLD),
+        )),
+        Line::from(""),
+    ];
+    let mut footer_lines = Vec::new();
     if let Some(toggle) = &dialog.toggle {
         let marker = if toggle.checked { "[x]" } else { "[ ]" };
-        lines.push(Line::from(""));
-        lines.push(Line::from(vec![
+        footer_lines.push(Line::from(""));
+        footer_lines.push(Line::from(vec![
             Span::styled(marker, Style::default().fg(theme.accent)),
             Span::raw(" "),
             Span::styled(toggle.label.clone(), Style::default().fg(theme.text)),
         ]));
-        lines.push(Line::from(Span::styled(
+        footer_lines.push(Line::from(Span::styled(
             "Press D to toggle",
             Style::default().fg(theme.muted),
         )));
     }
-    lines.push(Line::from(""));
-    lines.push(buttons);
+    footer_lines.push(Line::from(""));
+    footer_lines.push(buttons);
 
     let mut max_line = 0usize;
-    for line in &lines {
+    for line in header_lines
+        .iter()
+        .chain(message_lines.iter())
+        .chain(footer_lines.iter())
+    {
         let width = line.to_string().chars().count();
         if width > max_line {
             max_line = width;
@@ -2607,7 +2648,11 @@ fn draw_dialog(frame: &mut Frame<'_>, app: &App, theme: &Theme) {
     }
     let max_width = area.width.saturating_sub(2).max(1);
     let width = (max_line as u16 + 6).clamp(38, max_width.min(72));
-    let content_height = lines.len().max(1) as u16;
+    let content_height = header_lines
+        .len()
+        .saturating_add(message_lines.len())
+        .saturating_add(footer_lines.len())
+        .max(1) as u16;
     let mut height = content_height + 2;
     if height < 8 {
         height = 8;
@@ -2622,11 +2667,70 @@ fn draw_dialog(frame: &mut Frame<'_>, app: &App, theme: &Theme) {
         .border_type(BorderType::Rounded)
         .border_style(Style::default().fg(theme.accent_soft))
         .style(Style::default().bg(theme.header_bg));
-    let dialog_widget = Paragraph::new(lines)
-        .block(dialog_block)
-        .style(Style::default().fg(theme.text))
+    let inner = dialog_block.inner(dialog_area);
+    frame.render_widget(dialog_block, dialog_area);
+
+    let header_height = header_lines.len() as u16;
+    let footer_height = footer_lines.len() as u16;
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(header_height),
+            Constraint::Min(1),
+            Constraint::Length(footer_height),
+        ])
+        .split(inner);
+
+    let header_widget = Paragraph::new(header_lines)
+        .style(Style::default().fg(theme.text).bg(theme.header_bg))
         .alignment(Alignment::Center);
-    frame.render_widget(dialog_widget, dialog_area);
+    frame.render_widget(header_widget, chunks[0]);
+
+    let body_area = chunks[1];
+    let body_height = body_area.height.max(1) as usize;
+    let max_scroll = message_lines.len().saturating_sub(body_height);
+    if dialog.scroll > max_scroll {
+        dialog.scroll = max_scroll;
+    }
+
+    let show_scroll = max_scroll > 0 && body_area.width > 4;
+    let body_chunks = if show_scroll {
+        Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Min(1), Constraint::Length(1)])
+            .split(body_area)
+    } else {
+        Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Min(1), Constraint::Length(0)])
+            .split(body_area)
+    };
+
+    let body_widget = Paragraph::new(message_lines)
+        .scroll((dialog.scroll as u16, 0))
+        .style(Style::default().fg(theme.text).bg(theme.header_bg))
+        .alignment(Alignment::Center);
+    frame.render_widget(body_widget, body_chunks[0]);
+
+    if show_scroll && body_chunks[1].width > 0 {
+        let scroll_len = max_scroll.saturating_add(1);
+        let mut scroll_state = ScrollbarState::new(scroll_len)
+            .position(dialog.scroll)
+            .viewport_content_length(body_height);
+        let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
+            .track_symbol(Some("░"))
+            .thumb_symbol("▓")
+            .begin_symbol(Some("▲"))
+            .end_symbol(Some("▼"))
+            .track_style(Style::default().fg(theme.border))
+            .thumb_style(Style::default().fg(theme.accent));
+        frame.render_stateful_widget(scrollbar, body_chunks[1], &mut scroll_state);
+    }
+
+    let footer_widget = Paragraph::new(footer_lines)
+        .style(Style::default().fg(theme.text).bg(theme.header_bg))
+        .alignment(Alignment::Center);
+    frame.render_widget(footer_widget, chunks[2]);
 }
 
 fn build_dialog_message_lines(dialog: &crate::app::Dialog, theme: &Theme) -> Vec<Line<'static>> {
@@ -2764,7 +2868,7 @@ fn padded_modal(area: Rect, width: u16, height: u16, pad: u16) -> (Rect, Rect) {
 fn render_modal_backdrop(frame: &mut Frame<'_>, area: Rect, theme: &Theme) {
     frame.render_widget(Clear, area);
     frame.render_widget(
-        Block::default().style(Style::default().bg(theme.header_bg)),
+        Block::default().style(Style::default().bg(theme.overlay_scrim)),
         area,
     );
 }
@@ -2996,18 +3100,20 @@ fn draw_dependency_queue(frame: &mut Frame<'_>, app: &App, theme: &Theme) {
         ])
         .split(inner);
 
-    let header_widget = Paragraph::new(header_lines)
-        .style(Style::default().bg(theme.overlay_panel_bg));
+    let header_widget =
+        Paragraph::new(header_lines).style(Style::default().bg(theme.overlay_panel_bg));
     frame.render_widget(header_widget, chunks[0]);
 
     let list_area = chunks[1];
     let list_width = list_area.width as usize;
     let mut items = Vec::new();
-    for item in &queue.items {
+    for (index, item) in queue.items.iter().enumerate() {
         let status_label = dependency_status_label(item.status);
         let status_text = format!("{status_label:<9}");
         let status_style = dependency_status_style(theme, item.status);
-        let label_width = list_width.saturating_sub(status_text.chars().count() + 1);
+        let index_label = format!("{:>2}. ", index + 1);
+        let label_width = list_width
+            .saturating_sub(status_text.chars().count() + 1 + index_label.chars().count());
         let label_value = if item.display_label.trim().is_empty() {
             item.label.clone()
         } else {
@@ -3017,6 +3123,7 @@ fn draw_dependency_queue(frame: &mut Frame<'_>, app: &App, theme: &Theme) {
         let label_line = Line::from(vec![
             Span::styled(status_text, status_style),
             Span::raw(" "),
+            Span::styled(index_label, Style::default().fg(theme.muted)),
             Span::styled(label_text, Style::default().fg(theme.text)),
         ]);
         let uuid_text = item
@@ -3096,8 +3203,9 @@ fn draw_dependency_queue(frame: &mut Frame<'_>, app: &App, theme: &Theme) {
 
     if show_scroll && list_chunks[1].width > 0 {
         let scroll_len = total_items.saturating_sub(view_items).saturating_add(1);
-        let mut scroll_state =
-            ScrollbarState::new(scroll_len).position(offset).viewport_content_length(view_items);
+        let mut scroll_state = ScrollbarState::new(scroll_len)
+            .position(offset)
+            .viewport_content_length(view_items);
         let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
             .track_symbol(Some("░"))
             .thumb_symbol("▓")
@@ -3115,6 +3223,8 @@ fn draw_dependency_queue(frame: &mut Frame<'_>, app: &App, theme: &Theme) {
     let footer_line_one = Line::from(vec![
         Span::styled("↑/↓", key_style),
         Span::styled(" Move  ", text_style),
+        Span::styled("PgUp/PgDn", key_style),
+        Span::styled(" Jump  ", text_style),
         Span::styled("[Enter]", key_style),
         Span::styled(" Open link/search  ", text_style),
         Span::styled("[C]", key_style),
@@ -4122,11 +4232,8 @@ fn draw_import_overlay(frame: &mut Frame<'_>, app: &App, theme: &Theme) {
         panel_area.width.saturating_sub(4),
         panel_area.height.saturating_sub(2),
     );
-    let chunks = Layout::vertical([
-        Constraint::Length(text_height),
-        Constraint::Length(1),
-    ])
-    .split(inner);
+    let chunks =
+        Layout::vertical([Constraint::Length(text_height), Constraint::Length(1)]).split(inner);
 
     let paragraph = Paragraph::new(lines)
         .style(Style::default().fg(theme.text))
@@ -5729,6 +5836,23 @@ fn help_sections() -> Vec<HelpSection> {
                 LegendRow {
                     key: "Home/End".to_string(),
                     action: "Top/Bottom".to_string(),
+                },
+            ],
+        },
+        HelpSection {
+            title: "Smart Ranking",
+            rows: vec![
+                LegendRow {
+                    key: "What".to_string(),
+                    action: "Scans enabled pak/loose files to find conflicts.".to_string(),
+                },
+                LegendRow {
+                    key: "Order".to_string(),
+                    action: "Respects dependencies, then patch tags/size/date.".to_string(),
+                },
+                LegendRow {
+                    key: "Source".to_string(),
+                    action: "Uses current profile order as the baseline.".to_string(),
                 },
             ],
         },

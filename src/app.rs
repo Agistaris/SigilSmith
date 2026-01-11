@@ -134,7 +134,9 @@ pub enum DialogKind {
     },
     CancelImport,
     ImportSummary,
-    CopyDependencySearchLink { link: String },
+    CopyDependencySearchLink {
+        link: String,
+    },
     StartupDependencyNotice,
 }
 
@@ -147,6 +149,7 @@ pub struct Dialog {
     pub choice: DialogChoice,
     pub kind: DialogKind,
     pub toggle: Option<DialogToggle>,
+    pub scroll: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1142,8 +1145,7 @@ impl App {
     }
 
     pub fn toggle_dependency_downloads(&mut self) -> Result<()> {
-        self.app_config.offer_dependency_downloads =
-            !self.app_config.offer_dependency_downloads;
+        self.app_config.offer_dependency_downloads = !self.app_config.offer_dependency_downloads;
         self.app_config.save()?;
         let state = if self.app_config.offer_dependency_downloads {
             "enabled"
@@ -1155,8 +1157,7 @@ impl App {
     }
 
     pub fn toggle_dependency_warnings(&mut self) -> Result<()> {
-        self.app_config.warn_missing_dependencies =
-            !self.app_config.warn_missing_dependencies;
+        self.app_config.warn_missing_dependencies = !self.app_config.warn_missing_dependencies;
         self.app_config.save()?;
         let state = if self.app_config.warn_missing_dependencies {
             "enabled"
@@ -1233,7 +1234,12 @@ impl App {
             if !entry.enabled {
                 continue;
             }
-            let Some(mod_entry) = self.library.mods.iter().find(|mod_entry| mod_entry.id == entry.id) else {
+            let Some(mod_entry) = self
+                .library
+                .mods
+                .iter()
+                .find(|mod_entry| mod_entry.id == entry.id)
+            else {
                 continue;
             };
             let missing = self.missing_dependency_count_for_mod(mod_entry, &lookup);
@@ -1249,9 +1255,7 @@ impl App {
         if changed == 0 {
             return;
         }
-        self.status = format!(
-            "Startup: disabled {changed} mod(s) missing dependencies"
-        );
+        self.status = format!("Startup: disabled {changed} mod(s) missing dependencies");
         self.log_warn(format!(
             "Startup: disabled {changed} mod(s) missing dependencies"
         ));
@@ -1268,23 +1272,20 @@ impl App {
         }
         let total = disabled.len();
         let mut lines = Vec::new();
-        lines.push(format!(
-            "Disabled {total} mod(s) missing dependencies."
-        ));
-        for name in disabled.iter().take(6) {
-            lines.push(format!("- {name}"));
-        }
-        if total > 6 {
-            lines.push(format!("...and {} more", total - 6));
+        lines.push(format!("Disabled {total} mod(s) missing dependencies."));
+        lines.push(String::new());
+        for (index, name) in disabled.iter().enumerate() {
+            lines.push(format!("{}. {name}", index + 1));
         }
         self.open_dialog(Dialog {
             title: "Dependencies missing".to_string(),
             message: lines.join("\n"),
             yes_label: "OK".to_string(),
-            no_label: "Close".to_string(),
+            no_label: "Hide next time".to_string(),
             choice: DialogChoice::Yes,
             kind: DialogKind::StartupDependencyNotice,
             toggle: None,
+            scroll: 0,
         });
     }
 
@@ -2063,6 +2064,7 @@ impl App {
                 label: "Don't ask again for this action?".to_string(),
                 checked: false,
             }),
+            scroll: 0,
         });
     }
 
@@ -2086,11 +2088,7 @@ impl App {
                 message.push('\n');
             }
             message.push_str("This will delete the local mod file from the Larian Mods folder.");
-            (
-                "Remove Native Mod".to_string(),
-                "Remove".to_string(),
-                None,
-            )
+            ("Remove Native Mod".to_string(), "Remove".to_string(), None)
         } else {
             (
                 "Remove Mod".to_string(),
@@ -2114,6 +2112,7 @@ impl App {
                 dependents,
             },
             toggle,
+            scroll: 0,
         });
     }
 
@@ -2217,6 +2216,7 @@ impl App {
                 clear_filter,
             },
             toggle: None,
+            scroll: 0,
         });
     }
 
@@ -2228,13 +2228,14 @@ impl App {
             title: "Cancel Import".to_string(),
             message: "Cancel this import and return to the main view?".to_string(),
             yes_label: "Continue import".to_string(),
-            no_label: "Cancel".to_string(),
+            no_label: "Cancel import".to_string(),
             choice: DialogChoice::No,
             kind: DialogKind::CancelImport,
             toggle: Some(DialogToggle {
                 label: "Remember import choice".to_string(),
                 checked: false,
             }),
+            scroll: 0,
         });
     }
 
@@ -2915,6 +2916,20 @@ impl App {
         queue.selected = next as usize;
     }
 
+    pub fn dependency_queue_home(&mut self) {
+        if let Some(queue) = &mut self.dependency_queue {
+            queue.selected = 0;
+        }
+    }
+
+    pub fn dependency_queue_end(&mut self) {
+        if let Some(queue) = &mut self.dependency_queue {
+            if !queue.items.is_empty() {
+                queue.selected = queue.items.len() - 1;
+            }
+        }
+    }
+
     pub fn dependency_queue_ignore(&mut self) {
         let Some(item) = self.dependency_queue_selected_mut() else {
             return;
@@ -2942,10 +2957,13 @@ impl App {
     }
 
     pub fn dependency_queue_open_selected(&mut self) {
-        let Some((link, search, label)) = self
-            .dependency_queue_selected()
-            .map(|item| (item.link.clone(), item.search_link.clone(), item.search_label.clone()))
-        else {
+        let Some((link, search, label)) = self.dependency_queue_selected().map(|item| {
+            (
+                item.link.clone(),
+                item.search_link.clone(),
+                item.search_label.clone(),
+            )
+        }) else {
             return;
         };
         if let Some(link) = link {
@@ -2960,7 +2978,11 @@ impl App {
             return;
         }
         self.status = "No links available".to_string();
-        self.set_toast("No links available", ToastLevel::Warn, Duration::from_secs(2));
+        self.set_toast(
+            "No links available",
+            ToastLevel::Warn,
+            Duration::from_secs(2),
+        );
     }
 
     pub fn dependency_queue_copy_selected(&mut self) {
@@ -3031,6 +3053,7 @@ impl App {
                         label: "Remember my choice".to_string(),
                         checked: false,
                     }),
+                    scroll: 0,
                 });
             }
         }
@@ -3294,15 +3317,15 @@ impl App {
         self.app_config.save()?;
         self.status = "Downloads folder set".to_string();
         self.log_info(format!("Downloads dir set: {}", path.display()));
-        self.set_toast("Downloads folder updated", ToastLevel::Info, Duration::from_secs(2));
+        self.set_toast(
+            "Downloads folder updated",
+            ToastLevel::Info,
+            Duration::from_secs(2),
+        );
         Ok(())
     }
 
-    pub fn import_mods_cli(
-        &mut self,
-        paths: Vec<String>,
-        options: CliImportOptions,
-    ) -> Result<()> {
+    pub fn import_mods_cli(&mut self, paths: Vec<String>, options: CliImportOptions) -> Result<()> {
         let mut total_imported = 0usize;
         let mut failures: Vec<importer::ImportFailure> = Vec::new();
 
@@ -3325,8 +3348,10 @@ impl App {
                 println!("Importing: {}", path.display());
             }
 
-            let printer = if matches!(options.verbosity, CliVerbosity::Verbose | CliVerbosity::Debug)
-            {
+            let printer = if matches!(
+                options.verbosity,
+                CliVerbosity::Verbose | CliVerbosity::Debug
+            ) {
                 Some(Arc::new(Mutex::new(CliProgressPrinter::new(
                     options.verbosity,
                 ))))
@@ -3335,37 +3360,36 @@ impl App {
             };
             let progress: Option<importer::ProgressCallback> = printer.as_ref().map(|printer| {
                 let printer = Arc::clone(printer);
-                let callback: importer::ProgressCallback = Arc::new(
-                    move |progress: importer::ImportProgress| {
+                let callback: importer::ProgressCallback =
+                    Arc::new(move |progress: importer::ImportProgress| {
                         if let Ok(mut printer) = printer.lock() {
                             printer.handle(&progress);
                         }
-                    },
-                );
+                    });
                 callback
             });
 
             let start = Instant::now();
-            let imports = match importer::import_path_with_progress(
-                &path,
-                &self.config.data_dir,
-                progress,
-            )
-            .with_context(|| format!("import {path:?}"))
-            {
-                Ok(imports) => imports,
-                Err(err) => {
-                    let label = path.display().to_string();
-                    if options.verbosity != CliVerbosity::Quiet {
-                        eprintln!("Import failed: {label} ({})", summarize_error(&err.to_string()));
+            let imports =
+                match importer::import_path_with_progress(&path, &self.config.data_dir, progress)
+                    .with_context(|| format!("import {path:?}"))
+                {
+                    Ok(imports) => imports,
+                    Err(err) => {
+                        let label = path.display().to_string();
+                        if options.verbosity != CliVerbosity::Quiet {
+                            eprintln!(
+                                "Import failed: {label} ({})",
+                                summarize_error(&err.to_string())
+                            );
+                        }
+                        failures.push(importer::ImportFailure {
+                            source: importer::ImportSource { label },
+                            error: err.to_string(),
+                        });
+                        continue;
                     }
-                    failures.push(importer::ImportFailure {
-                        source: importer::ImportSource { label },
-                        error: err.to_string(),
-                    });
-                    continue;
-                }
-            };
+                };
 
             if imports.unrecognized && imports.batches.is_empty() {
                 let label = path.display().to_string();
@@ -3381,7 +3405,10 @@ impl App {
 
             for failure in &imports.failures {
                 failures.push(failure.clone());
-                if matches!(options.verbosity, CliVerbosity::Verbose | CliVerbosity::Debug) {
+                if matches!(
+                    options.verbosity,
+                    CliVerbosity::Verbose | CliVerbosity::Debug
+                ) {
                     eprintln!(
                         "Import failed: {} ({})",
                         failure.source.label,
@@ -3393,14 +3420,16 @@ impl App {
             let mut path_imported = 0usize;
             for batch in imports.batches {
                 let source_label = batch.source.label.clone();
-                if matches!(options.verbosity, CliVerbosity::Verbose | CliVerbosity::Debug) {
+                if matches!(
+                    options.verbosity,
+                    CliVerbosity::Verbose | CliVerbosity::Debug
+                ) {
                     println!("  Source: {}", source_label);
                 }
                 let mut approved = Vec::new();
                 for mod_entry in batch.mods {
                     if let Some(existing) = self.find_duplicate_by_name(&mod_entry.name).cloned() {
-                        let default_overwrite =
-                            duplicate_default_overwrite(&mod_entry, &existing);
+                        let default_overwrite = duplicate_default_overwrite(&mod_entry, &existing);
                         let overwrite = if let Some(choice) = apply_all {
                             choice
                         } else {
@@ -3855,10 +3884,8 @@ impl App {
                         let label = progress.stage.label();
                         self.native_sync_progress = Some(progress.clone());
                         if progress.total > 0 {
-                            self.status = format!(
-                                "{label}: {}/{}",
-                                progress.current, progress.total
-                            );
+                            self.status =
+                                format!("{label}: {}/{}", progress.current, progress.total);
                         } else {
                             self.status = format!("{label}: working...");
                         }
@@ -4199,9 +4226,7 @@ impl App {
             return;
         }
         if delta.is_negative() {
-            self.selected = self
-                .selected
-                .saturating_sub(delta.wrapping_abs() as usize);
+            self.selected = self.selected.saturating_sub(delta.wrapping_abs() as usize);
         } else {
             self.selected = self.selected.saturating_add(delta as usize);
         }
@@ -4391,8 +4416,7 @@ impl App {
                 self.status = format!("Imported {} mod(s)", count);
                 self.log_info(format!(
                     "Import complete: {} mod(s) from {}",
-                    count,
-                    source.label
+                    count, source.label
                 ));
                 self.process_next_import_batch();
             }
@@ -4400,10 +4424,7 @@ impl App {
                 let display = source.label.clone();
                 let reason = summarize_error(&err.to_string());
                 self.status = format!("Import failed: {display} ({reason})");
-                self.log_error(format!(
-                    "Import apply failed for {}: {err}",
-                    source.label
-                ));
+                self.log_error(format!("Import apply failed for {}: {err}", source.label));
                 self.set_toast(
                     &format!("Import failed: {display} ({reason})"),
                     ToastLevel::Error,
@@ -4770,6 +4791,38 @@ impl App {
         lines.join("\n")
     }
 
+    #[cfg(debug_assertions)]
+    pub fn debug_smart_rank_report(&self) -> String {
+        let current = self.smart_rank_fingerprint();
+        let cache_path = self.smart_rank_cache_path();
+        let cache_fingerprint = self
+            .smart_rank_cache
+            .as_ref()
+            .map(|cache| cache.fingerprint.clone());
+        let mut lines = Vec::new();
+        lines.push(format!("Smart rank cache path: {}", cache_path.display()));
+        lines.push(format!(
+            "Cache loaded: {}",
+            if cache_fingerprint.is_some() {
+                "yes"
+            } else {
+                "no"
+            }
+        ));
+        if let Some(cache_fingerprint) = cache_fingerprint {
+            lines.push(format!("Cache fingerprint: {}", cache_fingerprint));
+        }
+        lines.push(format!("Current fingerprint: {}", current));
+        lines.push(format!(
+            "Fingerprint match: {}",
+            self.smart_rank_cache
+                .as_ref()
+                .map(|cache| cache.fingerprint == current)
+                .unwrap_or(false)
+        ));
+        lines.join("\n")
+    }
+
     fn update_dependency_cache_for_entries(&mut self, entries: &[ModEntry]) {
         for mod_entry in entries {
             let deps = self.collect_mod_dependencies(mod_entry);
@@ -4892,6 +4945,7 @@ impl App {
             choice: DialogChoice::Yes,
             kind: DialogKind::ImportSummary,
             toggle: None,
+            scroll: 0,
         });
     }
 
@@ -5030,6 +5084,7 @@ impl App {
                 label: "Apply this choice to all remaining duplicates".to_string(),
                 checked: false,
             }),
+            scroll: 0,
         });
     }
 
@@ -5091,10 +5146,12 @@ impl App {
             choice: DialogChoice::No,
             kind: DialogKind::Unrecognized { path, label },
             toggle: None,
+            scroll: 0,
         });
     }
 
-    fn open_dialog(&mut self, dialog: Dialog) {
+    fn open_dialog(&mut self, mut dialog: Dialog) {
+        dialog.scroll = 0;
         self.dialog = Some(dialog);
         self.move_mode = false;
         self.input_mode = InputMode::Normal;
@@ -5242,7 +5299,13 @@ impl App {
                     self.status = "Search link skipped".to_string();
                 }
             }
-            DialogKind::StartupDependencyNotice => {}
+            DialogKind::StartupDependencyNotice => {
+                if matches!(choice, DialogChoice::No) {
+                    self.app_config.show_startup_dependency_notice = false;
+                    let _ = self.app_config.save();
+                    self.status = "Startup dependency notice hidden".to_string();
+                }
+            }
             DialogKind::ImportSummary => {}
         }
     }
@@ -5441,11 +5504,7 @@ impl App {
             else {
                 continue;
             };
-            let managed_root = self
-                .config
-                .data_dir
-                .join("mods")
-                .join(&update.id);
+            let managed_root = self.config.data_dir.join("mods").join(&update.id);
             if update.source == ModSource::Native && managed_root.exists() {
                 if entry.source != ModSource::Managed {
                     entry.source = ModSource::Managed;
@@ -5818,7 +5877,9 @@ impl App {
         missing.dedup();
 
         if !missing.is_empty() {
-            if !self.app_config.offer_dependency_downloads && !self.app_config.warn_missing_dependencies {
+            if !self.app_config.offer_dependency_downloads
+                && !self.app_config.warn_missing_dependencies
+            {
                 self.status = "Missing dependencies; enable blocked".to_string();
                 self.log_warn("Missing dependencies; enable blocked".to_string());
                 return;
@@ -5928,8 +5989,7 @@ impl App {
 
         self.status = "Mod removed from library".to_string();
         self.log_info("Mod removed from library".to_string());
-        let dependent_ids: Vec<String> =
-            dependents.iter().map(|item| item.id.clone()).collect();
+        let dependent_ids: Vec<String> = dependents.iter().map(|item| item.id.clone()).collect();
         let disabled = self.disable_mods_by_id(&dependent_ids);
         if disabled > 0 {
             self.status = format!("Disabled {disabled} dependent mod(s)");
@@ -6920,7 +6980,9 @@ fn dependency_display_label(value: &str) -> String {
         .split_whitespace()
         .collect::<Vec<_>>()
         .join(" ");
-    let cleaned = cleaned.trim_matches(|ch: char| ch == '.' || ch == '_').to_string();
+    let cleaned = cleaned
+        .trim_matches(|ch: char| ch == '.' || ch == '_')
+        .to_string();
     if cleaned.is_empty() {
         "Unknown dependency".to_string()
     } else {
@@ -7233,7 +7295,9 @@ fn parse_number(bytes: &[u8], mut index: usize) -> Option<(u64, usize)> {
     }
     let mut value = 0u64;
     while index < bytes.len() && bytes[index].is_ascii_digit() {
-        value = value.saturating_mul(10).saturating_add((bytes[index] - b'0') as u64);
+        value = value
+            .saturating_mul(10)
+            .saturating_add((bytes[index] - b'0') as u64);
         index += 1;
     }
     Some((value, index))
@@ -7528,8 +7592,8 @@ fn sync_native_mods_delta(
     let modsettings_exists = paths.modsettings_path.exists();
     let native_pak_index = native_pak::build_native_pak_index(&paths.larian_mods_dir);
 
-    let snapshot =
-        deploy::read_modsettings_snapshot(&paths.modsettings_path).map_err(|err| err.to_string())?;
+    let snapshot = deploy::read_modsettings_snapshot(&paths.modsettings_path)
+        .map_err(|err| err.to_string())?;
     let deploy::ModSettingsSnapshot { modules, order } = snapshot;
     let modules_set: HashSet<String> = modules
         .iter()
@@ -7546,11 +7610,8 @@ fn sync_native_mods_delta(
         .map(|module| (module.info.uuid.clone(), module.created_at))
         .collect();
 
-    let mut existing_ids: HashSet<String> = library
-        .mods
-        .iter()
-        .map(|entry| entry.id.clone())
-        .collect();
+    let mut existing_ids: HashSet<String> =
+        library.mods.iter().map(|entry| entry.id.clone()).collect();
     let mut modules_by_uuid: HashMap<String, deploy::ModSettingsModule> = modules
         .into_iter()
         .map(|module| (module.info.uuid.clone(), module))
