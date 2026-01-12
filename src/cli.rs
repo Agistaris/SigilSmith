@@ -65,6 +65,7 @@ enum DebugCommand {
     SmartRankWarmupBlock,
     SmartRankRestartCheck,
     SmartRankWarmupFlow,
+    SmartRankZipFlow,
 }
 
 struct ModsListOptions {
@@ -267,9 +268,10 @@ fn parse_subcommand(tokens: &[String], global: &GlobalOptions) -> Result<Option<
                 "warmup-flow" | "warmup_flow" | "warmup-edits" => {
                     DebugCommand::SmartRankWarmupFlow
                 }
+                "zip-flow" | "zip_flow" | "import-flow" => DebugCommand::SmartRankZipFlow,
                 _ => {
                     bail!(
-                        "Unknown debug command: {sub} (use 'smart-rank', 'warmup', 'cache', 'cache-validate', 'cache-sim', 'scenario', 'warmup-block', 'restart-check', or 'warmup-flow')"
+                        "Unknown debug command: {sub} (use 'smart-rank', 'warmup', 'cache', 'cache-validate', 'cache-sim', 'scenario', 'warmup-block', 'restart-check', 'warmup-flow', or 'zip-flow')"
                     );
                 }
             };
@@ -446,6 +448,7 @@ fn run_command(
             DebugCommand::SmartRankWarmupBlock => debug_smart_rank_warmup_block(app),
             DebugCommand::SmartRankRestartCheck => debug_smart_rank_restart_check(app),
             DebugCommand::SmartRankWarmupFlow => debug_smart_rank_warmup_flow(app),
+            DebugCommand::SmartRankZipFlow => debug_smart_rank_zip_flow(app),
         },
         CliCommand::Paths => list_paths(app, format),
         CliCommand::Help | CliCommand::Version => Ok(()),
@@ -806,6 +809,17 @@ fn debug_smart_rank_warmup_flow(_app: &mut App) -> Result<()> {
 }
 
 #[cfg(debug_assertions)]
+fn debug_smart_rank_zip_flow(app: &mut App) -> Result<()> {
+    println!("{}", app.debug_smart_rank_zip_flow());
+    Ok(())
+}
+
+#[cfg(not(debug_assertions))]
+fn debug_smart_rank_zip_flow(_app: &mut App) -> Result<()> {
+    bail!("Debug commands require a debug build");
+}
+
+#[cfg(debug_assertions)]
 fn debug_smart_rank_restart_check(app: &App) -> Result<()> {
     println!("{}", app.debug_smart_rank_restart_check());
     Ok(())
@@ -975,6 +989,7 @@ fn print_help() {
     println!("  sigilsmith debug warmup-block   Report warmup edit gating (debug builds)");
     println!("  sigilsmith debug restart-check  Validate cache hit on restart (debug builds)");
     println!("  sigilsmith debug warmup-flow    Run warmup + edits flow (debug builds)");
+    println!("  sigilsmith debug zip-flow       Import real zips in temp dir (debug builds)");
     println!("  sigilsmith paths                Show detected paths");
     println!("  sigilsmith --import <paths...>  Import mods without the TUI");
     println!();

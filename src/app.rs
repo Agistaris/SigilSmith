@@ -1484,7 +1484,7 @@ impl App {
             };
             let key = smart_rank::mod_cache_key(mod_entry);
             match cache.mod_cache.mods.get(&entry.id) {
-                Some(entry_cache) if entry_cache.key == key => {}
+                Some(entry_cache) if entry_cache.key == key && entry_cache.has_data => {}
                 _ => return false,
             }
         }
@@ -1510,7 +1510,7 @@ impl App {
             };
             let key = smart_rank::mod_cache_key(mod_entry);
             match cache.mod_cache.mods.get(&entry.id) {
-                Some(entry_cache) if entry_cache.key == key => {}
+                Some(entry_cache) if entry_cache.key == key && entry_cache.has_data => {}
                 _ => missing.push(entry.id.clone()),
             }
         }
@@ -4092,18 +4092,17 @@ impl App {
                                 .as_ref()
                                 .map(|cache| cache.profile_key.clone())
                                 .unwrap_or_else(|| current_profile_key.clone());
-                            let (mut mod_cache, existing_result) =
-                                if let Some(existing) = &self.smart_rank_cache {
-                                    (existing.mod_cache.clone(), existing.result.clone())
-                                } else {
-                                    (smart_rank::SmartRankCacheData::default(), None)
-                                };
+                            let mut mod_cache = if let Some(existing) = &self.smart_rank_cache {
+                                existing.mod_cache.clone()
+                            } else {
+                                smart_rank::SmartRankCacheData::default()
+                            };
                             mod_cache.mods.insert(progress.mod_id.clone(), cache);
                             self.smart_rank_cache = Some(SmartRankCache {
                                 version: SMART_RANK_CACHE_VERSION,
                                 profile_key,
                                 mod_cache,
-                                result: existing_result,
+                                result: None,
                             });
                             self.maybe_save_smart_rank_cache(false);
                         }
@@ -4175,6 +4174,9 @@ impl App {
                             self.clear_smart_rank_scan_state();
                             self.log_warn("Smart rank failed after interrupt".to_string());
                             continue;
+                        }
+                        if let Some(cache) = &mut self.smart_rank_cache {
+                            cache.result = None;
                         }
                         self.clear_smart_rank_scan_state();
                         self.status = format!("Smart ranking failed: {error}");
@@ -6033,6 +6035,200 @@ impl App {
     }
 
     #[cfg(debug_assertions)]
+    pub fn debug_smart_rank_zip_flow(&mut self) -> String {
+        use smart_rank::SmartRankRefreshMode;
+
+        let mut lines = Vec::new();
+        lines.push("Smart rank zip flow (real imports)".to_string());
+
+        let source_dir = PathBuf::from("/home/ryan/Documents/mod zips");
+        if !source_dir.exists() {
+            lines.push(format!("Source dir missing: {}", source_dir.display()));
+            return lines.join("\n");
+        }
+
+        let mut archives: Vec<PathBuf> = match fs::read_dir(&source_dir) {
+            Ok(entries) => entries
+                .filter_map(Result::ok)
+                .map(|entry| entry.path())
+                .filter(|path| {
+                    path.extension()
+                        .and_then(|ext| ext.to_str())
+                        .map(|ext| matches!(ext, "zip" | "ZIP" | "7z" | "7Z" | "rar" | "RAR"))
+                        .unwrap_or(false)
+                })
+                .collect(),
+            Err(err) => {
+                lines.push(format!("Read source dir failed: {err}"));
+                return lines.join("\n");
+            }
+        };
+        archives.sort();
+        if archives.is_empty() {
+            lines.push("No mod archives found".to_string());
+            return lines.join("\n");
+        }
+        archives.truncate(2);
+        lines.push(format!("Using {} archive(s)", archives.len()));
+
+        let original_library = self.library.clone();
+        let original_dependency_cache = self.dependency_cache.clone();
+        let original_dependency_ready = self.dependency_cache_ready;
+        let original_selected = self.selected;
+        let original_data_dir = self.config.data_dir.clone();
+        let original_profile = self.config.active_profile.clone();
+        let original_suppress = self.debug_suppress_persistence;
+        let original_cache = self.smart_rank_cache.clone();
+        let original_refresh_pending = self.smart_rank_refresh_pending;
+        let original_refresh_kind = self.smart_rank_refresh_kind;
+        let original_refresh_at = self.smart_rank_refresh_at;
+        let original_last_saved = self.smart_rank_cache_last_saved;
+        let original_scan_id = self.smart_rank_scan_id;
+        let original_scan_active = self.smart_rank_scan_active;
+        let original_scan_profile = self.smart_rank_scan_profile_key.clone();
+        let original_status = self.status.clone();
+
+        let temp_data_dir = std::env::temp_dir()
+            .join(format!("sigilsmith-debug-import-{}", now_timestamp()));
+        if let Err(err) = fs::create_dir_all(&temp_data_dir) {
+            lines.push(format!("Create temp dir failed: {err}"));
+            return lines.join("\n");
+        }
+
+        self.library = Library {
+            mods: Vec::new(),
+            profiles: vec![Profile::new("Default")],
+            active_profile: "Default".to_string(),
+            dependency_blocks: HashSet::new(),
+            metadata_cache_version: 0,
+            metadata_cache_key: None,
+            modsettings_hash: None,
+            modsettings_sync_enabled: true,
+        };
+        self.config.active_profile = "Default".to_string();
+        self.config.data_dir = temp_data_dir;
+        self.dependency_cache.clear();
+        self.dependency_cache_ready = false;
+        self.prime_dependency_cache_from_library();
+        self.debug_suppress_persistence = true;
+        self.smart_rank_cache = None;
+        self.smart_rank_refresh_pending = None;
+        self.smart_rank_refresh_kind = None;
+        self.smart_rank_refresh_at = None;
+        self.smart_rank_cache_last_saved = None;
+        self.smart_rank_scan_id = 0;
+        self.smart_rank_scan_active = None;
+        self.smart_rank_scan_profile_key = None;
+
+        fn run_scans(app: &mut App, label: &str, lines: &mut Vec<String>) {
+            let mut refresh_events = Vec::new();
+            let mut full_rebuilds = 0usize;
+            let mut last_scan_id: Option<u64> = None;
+            let started = Instant::now();
+            let timeout = Duration::from_secs(60);
+            loop {
+                app.poll_smart_rank();
+                if !app.smart_rank_active {
+                    if let Some(pending) = app.smart_rank_refresh_pending {
+                        if let Some(ready_at) = app.smart_rank_refresh_at {
+                            if Instant::now() >= ready_at {
+                                app.smart_rank_refresh_pending = None;
+                                app.smart_rank_refresh_at = None;
+                                let refresh = app.resolve_smart_rank_refresh_kind(pending);
+                                app.start_smart_rank_scan(SmartRankMode::Warmup, refresh);
+                            }
+                        } else {
+                            app.smart_rank_refresh_pending = None;
+                            let refresh = app.resolve_smart_rank_refresh_kind(pending);
+                            app.start_smart_rank_scan(SmartRankMode::Warmup, refresh);
+                        }
+                    }
+                }
+                if let Some(scan_id) = app.smart_rank_scan_active {
+                    if last_scan_id != Some(scan_id) {
+                        if let Some(kind) = app.smart_rank_refresh_kind {
+                            refresh_events.push(format!("scan kind={kind:?}"));
+                            if matches!(kind, SmartRankRefreshMode::Full) {
+                                full_rebuilds += 1;
+                            }
+                        }
+                        last_scan_id = Some(scan_id);
+                    }
+                }
+                if !app.smart_rank_active && app.smart_rank_refresh_pending.is_none() {
+                    break;
+                }
+                if started.elapsed() > timeout {
+                    refresh_events.push("timeout waiting for scans".to_string());
+                    break;
+                }
+                thread::sleep(Duration::from_millis(50));
+            }
+
+            lines.push(format!("{label} refresh events: {}", refresh_events.len()));
+            for event in refresh_events {
+                lines.push(event);
+            }
+            lines.push(format!("{label} full rebuilds: {full_rebuilds}"));
+        }
+
+        for (index, path) in archives.iter().enumerate() {
+            lines.push(format!("import {}: {}", index + 1, path.display()));
+            let result = match importer::import_path_with_progress(path, &self.config.data_dir, None)
+            {
+                Ok(result) => result,
+                Err(err) => {
+                    lines.push(format!("  import failed: {err}"));
+                    continue;
+                }
+            };
+            if result.batches.is_empty() {
+                lines.push("  no mods found".to_string());
+                continue;
+            }
+            for batch in result.batches {
+                let count = match self.apply_mod_entries(batch.mods) {
+                    Ok(count) => count,
+                    Err(err) => {
+                        lines.push(format!("  apply failed: {err}"));
+                        0
+                    }
+                };
+                lines.push(format!("  applied mods: {count}"));
+                run_scans(self, "post-import", &mut lines);
+            }
+        }
+
+        if let Some(mod_entry) = self.library.mods.first().cloned() {
+            let remove_id = mod_entry.id.clone();
+            let removed = self.remove_mod_by_id(&remove_id);
+            lines.push(format!("remove: {removed} ({remove_id})"));
+            run_scans(self, "post-remove", &mut lines);
+        } else {
+            lines.push("remove: skipped (no mods)".to_string());
+        }
+
+        self.library = original_library;
+        self.dependency_cache = original_dependency_cache;
+        self.dependency_cache_ready = original_dependency_ready;
+        self.selected = original_selected;
+        self.config.data_dir = original_data_dir;
+        self.config.active_profile = original_profile;
+        self.debug_suppress_persistence = original_suppress;
+        self.smart_rank_cache = original_cache;
+        self.smart_rank_refresh_pending = original_refresh_pending;
+        self.smart_rank_refresh_kind = original_refresh_kind;
+        self.smart_rank_refresh_at = original_refresh_at;
+        self.smart_rank_cache_last_saved = original_last_saved;
+        self.smart_rank_scan_id = original_scan_id;
+        self.smart_rank_scan_active = original_scan_active;
+        self.smart_rank_scan_profile_key = original_scan_profile;
+        self.status = original_status;
+
+        lines.join("\n")
+    }
+
+    #[cfg(debug_assertions)]
     pub fn debug_cache_report(&self) -> String {
         let mut lines = Vec::new();
         lines.push(format!(
@@ -6253,15 +6449,19 @@ impl App {
         }
 
         self.library.ensure_mods_in_profiles();
-        self.library.save(&self.config.data_dir)?;
+        if self.allow_persistence() {
+            self.library.save(&self.config.data_dir)?;
+        }
         self.update_dependency_cache_for_entries(&added);
         self.library.metadata_cache_key = Some(self.metadata_cache_key());
         self.library.metadata_cache_version = METADATA_CACHE_VERSION;
-        self.library.save(&self.config.data_dir)?;
-        if self.normalize_mod_sources() {
-            let _ = self.library.save(&self.config.data_dir);
+        if self.allow_persistence() {
+            self.library.save(&self.config.data_dir)?;
+            if self.normalize_mod_sources() {
+                let _ = self.library.save(&self.config.data_dir);
+            }
+            self.queue_conflict_scan("library update");
         }
-        self.queue_conflict_scan("library update");
         Ok(count)
     }
 
