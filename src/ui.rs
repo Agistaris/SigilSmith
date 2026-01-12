@@ -1,6 +1,6 @@
 use crate::{
     app::{
-        expand_tilde, App, BusyAnimState, DependencyStatus, DialogChoice, DialogKind, ExplorerItem,
+        expand_tilde, App, DependencyStatus, DialogChoice, DialogKind, ExplorerItem,
         ExplorerItemKind, Focus, InputMode, InputPurpose, LogLevel, ModSort, ModSortColumn,
         PathBrowser, PathBrowserEntryKind, PathBrowserFocus, SetupStep, ToastLevel, UpdateStatus,
     },
@@ -2013,16 +2013,41 @@ fn draw(frame: &mut Frame<'_>, app: &mut App) {
     frame.render_widget(status_block.clone(), status_area);
     let status_inner = status_block.inner(status_area);
     if app.is_busy() && status_inner.width > 0 && status_inner.height > 0 {
-        let anim = app.busy_anim_state();
-        let lines = build_busy_matrix_lines(
-            status_inner.width as usize,
-            status_inner.height as usize,
-            anim,
-            &theme,
-            overrides_focused,
+        let mut bar_width = status_inner.width / 3;
+        if bar_width < 6 {
+            bar_width = status_inner.width.min(6);
+        }
+        if bar_width == 0 {
+            bar_width = status_inner.width;
+        }
+        let travel = status_inner.width.saturating_sub(bar_width);
+        let tick = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis()
+            / 120;
+        let cycle = travel.saturating_mul(2).max(1) as u128;
+        let step = (tick % cycle) as u16;
+        let offset = if step > travel {
+            travel.saturating_mul(2).saturating_sub(step)
+        } else {
+            step
+        };
+        let bar_area = Rect {
+            x: status_inner.x + offset,
+            y: status_inner.y,
+            width: bar_width.min(status_inner.width),
+            height: status_inner.height,
+        };
+        let bar_color = if overrides_focused {
+            theme.accent
+        } else {
+            theme.accent_soft
+        };
+        frame.render_widget(
+            Block::default().style(Style::default().bg(bar_color)),
+            bar_area,
         );
-        let matrix = Paragraph::new(lines).style(Style::default().bg(status_bg));
-        frame.render_widget(matrix, status_inner);
     }
     let status_text = truncate_text(&status_text, status_inner.width as usize);
     let status_widget = Paragraph::new(status_text)
@@ -4303,105 +4328,6 @@ fn draw_startup_overlay(frame: &mut Frame<'_>, app: &App, theme: &Theme) {
     frame.render_widget(paragraph, inner);
 }
 
-fn build_busy_matrix_lines(
-    width: usize,
-    height: usize,
-    anim: BusyAnimState,
-    theme: &Theme,
-    overrides_focused: bool,
-) -> Vec<Line<'static>> {
-    let rows = height.max(1);
-    let mut lines = Vec::with_capacity(rows);
-    if width == 0 {
-        lines.push(Line::from(""));
-        return lines;
-    }
-
-    let now_ms = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as u64;
-    let flicker_ms = if anim.paused { now_ms / 3 } else { now_ms };
-    let base_seed = anim
-        .seed
-        .wrapping_add(flicker_ms.rotate_left(17))
-        .wrapping_mul(0x9E37_79B9_7F4A_7C15);
-    let head_pos = ((anim.phase.clamp(0.0, 1.0)) * (width.saturating_sub(1) as f32)).round() as i32;
-    let tail_len = (width / 5).clamp(6, 16) as i32;
-    let head_color = if overrides_focused {
-        theme.accent
-    } else {
-        theme.accent_soft
-    };
-    let tail_color = theme.accent_soft;
-    let dim_color = theme.muted;
-
-    for row in 0..rows {
-        let row_seed = base_seed.wrapping_add((row as u64).wrapping_mul(0xA24B_8B6F_1D2F_3A5D));
-        let line = build_busy_matrix_line(
-            width,
-            head_pos,
-            tail_len,
-            row_seed,
-            flicker_ms,
-            head_color,
-            tail_color,
-            dim_color,
-        );
-        lines.push(line);
-    }
-
-    lines
-}
-
-fn build_busy_matrix_line(
-    width: usize,
-    head_pos: i32,
-    tail_len: i32,
-    seed: u64,
-    now_ms: u64,
-    head_color: Color,
-    tail_color: Color,
-    dim_color: Color,
-) -> Line<'static> {
-    let mut spans = Vec::with_capacity(width);
-    for col in 0..width {
-        let dist = head_pos - col as i32;
-        let glyph = matrix_glyph(seed, col as u16, now_ms);
-        let style = if dist == 0 {
-            Style::default()
-                .fg(head_color)
-                .add_modifier(Modifier::BOLD)
-        } else if dist > 0 && dist < tail_len {
-            let intensity = 1.0 - (dist as f32 / tail_len as f32);
-            let color = if intensity > 0.66 {
-                head_color
-            } else if intensity > 0.33 {
-                tail_color
-            } else {
-                dim_color
-            };
-            Style::default().fg(color)
-        } else {
-            Style::default().fg(dim_color)
-        };
-        spans.push(Span::styled(glyph.to_string(), style));
-    }
-    Line::from(spans)
-}
-
-fn matrix_glyph(seed: u64, idx: u16, now_ms: u64) -> char {
-    const GLYPHS: &[u8] = b"01ABCDEFGHIJKLMNOPQRSTUVWXYZ#$%*+<>/";
-    let mut x = seed
-        ^ (idx as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15)
-        ^ now_ms.rotate_left(11);
-    x ^= x >> 12;
-    x ^= x << 25;
-    x ^= x >> 27;
-    let value = x.wrapping_mul(0x2545_F491_4F6C_DD1D);
-    let pick = ((value >> 58) as usize) % GLYPHS.len();
-    GLYPHS[pick] as char
-}
 
 fn build_explorer_items(app: &App, theme: &Theme) -> Vec<ListItem<'static>> {
     let items = app.explorer_items();
@@ -4598,18 +4524,55 @@ fn mod_header_cell_static(label: &str, theme: &Theme) -> Cell<'static> {
     )
 }
 
-fn loading_frame(_row_index: usize, column_index: usize) -> &'static str {
-    let tick = SystemTime::now()
+fn loading_frame(row_index: usize, column_index: usize) -> &'static str {
+    const COLUMN_COUNT: i64 = 8;
+    let now_ms = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
-        .as_millis()
-        / 240;
-    let pos = (tick as usize) % 8;
-    if column_index == pos {
+        .as_millis() as u64;
+    let row_seed = (row_index as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+    let speed_ms = lerp_u64(90, 260, rand_f32(row_seed ^ 0xA5));
+    let segment_ms = lerp_u64(900, 1600, rand_f32(row_seed ^ 0xC3));
+    let segment = now_ms / segment_ms.max(1);
+    let local_ms = now_ms % segment_ms.max(1);
+    let pause_roll = rand_f32(row_seed ^ segment.wrapping_mul(0xD1));
+    let pause_ms = lerp_u64(120, 620, rand_f32(row_seed ^ segment.wrapping_mul(0xE5)));
+    let effective_ms = if pause_roll < 0.25 && local_ms < pause_ms {
+        now_ms.saturating_sub(local_ms)
+    } else {
+        now_ms
+    };
+    let steps = (effective_ms / speed_ms.max(1)) as i64;
+    let cycle = (COLUMN_COUNT - 1) * 2;
+    let mut pos = (steps % cycle) as i64;
+    if pos < 0 {
+        pos += cycle;
+    }
+    let pos = if pos >= COLUMN_COUNT {
+        cycle - pos
+    } else {
+        pos
+    };
+    if column_index as i64 == pos {
         "·"
     } else {
         " "
     }
+}
+
+fn rand_f32(seed: u64) -> f32 {
+    let mut x = seed ^ 0xA24B_8B6F_1D2F_3A5D;
+    x ^= x << 7;
+    x ^= x >> 9;
+    x ^= x << 8;
+    let upper = (x >> 40) as u32;
+    (upper as f32) / ((1u32 << 24) as f32)
+}
+
+fn lerp_u64(min: u64, max: u64, t: f32) -> u64 {
+    let clamped = t.clamp(0.0, 1.0);
+    let span = max.saturating_sub(min) as f32;
+    min + (span * clamped) as u64
 }
 
 fn row_for_entry(

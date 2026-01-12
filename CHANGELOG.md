@@ -6,7 +6,7 @@
 - Preserve native mod dependencies during native sync updates and adoption.
 - Fix Cancel Import dialog focus so the dependency queue no longer steals input.
 - Refresh dependency cache after native sync dependency updates.
-- Replace the busy indicator with a matrix-style animated sweep that varies speed and pauses.
+- Vary mod stack loading dot animation speed and pauses during cache/metadata sync.
 
 ## 0.6.1
 
