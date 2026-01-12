@@ -904,6 +904,12 @@ fn collect_dependencies(app: &App, mod_entry: &ModEntry, paths: Option<&GamePath
     out.sort();
     out.dedup();
     out.retain(|dep| !dep.eq_ignore_ascii_case(&mod_entry.id));
+    out.retain(|dep| {
+        if metadata::is_base_dependency_uuid(dep) || metadata::is_base_dependency_label(dep) {
+            return false;
+        }
+        true
+    });
     out
 }
 

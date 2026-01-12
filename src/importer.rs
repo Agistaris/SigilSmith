@@ -750,9 +750,9 @@ fn import_single_pak(
     let Some(pak_info) = pak_info else {
         return import_override_pak(path, data_dir, source_label, source_times);
     };
-    let json_created = json_mods
+    let json_matches: Vec<&metadata::JsonModInfo> = json_mods
         .iter()
-        .find(|entry| {
+        .filter(|entry| {
             entry
                 .uuid
                 .as_ref()
@@ -769,11 +769,12 @@ fn import_single_pak(
                     .map(|name| name == &pak_info.name)
                     .unwrap_or(false)
         })
-        .and_then(|entry| entry.created_at);
+        .collect();
+    let json_created = json_matches.iter().find_map(|entry| entry.created_at);
 
     let mod_id = pak_info.uuid.clone();
     let mut dependencies = meta_info.dependencies.clone();
-    for info in json_mods {
+    for info in json_matches {
         if !info.dependencies.is_empty() {
             dependencies.extend(info.dependencies.clone());
         }
@@ -834,6 +835,7 @@ fn pak_info_from_meta(meta: &metadata::ModMeta) -> Option<PakInfo> {
         module_type: meta.module_type.clone(),
     })
 }
+
 
 fn import_override_pak(
     path: &Path,

@@ -3966,7 +3966,9 @@ impl App {
                             }
                         };
                         if overwrite {
-                            let _ = self.remove_mod_by_id(&existing.id);
+                            if existing.id != mod_entry.id {
+                                let _ = self.remove_mod_by_id(&existing.id);
+                            }
                             approved.push(mod_entry);
                         } else {
                             self.remove_mod_root(&mod_entry.id);
@@ -4015,7 +4017,9 @@ impl App {
                             }
                         };
                         if overwrite {
-                            let _ = self.remove_mod_by_id(&similar.existing_id);
+                            if similar.existing_id != mod_entry.id {
+                                let _ = self.remove_mod_by_id(&similar.existing_id);
+                            }
                             approved.push(mod_entry);
                         } else {
                             self.remove_mod_root(&mod_entry.id);
@@ -6710,12 +6714,22 @@ impl App {
 
     fn apply_duplicate_decision(&mut self, decision: DuplicateDecision, overwrite: bool) {
         if overwrite {
-            let removed = self.remove_mod_by_id(&decision.existing_id);
-            if removed {
-                let label = match decision.kind {
-                    DuplicateKind::Exact => "duplicate",
-                    DuplicateKind::Similar { .. } => "similar",
-                };
+            let same_id = decision.existing_id == decision.mod_entry.id;
+            let removed = if same_id {
+                false
+            } else {
+                self.remove_mod_by_id(&decision.existing_id)
+            };
+            let label = match decision.kind {
+                DuplicateKind::Exact => "duplicate",
+                DuplicateKind::Similar { .. } => "similar",
+            };
+            if same_id {
+                self.log_info(format!(
+                    "Overwriting {label} mod \"{}\" (keeping files)",
+                    decision.existing_label
+                ));
+            } else if removed {
                 self.log_info(format!(
                     "Overwriting {label} mod \"{}\"",
                     decision.existing_label
@@ -8779,9 +8793,9 @@ fn dependency_search_label(display_label: &str, uuid: &Option<String>, raw: &str
         return display_label.to_string();
     }
     if let Some(uuid) = uuid.as_ref() {
-        return uuid.clone();
+        return format!("bg3 mod {uuid}");
     }
-    raw.to_string()
+    format!("bg3 mod {raw}")
 }
 
 fn dependency_search_link(query: &str) -> Option<String> {
@@ -8790,6 +8804,12 @@ fn dependency_search_link(query: &str) -> Option<String> {
         return None;
     }
     let encoded = encode_query(query);
+    let lower = query.to_ascii_lowercase();
+    if let Some(rest) = lower.strip_prefix("bg3 mod ") {
+        if is_uuid_like(rest.trim()) {
+            return Some(format!("https://duckduckgo.com/?q={encoded}"));
+        }
+    }
     Some(format!(
         "https://www.nexusmods.com/baldursgate3/search/?gsearch={encoded}&gsearchtype=mods"
     ))
@@ -8812,6 +8832,7 @@ fn filter_ignored_dependencies(deps: &mut Vec<String>) {
         true
     });
 }
+
 
 fn encode_query(value: &str) -> String {
     let mut out = String::new();
@@ -9553,6 +9574,9 @@ fn sync_native_mods_delta(
                 current: index + 1,
                 total: total_adopt,
             }));
+        }
+        if mod_entry.source == ModSource::Managed {
+            continue;
         }
         if !modules_set.contains(&mod_entry.id) {
             continue;
