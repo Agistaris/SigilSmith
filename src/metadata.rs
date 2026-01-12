@@ -67,9 +67,16 @@ pub fn parse_meta_lsx(bytes: &[u8]) -> ModMeta {
                     if let Some(id) = attr_value(&e, b"id") {
                         node_stack.push(id);
                         in_dependencies = node_stack.iter().any(|node| node == "Dependencies");
-                        in_dependency = node_stack.iter().any(|node| node == "Dependency");
+                        in_dependency = node_stack
+                            .iter()
+                            .any(|node| node == "Dependency" || node == "ModuleShortDesc");
                         in_module_info = node_stack.iter().any(|node| node == "ModuleInfo");
-                        if in_dependency && node_stack.last().map(|node| node == "Dependency").unwrap_or(false) {
+                        if in_dependency
+                            && node_stack
+                                .last()
+                                .map(|node| node == "Dependency" || node == "ModuleShortDesc")
+                                .unwrap_or(false)
+                        {
                             current_dep_uuid = None;
                             current_dep_label = None;
                         }
@@ -87,6 +94,8 @@ pub fn parse_meta_lsx(bytes: &[u8]) -> ModMeta {
                             } else if id == "Name" {
                                 current_dep_label = Some(value);
                             } else if id == "Folder" && current_dep_label.is_none() {
+                                current_dep_label = Some(value);
+                            } else if id == "DisplayName" && current_dep_label.is_none() {
                                 current_dep_label = Some(value);
                             }
                         }
@@ -145,7 +154,7 @@ pub fn parse_meta_lsx(bytes: &[u8]) -> ModMeta {
                 if e.name().as_ref() == b"node" {
                     let popped = node_stack.pop();
                     if let Some(popped) = popped.as_deref() {
-                        if popped == "Dependency" {
+                        if popped == "Dependency" || popped == "ModuleShortDesc" {
                             push_dependency_ref(
                                 &mut deps,
                                 current_dep_uuid.take(),
@@ -154,7 +163,9 @@ pub fn parse_meta_lsx(bytes: &[u8]) -> ModMeta {
                         }
                     }
                     in_dependencies = node_stack.iter().any(|node| node == "Dependencies");
-                    in_dependency = node_stack.iter().any(|node| node == "Dependency");
+                    in_dependency = node_stack
+                        .iter()
+                        .any(|node| node == "Dependency" || node == "ModuleShortDesc");
                     in_module_info = node_stack.iter().any(|node| node == "ModuleInfo");
                 }
             }
@@ -186,6 +197,11 @@ fn push_dependency_ref(
     uuid: Option<String>,
     label: Option<String>,
 ) {
+    if let Some(uuid) = uuid.as_deref() {
+        if is_base_dependency_uuid(uuid) {
+            return;
+        }
+    }
     let label = label
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
@@ -201,13 +217,78 @@ fn push_dependency_ref(
     }
 }
 
-fn is_base_dependency_label(label: &str) -> bool {
+pub fn is_base_dependency_label(label: &str) -> bool {
     let normalized: String = label
         .chars()
         .filter(|ch| ch.is_ascii_alphanumeric())
         .map(|ch| ch.to_ascii_lowercase())
         .collect();
-    matches!(normalized.as_str(), "gustav" | "gustavdev" | "shared")
+    matches!(
+        normalized.as_str(),
+        "gustav"
+            | "gustavdev"
+            | "gustavx"
+            | "shared"
+            | "shareddev"
+            | "fw3"
+            | "engine"
+            | "game"
+            | "diceset01"
+            | "diceset02"
+            | "diceset03"
+            | "diceset04"
+            | "diceset06"
+            | "honour"
+            | "honourx"
+            | "modbrowser"
+            | "mainui"
+            | "crossplayui"
+            | "photomode"
+    )
+}
+
+pub fn is_base_dependency_uuid(uuid: &str) -> bool {
+    matches!(
+        uuid.to_ascii_lowercase().as_str(),
+        // Gustav (base game)
+        "991c9c7a-fb80-40cb-8f0d-b92d4e80e9b1"
+            // GustavX (base game)
+            | "cb555efe-2d9e-131f-8195-a89329d218ea"
+            // GustavDev (base game)
+            | "28ac9ce2-2aba-8cda-b3b5-6e922f71b6b8"
+            // Shared
+            | "ed539163-bb70-431b-96a7-f5b2eda5376b"
+            // SharedDev
+            | "3d0c5ff8-c95d-c907-ff3e-34b204f1c630"
+            // FW3
+            | "e5c9077e-1fca-4f24-b55d-464f512c98a8"
+            // Engine
+            | "9dff4c3b-fda7-43de-a763-ce1383039999"
+            // Game (non-UUID token in some deps)
+            | "game"
+            // DiceSet_01
+            | "e842840a-2449-588c-b0c4-22122cfce31b"
+            // DiceSet_02
+            | "b176a0ac-d79f-ed9d-5a87-5c2c80874e10"
+            // DiceSet_03
+            | "e0a4d990-7b9b-8fa9-d7c6-04017c6cf5b1"
+            // DiceSet_04
+            | "77a2155f-4b35-4f0c-e7ff-4338f91426a4"
+            // DiceSet_06
+            | "ee4989eb-aab8-968f-8674-812ea2f4bfd7"
+            // Honour
+            | "b77b6210-ac50-4cb1-a3d5-5702fb9c744c"
+            // HonourX
+            | "767d0062-d82c-279c-e16b-dfee7fe94cdd"
+            // ModBrowser
+            | "ee5a55ff-eb38-0b27-c5b0-f358dc306d34"
+            // MainUI
+            | "630daa32-70f8-3da5-41b9-154fe8410236"
+            // CrossplayUI
+            | "e1ce736b-52e6-e713-e9e7-e6abbb15a198"
+            // PhotoMode
+            | "55ef175c-59e3-b44b-3fb2-8f86acc5d550"
+    )
 }
 
 pub fn read_meta_lsx(path: &Path) -> Option<ModMeta> {
@@ -284,6 +365,8 @@ fn scan_dependency_refs(bytes: &[u8]) -> Vec<String> {
     }
     out.sort();
     out.dedup();
+    out.retain(|dep| !is_base_dependency_uuid(dep));
+    out.retain(|dep| !is_base_dependency_label(dep));
     out
 }
 

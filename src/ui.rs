@@ -379,11 +379,12 @@ fn handle_dependency_queue(app: &mut App, key: KeyEvent) -> Result<()> {
         KeyCode::Home => app.dependency_queue_home(),
         KeyCode::End => app.dependency_queue_end(),
         KeyCode::Enter => app.dependency_queue_open_selected(),
-        KeyCode::Char('g') | KeyCode::Char('G') => {
-            app.dependency_queue_continue();
-        }
         KeyCode::Char('c') | KeyCode::Char('C') => {
-            app.dependency_queue_copy_selected();
+            if key.modifiers.contains(KeyModifiers::CONTROL) {
+                app.dependency_queue_copy_link();
+            } else {
+                app.dependency_queue_copy_uuid();
+            }
         }
         KeyCode::Esc => app.dependency_queue_cancel(),
         _ => {}
@@ -3055,11 +3056,15 @@ fn draw_dependency_queue(frame: &mut Frame<'_>, app: &mut App, theme: &Theme) {
         let Some(queue) = app.dependency_queue() else {
             return;
         };
-        let total = queue.items.len();
+        let total = queue
+            .items
+            .iter()
+            .filter(|item| !item.is_override_action())
+            .count();
         let missing = queue
             .items
             .iter()
-            .filter(|item| item.status == DependencyStatus::Missing)
+            .filter(|item| !item.is_override_action() && item.status == DependencyStatus::Missing)
             .count();
         (total, missing)
     };
@@ -3134,11 +3139,89 @@ fn draw_dependency_queue(frame: &mut Frame<'_>, app: &mut App, theme: &Theme) {
         let total_items = queue.items.len();
         let selected = queue.selected;
         let mut items = Vec::new();
-        for (index, item) in queue.items.iter().enumerate() {
+        let mut dep_index = 0usize;
+        let tick = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis()
+            / 200;
+        let pulse = (tick % 5) as usize;
+        let label = "OVERRIDE DEPENDENCIES";
+        let label_chars: Vec<char> = label.chars().collect();
+        let mask_one = if label_chars.len() > 2 {
+            label_chars[1..label_chars.len() - 1].iter().collect::<String>()
+        } else {
+            label.to_string()
+        };
+        let mask_two = if label_chars.len() > 4 {
+            label_chars[2..label_chars.len() - 2].iter().collect::<String>()
+        } else {
+            mask_one.clone()
+        };
+        let override_lines = match pulse {
+            0 => [
+                format!(">  {label}  <"),
+                format!(" > {label} < "),
+                format!("  >{label}<  "),
+            ],
+            1 => [
+                format!(" > {label} < "),
+                format!("  >{label}<  "),
+                format!("   █{mask_one}█   "),
+            ],
+            2 => [
+                format!("  >{label}<  "),
+                format!("   █{mask_one}█   "),
+                format!("    █{mask_two}█    "),
+            ],
+            3 => [
+                format!("   █{mask_one}█   "),
+                format!("    █{mask_two}█    "),
+                format!("   █{mask_one}█   "),
+            ],
+            _ => [
+                format!("    █{mask_two}█    "),
+                format!("   █{mask_one}█   "),
+                format!("  >{label}<  "),
+            ],
+        };
+        for item in queue.items.iter() {
+            if item.is_override_action() {
+                let override_style = Style::default()
+                    .fg(theme.warning)
+                    .add_modifier(Modifier::BOLD);
+                let center_override = |value: &str| -> String {
+                    let trimmed = truncate_text(value, list_width);
+                    let len = trimmed.chars().count();
+                    if list_width <= len {
+                        return trimmed;
+                    }
+                    let pad_total = list_width - len;
+                    let left = pad_total / 2;
+                    let right = pad_total - left;
+                    format!("{}{}{}", " ".repeat(left), trimmed, " ".repeat(right))
+                };
+                let line_one = Line::from(Span::styled(
+                    center_override(&override_lines[0]),
+                    override_style,
+                ));
+                let line_two = Line::from(Span::styled(
+                    center_override(&override_lines[1]),
+                    override_style,
+                ));
+                let line_three = Line::from(Span::styled(
+                    center_override(&override_lines[2]),
+                    override_style,
+                ));
+                items.push(ListItem::new(vec![line_one, line_two, line_three]));
+                continue;
+            }
+
+            dep_index = dep_index.saturating_add(1);
             let status_label = dependency_status_label(item.status);
             let status_text = format!("{status_label:<9}");
             let status_style = dependency_status_style(theme, item.status);
-            let index_label = format!("{:>2}. ", index + 1);
+            let index_label = format!("{:>2}. ", dep_index);
             let label_width = list_width
                 .saturating_sub(status_text.chars().count() + 1 + index_label.chars().count());
             let label_value = if item.display_label.trim().is_empty() {
@@ -3208,8 +3291,7 @@ fn draw_dependency_queue(frame: &mut Frame<'_>, app: &mut App, theme: &Theme) {
         }
     }
     if total_items > 0 {
-        let selected_index = selected.saturating_sub(offset);
-        state.select(Some(selected_index));
+        state.select(Some(selected));
         *state.offset_mut() = offset;
     }
 
@@ -3252,20 +3334,13 @@ fn draw_dependency_queue(frame: &mut Frame<'_>, app: &mut App, theme: &Theme) {
         Span::styled("PgUp/PgDn", key_style),
         Span::styled(" Jump  ", text_style),
         Span::styled("[Enter]", key_style),
-        Span::styled(" Open link/search  ", text_style),
-        Span::styled("[C]", key_style),
-        Span::styled(" Copy link/id", text_style),
+        Span::styled(" Open/override  ", text_style),
+        Span::styled("[Ctrl+C]", key_style),
+        Span::styled(" Copy link  ", text_style),
     ]);
     let footer_line_two = vec![
-        Span::styled("[G]", key_style),
-        Span::styled(
-            if app.dependency_queue_enable_pending() {
-                " Continue enable  "
-            } else {
-                " Continue import  "
-            },
-            text_style,
-        ),
+        Span::styled("[C]", key_style),
+        Span::styled(" Copy UUID  ", text_style),
         Span::styled("[Esc]", key_style),
         Span::styled(" Cancel", text_style),
     ];
@@ -4554,7 +4629,13 @@ fn loading_frame(row_index: usize, column_index: usize) -> &'static str {
         pos
     };
     if column_index as i64 == pos {
-        "·"
+        if rand_f32(row_seed ^ (column_index as u64).wrapping_mul(0xD7) ^ now_ms.rotate_left(9))
+            < 0.12
+        {
+            random_loading_symbol(row_seed ^ now_ms)
+        } else {
+            "·"
+        }
     } else {
         " "
     }
@@ -4567,6 +4648,12 @@ fn rand_f32(seed: u64) -> f32 {
     x ^= x << 8;
     let upper = (x >> 40) as u32;
     (upper as f32) / ((1u32 << 24) as f32)
+}
+
+fn random_loading_symbol(seed: u64) -> &'static str {
+    const SYMBOLS: [&str; 4] = ["*", "+", "x", "#"];
+    let pick = (seed.wrapping_mul(0x2545_F491_4F6C_DD1D) >> 62) as usize;
+    SYMBOLS[pick % SYMBOLS.len()]
 }
 
 fn lerp_u64(min: u64, max: u64, t: f32) -> u64 {
@@ -4597,8 +4684,17 @@ fn row_for_entry(
         cells.push(Cell::from(mod_entry.display_name()));
         Row::new(cells)
     } else {
+        let has_override = !mod_entry.target_overrides.is_empty();
+        let missing = dep_lookup
+            .map(|lookup| app.missing_dependency_count_for_mod(mod_entry, lookup))
+            .unwrap_or(0);
         let (enabled_text, enabled_style) = if enabled {
-            ("[x]", Style::default().fg(theme.success))
+            let color = if has_override || missing > 0 {
+                theme.warning
+            } else {
+                theme.success
+            };
+            ("[x]", Style::default().fg(color))
         } else {
             ("[ ]", Style::default().fg(theme.muted))
         };
@@ -4616,9 +4712,6 @@ fn row_for_entry(
         };
         let created_text = format_date_cell(mod_entry.created_at);
         let added_text = format_date_cell(Some(mod_entry.added_at));
-        let missing = dep_lookup
-            .map(|lookup| app.missing_dependency_count_for_mod(mod_entry, lookup))
-            .unwrap_or(0);
         let dep_text = if missing == 0 {
             String::new()
         } else {
@@ -5981,15 +6074,15 @@ fn help_sections() -> Vec<HelpSection> {
                 },
                 LegendRow {
                     key: "Enter".to_string(),
-                    action: "Open link/search".to_string(),
+                    action: "Open link/search or override".to_string(),
                 },
                 LegendRow {
-                    key: "G".to_string(),
-                    action: "Continue import/enable".to_string(),
+                    key: "Ctrl+C".to_string(),
+                    action: "Copy dependency link".to_string(),
                 },
                 LegendRow {
                     key: "C".to_string(),
-                    action: "Copy link or id".to_string(),
+                    action: "Copy UUID".to_string(),
                 },
                 LegendRow {
                     key: "Esc".to_string(),

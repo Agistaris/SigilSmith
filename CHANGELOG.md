@@ -7,6 +7,14 @@
 - Fix Cancel Import dialog focus so the dependency queue no longer steals input.
 - Refresh dependency cache after native sync dependency updates.
 - Vary mod stack loading dot animation speed and pauses during cache/metadata sync.
+- Parse ModuleShortDesc dependency entries so dependency names show alongside UUIDs.
+- Filter base-game dependency UUIDs from fallback scans so Gustav/Honour modules do not appear as missing.
+- Dependency queue now scrolls fully and includes a selectable override row with confirmation.
+- Dependency queue hotkeys updated: Ctrl+C copies link, C copies UUID.
+- Ignore base-game/system dependency UUIDs (Gustav, Shared, CrossplayUI, etc.) in dependency parsing.
+- Strip ignored dependencies even when cached to avoid false missing warnings.
+- Self-heal missing pak checks now resolve truncated filenames before disabling targets.
+- Enabled marker uses warning color when overrides or missing dependencies are present.
 
 ## 0.6.1
 

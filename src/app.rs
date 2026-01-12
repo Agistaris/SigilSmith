@@ -36,7 +36,7 @@ use blake3::Hasher;
 const SEARCH_DEBOUNCE_MS: u64 = 250;
 const HOTKEY_DEBOUNCE_MS: u64 = 200;
 const HOTKEY_FADE_MS: u64 = 200;
-const METADATA_CACHE_VERSION: u32 = 1;
+const METADATA_CACHE_VERSION: u32 = 2;
 const SMART_RANK_DEBOUNCE_MS: u64 = 600;
 const SMART_RANK_CACHE_SAVE_DEBOUNCE_MS: u64 = 400;
 const SMART_RANK_CACHE_VERSION: u32 = 2;
@@ -137,6 +137,7 @@ pub enum DialogKind {
         clear_filter: bool,
     },
     CancelImport,
+    OverrideDependencies,
     ImportSummary,
     CopyDependencySearchLink {
         link: String,
@@ -168,6 +169,12 @@ pub enum DependencyStatus {
     Skipped,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DependencyItemKind {
+    Missing,
+    OverrideAction,
+}
+
 #[derive(Debug, Clone)]
 pub struct DependencyItem {
     pub label: String,
@@ -178,12 +185,19 @@ pub struct DependencyItem {
     pub link: Option<String>,
     pub search_link: Option<String>,
     pub search_label: String,
+    pub kind: DependencyItemKind,
 }
 
 #[derive(Debug, Clone)]
 pub struct DependencyQueue {
     pub items: Vec<DependencyItem>,
     pub selected: usize,
+}
+
+impl DependencyItem {
+    pub fn is_override_action(&self) -> bool {
+        matches!(self.kind, DependencyItemKind::OverrideAction)
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -510,6 +524,7 @@ pub struct App {
     pub hotkey_focus: Focus,
     pub explorer_selected: usize,
     pub toast: Option<Toast>,
+    clipboard: Option<Clipboard>,
     pub mod_filter: String,
     mod_filter_snapshot: Option<String>,
     pub mod_sort: ModSort,
@@ -830,6 +845,7 @@ impl App {
             hotkey_focus: Focus::Mods,
             explorer_selected: 0,
             toast: None,
+            clipboard: Clipboard::new().ok(),
             mod_filter: String::new(),
             mod_filter_snapshot: None,
             mod_sort: ModSort::default(),
@@ -3333,6 +3349,14 @@ impl App {
     }
 
     pub fn dependency_queue_open_selected(&mut self) {
+        let is_override = self
+            .dependency_queue_selected()
+            .map(|item| item.is_override_action())
+            .unwrap_or(false);
+        if is_override {
+            self.prompt_dependency_override();
+            return;
+        }
         let Some((link, search, label)) = self.dependency_queue_selected().map(|item| {
             (
                 item.link.clone(),
@@ -3361,18 +3385,19 @@ impl App {
         );
     }
 
-    pub fn dependency_queue_copy_selected(&mut self) {
-        let Some((link, search, label, uuid, raw)) = self.dependency_queue_selected().map(|item| {
+    pub fn dependency_queue_copy_link(&mut self) {
+        let Some((is_override, link, search)) = self.dependency_queue_selected().map(|item| {
             (
+                item.is_override_action(),
                 item.link.clone(),
                 item.search_link.clone(),
-                item.search_label.clone(),
-                item.uuid.clone(),
-                item.label.clone(),
             )
         }) else {
             return;
         };
+        if is_override {
+            return;
+        }
         if let Some(link) = link {
             if self.copy_to_clipboard(&link) {
                 self.status = "Link copied".to_string();
@@ -3380,18 +3405,68 @@ impl App {
             return;
         }
         if let Some(search) = search {
-            self.maybe_prompt_copy_search_link(&search, &label);
+            if self.copy_to_clipboard(&search) {
+                self.status = "Search link copied".to_string();
+            }
+            return;
+        }
+        self.status = "No link available".to_string();
+        self.set_toast(
+            "No link available",
+            ToastLevel::Warn,
+            Duration::from_secs(2),
+        );
+    }
+
+    pub fn dependency_queue_copy_uuid(&mut self) {
+        let Some((is_override, uuid, label)) = self.dependency_queue_selected().map(|item| {
+            (
+                item.is_override_action(),
+                item.uuid.clone(),
+                item.label.clone(),
+            )
+        }) else {
+            return;
+        };
+        if is_override {
             return;
         }
         if let Some(uuid) = uuid {
             if self.copy_to_clipboard(&uuid) {
-                self.status = "Dependency id copied".to_string();
+                self.status = "Dependency UUID copied".to_string();
             }
             return;
         }
-        if self.copy_to_clipboard(&raw) {
+        if self.copy_to_clipboard(&label) {
             self.status = "Dependency id copied".to_string();
         }
+    }
+
+    fn prompt_dependency_override(&mut self) {
+        if self.dialog.is_some() {
+            return;
+        }
+        let (title, message) = if self.dependency_queue_enable_pending() {
+            (
+                "Override Dependencies".to_string(),
+                "Enable mods without resolving dependencies?\nThis can break your load order.".to_string(),
+            )
+        } else {
+            (
+                "Override Dependencies".to_string(),
+                "Continue import without resolving dependencies?\nThis can break your load order.".to_string(),
+            )
+        };
+        self.open_dialog(Dialog {
+            title,
+            message,
+            yes_label: "Override".to_string(),
+            no_label: "Cancel".to_string(),
+            choice: DialogChoice::No,
+            kind: DialogKind::OverrideDependencies,
+            toggle: None,
+            scroll: 0,
+        });
     }
 
     fn maybe_prompt_copy_search_link(&mut self, link: &str, label: &str) {
@@ -3471,20 +3546,32 @@ impl App {
     }
 
     fn copy_to_clipboard(&mut self, text: &str) -> bool {
-        let mut clipboard = match Clipboard::new() {
-            Ok(clipboard) => clipboard,
-            Err(err) => {
-                self.status = format!("Clipboard unavailable: {err}");
-                self.log_warn(format!("Clipboard unavailable: {err}"));
-                return false;
-            }
+        let result = match self.clipboard_mut() {
+            Some(clipboard) => clipboard.set_text(text.to_string()),
+            None => return false,
         };
-        if let Err(err) = clipboard.set_text(text.to_string()) {
+        if let Err(err) = result {
             self.status = format!("Clipboard copy failed: {err}");
             self.log_warn(format!("Clipboard copy failed: {err}"));
             return false;
         }
         true
+    }
+
+    fn clipboard_mut(&mut self) -> Option<&mut Clipboard> {
+        if self.clipboard.is_none() {
+            match Clipboard::new() {
+                Ok(clipboard) => {
+                    self.clipboard = Some(clipboard);
+                }
+                Err(err) => {
+                    self.status = format!("Clipboard unavailable: {err}");
+                    self.log_warn(format!("Clipboard unavailable: {err}"));
+                    return None;
+                }
+            }
+        }
+        self.clipboard.as_mut()
     }
 
     pub fn open_link(&mut self, link: &str) {
@@ -5003,6 +5090,7 @@ impl App {
                         link: None,
                         search_link,
                         search_label,
+                        kind: DependencyItemKind::Missing,
                     }
                 });
                 entry.required_by.push(required_by.clone());
@@ -5029,6 +5117,7 @@ impl App {
             item.required_by.dedup();
         }
         items.sort_by(|a, b| a.label.cmp(&b.label));
+        items.push(override_dependency_item());
         Some(DependencyQueue { items, selected: 0 })
     }
 
@@ -5061,6 +5150,7 @@ impl App {
                         link: None,
                         search_link,
                         search_label,
+                        kind: DependencyItemKind::Missing,
                     }
                 });
                 entry.required_by.push(required_by.clone());
@@ -5087,6 +5177,7 @@ impl App {
             item.required_by.dedup();
         }
         items.sort_by(|a, b| a.label.cmp(&b.label));
+        items.push(override_dependency_item());
         Some(DependencyQueue { items, selected: 0 })
     }
 
@@ -5133,6 +5224,20 @@ impl App {
                         }
                     }
                 }
+                if !pak_path.exists() && use_managed_root {
+                    let index = native_pak::build_native_pak_index(&mod_root);
+                    if let Some(info) = mod_entry.targets.iter().find_map(|target| {
+                        if let InstallTarget::Pak { info, .. } = target {
+                            Some(info)
+                        } else {
+                            None
+                        }
+                    }) {
+                        if let Some(resolved) = native_pak::resolve_native_pak_path(info, &index) {
+                            pak_path = resolved;
+                        }
+                    }
+                }
                 if let Some(meta) = metadata::read_meta_lsx_from_pak(&pak_path) {
                     deps.extend(meta.dependencies);
                 }
@@ -5160,15 +5265,20 @@ impl App {
         deps.sort();
         deps.dedup();
         deps.retain(|dep| !dep.eq_ignore_ascii_case(&mod_entry.id));
+        filter_ignored_dependencies(&mut deps);
         deps
     }
 
     fn cached_mod_dependencies(&self, mod_entry: &ModEntry) -> Vec<String> {
         if let Some(deps) = self.dependency_cache.get(&mod_entry.id) {
-            return deps.clone();
+            let mut deps = deps.clone();
+            filter_ignored_dependencies(&mut deps);
+            return deps;
         }
         if self.library.metadata_cache_version == METADATA_CACHE_VERSION {
-            return mod_entry.dependencies.clone();
+            let mut deps = mod_entry.dependencies.clone();
+            filter_ignored_dependencies(&mut deps);
+            return deps;
         }
         self.collect_mod_dependencies(mod_entry)
     }
@@ -6779,6 +6889,13 @@ impl App {
                     self.cancel_pending_import(keep_files);
                 }
             }
+            DialogKind::OverrideDependencies => {
+                if matches!(choice, DialogChoice::Yes) {
+                    self.dependency_queue_continue();
+                } else {
+                    self.status = "Dependency override canceled".to_string();
+                }
+            }
             DialogKind::CopyDependencySearchLink { link } => {
                 if let Some(toggle) = dialog.toggle {
                     if toggle.checked {
@@ -7225,15 +7342,15 @@ impl App {
             let mut pak_exists = false;
             let mut has_other_enabled = false;
             let pak_enabled = mod_entry.is_target_enabled(TargetKind::Pak);
+            let mut has_pak_target = false;
             for target in &mod_entry.targets {
                 let kind = target.kind();
                 match target {
                     InstallTarget::Pak { file, .. } => {
+                        has_pak_target = true;
                         let source = library_mod_root(&self.config.data_dir).join(id).join(file);
                         if source.exists() {
                             pak_exists = true;
-                        } else if pak_enabled {
-                            missing_pak = true;
                         }
                     }
                     _ => {
@@ -7242,6 +7359,13 @@ impl App {
                         }
                     }
                 }
+            }
+            if has_pak_target && !pak_exists {
+                pak_exists = !resolve_pak_paths(mod_entry, &self.config.data_dir, None, None)
+                    .is_empty();
+            }
+            if has_pak_target && pak_enabled && !pak_exists {
+                missing_pak = true;
             }
             if missing_pak {
                 actions.push((id.clone(), mod_entry.display_name(), has_other_enabled));
@@ -8592,6 +8716,20 @@ fn dependency_signature(display_label: &str, uuid: &Option<String>, raw: &str) -
     normalize_label(raw)
 }
 
+fn override_dependency_item() -> DependencyItem {
+    DependencyItem {
+        label: "override".to_string(),
+        display_label: "Override dependencies".to_string(),
+        uuid: None,
+        required_by: Vec::new(),
+        status: DependencyStatus::Skipped,
+        link: None,
+        search_link: None,
+        search_label: String::new(),
+        kind: DependencyItemKind::OverrideAction,
+    }
+}
+
 fn dependency_search_label(display_label: &str, uuid: &Option<String>, raw: &str) -> String {
     if display_label != "Unknown dependency" {
         return display_label.to_string();
@@ -8611,6 +8749,24 @@ fn dependency_search_link(query: &str) -> Option<String> {
     Some(format!(
         "https://www.nexusmods.com/baldursgate3/search/?gsearch={encoded}&gsearchtype=mods"
     ))
+}
+
+fn filter_ignored_dependencies(deps: &mut Vec<String>) {
+    deps.retain(|dep| {
+        if metadata::is_base_dependency_uuid(dep) || metadata::is_base_dependency_label(dep) {
+            return false;
+        }
+        if let Some(uuid) = dependency_uuid(dep) {
+            if metadata::is_base_dependency_uuid(&uuid) {
+                return false;
+            }
+        }
+        let display = dependency_display_label(dep);
+        if metadata::is_base_dependency_label(&display) {
+            return false;
+        }
+        true
+    });
 }
 
 fn encode_query(value: &str) -> String {
@@ -9521,6 +9677,16 @@ fn resolve_pak_paths(
             let path = data_dir.join("mods").join(&mod_entry.id).join(file);
             if path.exists() {
                 push_unique(path);
+            } else if let Some(index) = if data_dir.join("mods").join(&mod_entry.id).exists() {
+                Some(native_pak::build_native_pak_index(
+                    &data_dir.join("mods").join(&mod_entry.id),
+                ))
+            } else {
+                None
+            } {
+                if let Some(path) = native_pak::resolve_native_pak_path(info, &index) {
+                    push_unique(path);
+                }
             }
         }
     }
