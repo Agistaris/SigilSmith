@@ -7334,6 +7334,7 @@ impl App {
         let mod_map = self.library.index_by_id();
         let mut actions = Vec::new();
         let mut restores = Vec::new();
+        let mut rename_targets: HashMap<String, Vec<(String, String)>> = HashMap::new();
         for (id, mod_entry) in &mod_map {
             if mod_entry.is_native() {
                 continue;
@@ -7343,14 +7344,40 @@ impl App {
             let mut has_other_enabled = false;
             let pak_enabled = mod_entry.is_target_enabled(TargetKind::Pak);
             let mut has_pak_target = false;
+            let mod_root = library_mod_root(&self.config.data_dir).join(id);
+            let pak_index = if mod_root.exists() {
+                Some(native_pak::build_native_pak_index(&mod_root))
+            } else {
+                None
+            };
             for target in &mod_entry.targets {
                 let kind = target.kind();
                 match target {
                     InstallTarget::Pak { file, .. } => {
                         has_pak_target = true;
-                        let source = library_mod_root(&self.config.data_dir).join(id).join(file);
+                        let source = mod_root.join(file);
                         if source.exists() {
                             pak_exists = true;
+                        } else if let Some(index) = pak_index.as_ref() {
+                            if let InstallTarget::Pak { info, .. } = target {
+                                if let Some(resolved) =
+                                    native_pak::resolve_native_pak_path(info, index)
+                                {
+                                    if resolved.exists() {
+                                        pak_exists = true;
+                                        if let Some(name) =
+                                            resolved.file_name().and_then(|name| name.to_str())
+                                        {
+                                            if name != file {
+                                                rename_targets
+                                                    .entry(id.clone())
+                                                    .or_default()
+                                                    .push((file.clone(), name.to_string()));
+                                            }
+                                        }
+                                    }
+                                }
+                            }
                         }
                     }
                     _ => {
@@ -7381,11 +7408,28 @@ impl App {
             }
         }
 
-        if actions.is_empty() && restores.is_empty() {
+        if actions.is_empty() && restores.is_empty() && rename_targets.is_empty() {
             return 0;
         }
 
         let mut changed = false;
+        if !rename_targets.is_empty() {
+            for mod_entry in &mut self.library.mods {
+                let Some(renames) = rename_targets.get(&mod_entry.id) else {
+                    continue;
+                };
+                for target in &mut mod_entry.targets {
+                    if let InstallTarget::Pak { file, .. } = target {
+                        if let Some((_, new_name)) =
+                            renames.iter().find(|(old, _)| old == file)
+                        {
+                            *file = new_name.clone();
+                            changed = true;
+                        }
+                    }
+                }
+            }
+        }
         if let Some(profile) = self.library.active_profile_mut() {
             for (id, _, has_other_enabled) in &actions {
                 if *has_other_enabled {
