@@ -142,6 +142,9 @@ pub enum DialogKind {
         link: String,
     },
     StartupDependencyNotice,
+    EnableAllVisible,
+    DisableAllVisible,
+    InvertVisible,
 }
 
 #[derive(Debug, Clone)]
@@ -729,6 +732,7 @@ pub struct NativeModUpdate {
     pub targets: Vec<InstallTarget>,
     pub created_at: Option<i64>,
     pub modified_at: Option<i64>,
+    pub dependencies: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -6799,6 +6803,9 @@ impl App {
                 }
             }
             DialogKind::ImportSummary => {}
+            DialogKind::EnableAllVisible => {}
+            DialogKind::DisableAllVisible => {}
+            DialogKind::InvertVisible => {}
         }
     }
 
@@ -7039,6 +7046,10 @@ impl App {
             }
             if entry.modified_at != update.modified_at {
                 entry.modified_at = update.modified_at;
+                changed = true;
+            }
+            if entry.dependencies != update.dependencies {
+                entry.dependencies = update.dependencies;
                 changed = true;
             }
         }
@@ -9265,8 +9276,15 @@ fn sync_native_mods_delta(
 
         let pak_path = paths.larian_mods_dir.join(&filename);
         let modsettings_created = module_created_by_uuid.get(&mod_entry.id).copied().flatten();
-        let meta_created =
-            metadata::read_meta_lsx_from_pak(&pak_path).and_then(|meta| meta.created_at);
+        let pak_meta = metadata::read_meta_lsx_from_pak(&pak_path);
+        let meta_created = pak_meta.as_ref().and_then(|meta| meta.created_at);
+        let mut dependencies = pak_meta
+            .as_ref()
+            .map(|meta| meta.dependencies.clone())
+            .unwrap_or_default();
+        dependencies.sort();
+        dependencies.dedup();
+        dependencies.retain(|dep| !dep.eq_ignore_ascii_case(&mod_entry.id));
         let (raw_created, raw_modified) = path_times(&pak_path);
         let primary_created = earliest_timestamp(&[modsettings_created, meta_created]);
         let (created_at, modified_at) =
@@ -9309,6 +9327,7 @@ fn sync_native_mods_delta(
             targets,
             created_at: next_created,
             modified_at: next_modified,
+            dependencies,
         });
     }
 
@@ -9341,8 +9360,15 @@ fn sync_native_mods_delta(
         let filename = native_pak::resolve_native_pak_filename(info, &native_pak_index)
             .unwrap_or_else(|| format!("{}.pak", info.folder));
         let pak_path = paths.larian_mods_dir.join(&filename);
-        let meta_created =
-            metadata::read_meta_lsx_from_pak(&pak_path).and_then(|meta| meta.created_at);
+        let pak_meta = metadata::read_meta_lsx_from_pak(&pak_path);
+        let meta_created = pak_meta.as_ref().and_then(|meta| meta.created_at);
+        let mut dependencies = pak_meta
+            .as_ref()
+            .map(|meta| meta.dependencies.clone())
+            .unwrap_or_default();
+        dependencies.sort();
+        dependencies.dedup();
+        dependencies.retain(|dep| !dep.eq_ignore_ascii_case(&mod_entry.id));
         let (raw_created, raw_modified) = path_times(&pak_path);
         let primary_created = earliest_timestamp(&[modsettings_created, meta_created]);
         let (created_at, modified_at) =
@@ -9368,6 +9394,7 @@ fn sync_native_mods_delta(
             }],
             created_at: next_created,
             modified_at: next_modified,
+            dependencies,
         });
         adopted_native += 1;
     }
@@ -9399,8 +9426,15 @@ fn sync_native_mods_delta(
         let filename = native_pak::resolve_native_pak_filename(&info, &native_pak_index)
             .unwrap_or_else(|| format!("{}.pak", info.folder));
         let pak_path = paths.larian_mods_dir.join(&filename);
-        let meta_created =
-            metadata::read_meta_lsx_from_pak(&pak_path).and_then(|meta| meta.created_at);
+        let pak_meta = metadata::read_meta_lsx_from_pak(&pak_path);
+        let meta_created = pak_meta.as_ref().and_then(|meta| meta.created_at);
+        let mut dependencies = pak_meta
+            .as_ref()
+            .map(|meta| meta.dependencies.clone())
+            .unwrap_or_default();
+        dependencies.sort();
+        dependencies.dedup();
+        dependencies.retain(|dep| !dep.eq_ignore_ascii_case(&uuid));
         let (raw_created, raw_modified) = path_times(&pak_path);
         let primary_created = earliest_timestamp(&[modsettings_created, meta_created]);
         let (created_at, modified_at) =
@@ -9418,7 +9452,7 @@ fn sync_native_mods_delta(
             target_overrides: Vec::new(),
             source_label: None,
             source: ModSource::Native,
-            dependencies: Vec::new(),
+            dependencies,
         };
         added.push(mod_entry);
         existing_ids.insert(uuid);

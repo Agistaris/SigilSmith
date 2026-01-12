@@ -195,6 +195,9 @@ fn run_loop(terminal: &mut Terminal<impl Backend>, app: &mut App) -> Result<()> 
 }
 
 fn handle_key(app: &mut App, key: KeyEvent) -> Result<()> {
+    if app.dialog.is_some() {
+        return handle_dialog_mode(app, key);
+    }
     if app.dependency_queue_active() {
         return handle_dependency_queue(app, key);
     }
@@ -203,9 +206,6 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Result<()> {
     }
     if app.smart_rank_preview.is_some() {
         return handle_smart_rank_preview(app, key);
-    }
-    if app.dialog.is_some() {
-        return handle_dialog_mode(app, key);
     }
     if app.settings_menu.is_some() {
         return handle_settings_menu(app, key);
