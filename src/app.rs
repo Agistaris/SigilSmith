@@ -510,6 +510,7 @@ pub struct App {
     pub hotkey_focus: Focus,
     pub explorer_selected: usize,
     pub toast: Option<Toast>,
+    busy_anim: BusyAnim,
     pub mod_filter: String,
     mod_filter_snapshot: Option<String>,
     pub mod_sort: ModSort,
@@ -613,6 +614,121 @@ pub struct PendingOverride {
     pub from: String,
     pub to: String,
     pub last_input: Instant,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct BusyAnimState {
+    pub phase: f32,
+    pub seed: u64,
+    pub paused: bool,
+}
+
+#[derive(Debug, Clone)]
+struct BusyAnim {
+    phase: f32,
+    speed: f32,
+    last_tick: Instant,
+    next_variation_at: Instant,
+    pause_until: Option<Instant>,
+    rng_state: u64,
+    active: bool,
+}
+
+impl BusyAnim {
+    fn new() -> Self {
+        let now = Instant::now();
+        let seed = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos() as u64;
+        let mut anim = Self {
+            phase: 0.0,
+            speed: 0.35,
+            last_tick: now,
+            next_variation_at: now,
+            pause_until: None,
+            rng_state: seed ^ 0x9E37_79B9_7F4A_7C15,
+            active: false,
+        };
+        anim.randomize_start(now);
+        anim
+    }
+
+    fn state(&self) -> BusyAnimState {
+        BusyAnimState {
+            phase: self.phase,
+            seed: self.rng_state,
+            paused: self.pause_until.is_some(),
+        }
+    }
+
+    fn update(&mut self, busy: bool) {
+        let now = Instant::now();
+        if !busy {
+            self.active = false;
+            self.pause_until = None;
+            self.last_tick = now;
+            return;
+        }
+        if !self.active {
+            self.randomize_start(now);
+            self.active = true;
+        }
+        let dt = now.saturating_duration_since(self.last_tick);
+        self.last_tick = now;
+
+        if let Some(until) = self.pause_until {
+            if now < until {
+                return;
+            }
+            self.pause_until = None;
+        }
+
+        if now >= self.next_variation_at {
+            self.roll_variation(now);
+        }
+
+        let delta = dt.as_secs_f32() * self.speed;
+        self.phase = (self.phase + delta).fract();
+    }
+
+    fn randomize_start(&mut self, now: Instant) {
+        self.phase = self.next_f32();
+        self.roll_variation(now);
+        self.pause_until = None;
+    }
+
+    fn roll_variation(&mut self, now: Instant) {
+        let speed = lerp_f32(0.18, 0.85, self.next_f32());
+        self.speed = speed;
+        let pause_roll = self.next_f32();
+        if pause_roll < 0.22 {
+            let pause_ms = lerp_f32(140.0, 900.0, self.next_f32()) as u64;
+            self.pause_until = Some(now + Duration::from_millis(pause_ms));
+        }
+        let next_ms = lerp_f32(240.0, 1400.0, self.next_f32()) as u64;
+        self.next_variation_at = now + Duration::from_millis(next_ms);
+    }
+
+    fn next_f32(&mut self) -> f32 {
+        let value = self.next_u64();
+        let upper = (value >> 40) as u32;
+        (upper as f32) / ((1u32 << 24) as f32)
+    }
+
+    fn next_u64(&mut self) -> u64 {
+        let mut x = self.rng_state;
+        x ^= x << 7;
+        x ^= x >> 9;
+        x ^= x << 8;
+        self.rng_state = x;
+        x
+    }
+}
+
+fn lerp_f32(min: f32, max: f32, t: f32) -> f32 {
+    let clamped = t.clamp(0.0, 1.0);
+    min + (max - min) * clamped
 }
 
 #[derive(Debug, Clone)]
@@ -830,6 +946,7 @@ impl App {
             hotkey_focus: Focus::Mods,
             explorer_selected: 0,
             toast: None,
+            busy_anim: BusyAnim::new(),
             mod_filter: String::new(),
             mod_filter_snapshot: None,
             mod_sort: ModSort::default(),
@@ -1889,6 +2006,10 @@ impl App {
             || self.conflict_pending
             || self.smart_rank_active
             || self.metadata_active
+    }
+
+    pub fn busy_anim_state(&self) -> BusyAnimState {
+        self.busy_anim.state()
     }
 
     pub fn startup_pending(&self) -> bool {
@@ -2971,6 +3092,7 @@ impl App {
     }
 
     pub fn tick(&mut self) {
+        self.busy_anim.update(self.is_busy());
         if let Some(toast) = &self.toast {
             if toast.expires_at <= Instant::now() {
                 self.toast = None;
