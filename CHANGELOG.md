@@ -5,6 +5,7 @@
 - Fix native .pak filename resolution for truncated UUID names so dependency metadata is detected.
 - Preserve native mod dependencies during native sync updates and adoption.
 - Fix Cancel Import dialog focus so the dependency queue no longer steals input.
+- Refresh dependency cache after native sync dependency updates.
 
 ## 0.6.1
 

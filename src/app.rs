@@ -7004,6 +7004,7 @@ impl App {
 
     fn apply_native_sync_delta(&mut self, delta: NativeSyncDelta) {
         let mut changed = false;
+        let mut dependencies_changed = false;
         let updated_native_files = delta.updated_native_files;
         let adopted_native = delta.adopted_native;
 
@@ -7050,6 +7051,7 @@ impl App {
             }
             if entry.dependencies != update.dependencies {
                 entry.dependencies = update.dependencies;
+                dependencies_changed = true;
                 changed = true;
             }
         }
@@ -7064,6 +7066,9 @@ impl App {
                 .collect();
             for mod_entry in delta.added {
                 if existing_ids.insert(mod_entry.id.clone()) {
+                    if !mod_entry.dependencies.is_empty() {
+                        dependencies_changed = true;
+                    }
                     self.library.mods.push(mod_entry);
                     added += 1;
                     changed = true;
@@ -7179,6 +7184,9 @@ impl App {
             self.library.metadata_cache_version = METADATA_CACHE_VERSION;
             if let Err(err) = self.library.save(&self.config.data_dir) {
                 self.log_warn(format!("Native mod sync save failed: {err}"));
+            }
+            if dependencies_changed {
+                self.prime_dependency_cache_from_library();
             }
             self.schedule_smart_rank_refresh(
                 smart_rank::SmartRankRefreshMode::Incremental,
