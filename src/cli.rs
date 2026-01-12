@@ -1,5 +1,5 @@
 use crate::{
-    app::{App, CliImportOptions, CliVerbosity, StartupMode},
+    app::{App, CliImportOptions, CliVerbosity, DependencyLookup, StartupMode},
     bg3::GamePaths,
     game,
     library::{library_mod_root, InstallTarget, Library, ModEntry, Profile},
@@ -48,6 +48,7 @@ enum CliCommand {
     ProfilesList,
     DepsList,
     DepsMissing,
+    DepsResolved,
     DepsDebug(String),
     Debug(DebugCommand),
     Paths,
@@ -220,6 +221,7 @@ fn parse_subcommand(tokens: &[String], global: &GlobalOptions) -> Result<Option<
             let command = match sub {
                 "list" => CliCommand::DepsList,
                 "missing" => CliCommand::DepsMissing,
+                "resolved" | "aliases" => CliCommand::DepsResolved,
                 "debug" => {
                     let query = tokens
                         .get(2)
@@ -227,7 +229,9 @@ fn parse_subcommand(tokens: &[String], global: &GlobalOptions) -> Result<Option<
                     CliCommand::DepsDebug(query.to_string())
                 }
                 _ => {
-                    bail!("Unknown deps command: {sub} (use 'list', 'missing', or 'debug')");
+                    bail!(
+                        "Unknown deps command: {sub} (use 'list', 'missing', 'resolved', or 'debug')"
+                    );
                 }
             };
             Ok(Some(CliAction::Command {
@@ -436,6 +440,10 @@ fn run_command(
         CliCommand::DepsMissing => {
             let profile = resolve_profile(&app.library, profile.as_deref())?;
             list_missing_dependencies(app, profile, format)
+        }
+        CliCommand::DepsResolved => {
+            let profile = resolve_profile(&app.library, profile.as_deref())?;
+            list_resolved_dependencies(app, profile, format)
         }
         CliCommand::DepsDebug(query) => debug_dependencies(app, &query),
         CliCommand::Debug(command) => match command {
@@ -675,6 +683,7 @@ fn list_dependencies(app: &App, profile: &Profile, format: OutputFormat) -> Resu
 
 fn list_missing_dependencies(app: &App, profile: &Profile, format: OutputFormat) -> Result<()> {
     let mod_map = app.library.index_by_id();
+    let lookup = DependencyLookup::new(&app.library.mods);
     let enabled_ids: HashSet<&String> = profile
         .order
         .iter()
@@ -695,23 +704,37 @@ fn list_missing_dependencies(app: &App, profile: &Profile, format: OutputFormat)
         };
         let deps = collect_dependencies(app, mod_entry, paths.as_ref());
         for dep_id in deps {
-            let dependency = mod_map.get(&dep_id);
-            let (dependency_name, reason) = match dependency {
-                Some(dep_mod) => {
-                    if enabled_ids.contains(&dep_mod.id) {
-                        continue;
-                    }
-                    (dep_mod.display_name(), "disabled".to_string())
-                }
-                None => ("Unknown".to_string(), "not installed".to_string()),
-            };
+            let resolved_ids = lookup.resolve_ids(&dep_id);
+            if resolved_ids.is_empty() {
+                missing.push(MissingDependencyItem {
+                    required_by: mod_entry.display_name(),
+                    required_by_id: mod_entry.id.clone(),
+                    dependency: "Unknown".to_string(),
+                    dependency_id: dep_id,
+                    reason: "not installed".to_string(),
+                });
+                continue;
+            }
+            let mut resolved_mods: Vec<&ModEntry> = resolved_ids
+                .iter()
+                .filter_map(|id| mod_map.get(id))
+                .collect();
+            resolved_mods.sort_by(|a, b| a.display_name().cmp(&b.display_name()));
+            if resolved_mods.iter().any(|dep_mod| enabled_ids.contains(&dep_mod.id)) {
+                continue;
+            }
+            let dependency_name = resolved_mods
+                .first()
+                .map(|entry| entry.display_name())
+                .unwrap_or_else(|| "Unknown".to_string());
             missing.push(MissingDependencyItem {
                 required_by: mod_entry.display_name(),
                 required_by_id: mod_entry.id.clone(),
                 dependency: dependency_name,
                 dependency_id: dep_id,
-                reason,
+                reason: "disabled".to_string(),
             });
+            continue;
         }
     }
 
@@ -728,6 +751,102 @@ fn list_missing_dependencies(app: &App, profile: &Profile, format: OutputFormat)
                         "{} -> {} ({})",
                         item.required_by, item.dependency_id, item.reason
                     );
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+#[derive(Serialize)]
+struct ResolvedDependencyTarget {
+    id: String,
+    name: String,
+    enabled: bool,
+}
+
+#[derive(Serialize)]
+struct ResolvedDependencyItem {
+    required_by: String,
+    required_by_id: String,
+    dependency: String,
+    resolved: Vec<ResolvedDependencyTarget>,
+}
+
+fn list_resolved_dependencies(app: &App, profile: &Profile, format: OutputFormat) -> Result<()> {
+    let mod_map = app.library.index_by_id();
+    let lookup = DependencyLookup::new(&app.library.mods);
+    let enabled_ids: HashSet<&String> = profile
+        .order
+        .iter()
+        .filter(|entry| entry.enabled)
+        .map(|entry| &entry.id)
+        .collect();
+    let paths = game::detect_paths(
+        app.game_id,
+        Some(&app.config.game_root),
+        Some(&app.config.larian_dir),
+    )
+    .ok();
+
+    let mut resolved_map: HashMap<String, ResolvedDependencyItem> = HashMap::new();
+    let mut seen = HashSet::new();
+    for mod_entry in &app.library.mods {
+        let deps = collect_dependencies(app, mod_entry, paths.as_ref());
+        for dep_id in deps {
+            let resolved_ids = lookup.resolve_ids(&dep_id);
+            if resolved_ids.is_empty() {
+                continue;
+            }
+            if resolved_ids
+                .iter()
+                .any(|id| dep_id.eq_ignore_ascii_case(id))
+            {
+                continue;
+            }
+            let key = format!("{}|{}", mod_entry.id, dep_id);
+            let item = resolved_map.entry(key.clone()).or_insert_with(|| {
+                ResolvedDependencyItem {
+                    required_by: mod_entry.display_name(),
+                    required_by_id: mod_entry.id.clone(),
+                    dependency: dep_id.clone(),
+                    resolved: Vec::new(),
+                }
+            });
+            for resolved_id in resolved_ids {
+                let seen_key = format!("{}|{}", key, resolved_id);
+                if !seen.insert(seen_key) {
+                    continue;
+                }
+                if let Some(resolved_mod) = mod_map.get(&resolved_id) {
+                    let enabled = enabled_ids.contains(&resolved_mod.id);
+                    item.resolved.push(ResolvedDependencyTarget {
+                        id: resolved_mod.id.clone(),
+                        name: resolved_mod.display_name(),
+                        enabled,
+                    });
+                }
+            }
+            item.resolved.sort_by(|a, b| a.name.cmp(&b.name));
+        }
+    }
+
+    let mut resolved: Vec<ResolvedDependencyItem> = resolved_map.into_values().collect();
+    resolved.sort_by(|a, b| a.required_by.cmp(&b.required_by));
+
+    match format {
+        OutputFormat::Json => println!("{}", serde_json::to_string_pretty(&resolved)?),
+        OutputFormat::Text => {
+            if resolved.is_empty() {
+                println!("No resolved dependency aliases found.");
+            } else {
+                for item in resolved {
+                    println!("{} -> {}", item.required_by, item.dependency);
+                    for target in item.resolved {
+                        let status = if target.enabled { "enabled" } else { "disabled" };
+                        println!("  => {} ({}) {status}", target.name, target.id);
+                    }
                 }
             }
         }
@@ -985,6 +1104,7 @@ fn print_help() {
     println!("  sigilsmith profiles list        List profiles");
     println!("  sigilsmith deps list            List dependencies for installed mods");
     println!("  sigilsmith deps missing         List missing dependencies");
+    println!("  sigilsmith deps resolved        List dependency aliases resolved to installed mods");
     println!("  sigilsmith deps debug <mod>     Show dependency matching details");
     println!("  sigilsmith debug smart-rank     Debug smart rank cache (debug builds)");
     println!("  sigilsmith debug warmup         Build smart rank cache (debug builds)");

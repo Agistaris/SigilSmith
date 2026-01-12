@@ -226,7 +226,7 @@ impl DependencyLookup {
         Self { id_map, key_map }
     }
 
-    fn resolve_ids(&self, dependency: &str) -> Vec<String> {
+    pub fn resolve_ids(&self, dependency: &str) -> Vec<String> {
         let mut out = Vec::new();
         for key in dependency_match_keys(dependency) {
             if let Some(id) = self.id_map.get(&key) {
