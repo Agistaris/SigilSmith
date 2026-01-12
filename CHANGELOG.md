@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.6.2
 
 - Fix native .pak filename resolution for truncated UUID names so dependency metadata is detected.
 - Preserve native mod dependencies during native sync updates and adoption.
