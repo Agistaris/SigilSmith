@@ -55,6 +55,11 @@ pub fn resolve_native_pak_path(
     let folder_key = normalize_pak_key(&info.folder);
     let name_key = normalize_pak_key(&info.name);
     let uuid_key = normalize_pak_key(&info.uuid);
+    let uuid_prefix = uuid_key
+        .get(0..16)
+        .or_else(|| uuid_key.get(0..12))
+        .unwrap_or("")
+        .to_string();
 
     let mut best: Option<&NativePakEntry> = None;
     let mut best_score = 0i32;
@@ -67,6 +72,12 @@ pub fn resolve_native_pak_path(
         if let Some(detail) = match_detail(&entry.normalized, &uuid_key, 120, 110, 80) {
             score = score.saturating_add(detail.score);
             len_diff = len_diff.min(detail.len_diff);
+        }
+        if !uuid_prefix.is_empty() {
+            if let Some(detail) = match_detail(&entry.normalized, &uuid_prefix, 70, 55, 35) {
+                score = score.saturating_add(detail.score);
+                len_diff = len_diff.min(detail.len_diff);
+            }
         }
         if let Some(detail) = match_detail(&entry.normalized, &folder_key, 90, 70, 50) {
             score = score.saturating_add(detail.score);

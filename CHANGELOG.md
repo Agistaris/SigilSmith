@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Fix native .pak filename resolution for truncated UUID names so dependency metadata is detected.
+
 ## 0.6.1
 
 - Smart-rank cache updates incrementally on toggles, moves, imports, and removals with per-mod scan reuse, plus debug cache validation and simulation helpers.
