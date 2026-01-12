@@ -194,7 +194,8 @@ pub fn deploy_with_options(
                 let source = library_mod_path(&config.data_dir, &mod_entry.id).join(file);
                 let dest = paths.larian_mods_dir.join(format!("{}.pak", info.folder));
                 fs::create_dir_all(&paths.larian_mods_dir).context("create mods dir")?;
-                fs::copy(&source, &dest).with_context(|| format!("copy pak {:?}", source))?;
+                link_or_copy_pak(&source, &dest)
+                    .with_context(|| format!("deploy pak {:?}", source))?;
                 pak_files.push(dest.to_string_lossy().to_string());
             }
         }
@@ -221,6 +222,23 @@ pub fn deploy_with_options(
         removed_count,
         overridden_files,
     })
+}
+
+fn link_or_copy_pak(source: &Path, dest: &Path) -> Result<()> {
+    if dest.exists() {
+        fs::remove_file(dest).with_context(|| format!("remove existing pak {:?}", dest))?;
+    }
+    match fs::hard_link(source, dest) {
+        Ok(()) => Ok(()),
+        Err(err) => {
+            if dest.exists() {
+                let _ = fs::remove_file(dest);
+            }
+            fs::copy(source, dest)
+                .with_context(|| format!("copy pak {:?} (hardlink failed: {err})", source))?;
+            Ok(())
+        }
+    }
 }
 
 pub fn scan_conflicts(config: &GameConfig, library: &Library) -> Result<Vec<ConflictEntry>> {
