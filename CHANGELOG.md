@@ -15,6 +15,10 @@
 - Strip ignored dependencies even when cached to avoid false missing warnings.
 - Self-heal missing pak checks now resolve truncated filenames before disabling targets.
 - Enabled marker uses warning color when overrides or missing dependencies are present.
+- Import no longer pauses for dependency prompts; missing dependency counts update after import.
+- Ignore UUID-only/underscore dependency tokens to reduce false missing warnings for cosmetic mods.
+- CLI adds `deps resolved` report and aligns missing-deps detection with alias matching.
+- Deploy now hardlinks managed .pak files (Vortex-style) with copy fallback.
 
 ## 0.6.1
 

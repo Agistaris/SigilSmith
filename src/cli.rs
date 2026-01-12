@@ -704,8 +704,11 @@ fn list_missing_dependencies(app: &App, profile: &Profile, format: OutputFormat)
         };
         let deps = collect_dependencies(app, mod_entry, paths.as_ref());
         for dep_id in deps {
-            let resolved_ids = lookup.resolve_ids(&dep_id);
+            let resolved_ids = resolve_dependency_targets(&lookup, &dep_id, mod_entry);
             if resolved_ids.is_empty() {
+                if is_unverified_dependency(&dep_id) {
+                    continue;
+                }
                 missing.push(MissingDependencyItem {
                     required_by: mod_entry.display_name(),
                     required_by_id: mod_entry.id.clone(),
@@ -795,14 +798,8 @@ fn list_resolved_dependencies(app: &App, profile: &Profile, format: OutputFormat
     for mod_entry in &app.library.mods {
         let deps = collect_dependencies(app, mod_entry, paths.as_ref());
         for dep_id in deps {
-            let resolved_ids = lookup.resolve_ids(&dep_id);
+            let resolved_ids = resolve_dependency_targets(&lookup, &dep_id, mod_entry);
             if resolved_ids.is_empty() {
-                continue;
-            }
-            if resolved_ids
-                .iter()
-                .any(|id| dep_id.eq_ignore_ascii_case(id))
-            {
                 continue;
             }
             let key = format!("{}|{}", mod_entry.id, dep_id);
@@ -1030,6 +1027,71 @@ fn collect_dependencies(app: &App, mod_entry: &ModEntry, paths: Option<&GamePath
         true
     });
     out
+}
+
+fn resolve_dependency_targets(
+    lookup: &DependencyLookup,
+    dependency: &str,
+    mod_entry: &ModEntry,
+) -> Vec<String> {
+    let mut ids = lookup.resolve_ids(dependency);
+    if ids.is_empty() {
+        return ids;
+    }
+    if dependency_is_self_alias(dependency, mod_entry, &ids) {
+        return ids;
+    }
+    let dep_lower = dependency.to_ascii_lowercase();
+    let self_id = mod_entry.id.to_ascii_lowercase();
+    if !dep_lower.contains(&self_id) {
+        ids.retain(|id| id != &mod_entry.id);
+    }
+    ids
+}
+
+fn is_unverified_dependency(dep: &str) -> bool {
+    if dep.starts_with('_') {
+        return true;
+    }
+    is_uuid_like(dep)
+}
+
+fn dependency_is_self_alias(
+    dependency: &str,
+    mod_entry: &ModEntry,
+    resolved_ids: &[String],
+) -> bool {
+    if resolved_ids.len() != 1 || resolved_ids[0] != mod_entry.id {
+        return false;
+    }
+    if dependency.starts_with('_') {
+        return true;
+    }
+    dependency
+        .to_ascii_lowercase()
+        .contains(&mod_entry.id.to_ascii_lowercase())
+}
+
+fn is_uuid_like(value: &str) -> bool {
+    if value.len() != 36 {
+        return false;
+    }
+    let bytes = value.as_bytes();
+    for (idx, byte) in bytes.iter().enumerate() {
+        match idx {
+            8 | 13 | 18 | 23 => {
+                if *byte != b'-' {
+                    return false;
+                }
+            }
+            _ => {
+                if !byte.is_ascii_hexdigit() {
+                    return false;
+                }
+            }
+        }
+    }
+    true
 }
 
 #[derive(Serialize)]

@@ -241,9 +241,6 @@ impl DependencyLookup {
         out
     }
 
-    pub fn contains(&self, dependency: &str) -> bool {
-        !self.resolve_ids(dependency).is_empty()
-    }
 }
 
 #[derive(Debug, Clone)]
@@ -5039,90 +5036,7 @@ impl App {
             self.maybe_show_import_summary();
             return;
         };
-        if self.queue_dependency_check(&batch) {
-            return;
-        }
-
         self.stage_imports(batch.mods, &batch.source);
-    }
-
-    fn queue_dependency_check(&mut self, batch: &importer::ImportBatch) -> bool {
-        if !self.app_config.offer_dependency_downloads && !self.app_config.warn_missing_dependencies
-        {
-            return false;
-        }
-
-        let Some(queue) = self.build_dependency_queue(batch) else {
-            return false;
-        };
-
-        self.pending_import_batch = Some(batch.clone());
-        self.pending_dependency_enable = None;
-        self.dependency_queue = Some(queue);
-        self.status = "Missing dependencies detected".to_string();
-        self.log_warn("Missing dependencies detected".to_string());
-        true
-    }
-
-    fn build_dependency_queue(&self, batch: &importer::ImportBatch) -> Option<DependencyQueue> {
-        let existing_lookup = DependencyLookup::new(&self.library.mods);
-        let batch_lookup = DependencyLookup::new(&batch.mods);
-        let mut missing: HashMap<String, DependencyItem> = HashMap::new();
-
-        for mod_entry in &batch.mods {
-            let deps = self.collect_mod_dependencies(mod_entry);
-            if deps.is_empty() {
-                continue;
-            }
-            let required_by = mod_entry.display_name();
-            for dep in deps {
-                if existing_lookup.contains(&dep) || batch_lookup.contains(&dep) {
-                    continue;
-                }
-                let display_label = dependency_display_label(&dep);
-                let uuid = dependency_uuid(&dep);
-                let signature = dependency_signature(&display_label, &uuid, &dep);
-                let entry = missing.entry(signature).or_insert_with(|| {
-                    let search_label = dependency_search_label(&display_label, &uuid, &dep);
-                    let search_link = dependency_search_link(&search_label);
-                    DependencyItem {
-                        label: dep.clone(),
-                        display_label: display_label.clone(),
-                        uuid: uuid.clone(),
-                        required_by: Vec::new(),
-                        status: DependencyStatus::Missing,
-                        link: None,
-                        search_link,
-                        search_label,
-                        kind: DependencyItemKind::Missing,
-                    }
-                });
-                entry.required_by.push(required_by.clone());
-                if entry.display_label == "Unknown dependency"
-                    && display_label != "Unknown dependency"
-                {
-                    entry.display_label = display_label.clone();
-                    entry.search_label = dependency_search_label(&display_label, &uuid, &dep);
-                    entry.search_link = dependency_search_link(&entry.search_label);
-                }
-                if entry.uuid.is_none() {
-                    entry.uuid = uuid;
-                }
-            }
-        }
-
-        if missing.is_empty() {
-            return None;
-        }
-
-        let mut items: Vec<DependencyItem> = missing.into_values().collect();
-        for item in &mut items {
-            item.required_by.sort();
-            item.required_by.dedup();
-        }
-        items.sort_by(|a, b| a.label.cmp(&b.label));
-        items.push(override_dependency_item());
-        Some(DependencyQueue { items, selected: 0 })
     }
 
     fn build_dependency_queue_for_mods(&self, mods: &[ModEntry]) -> Option<DependencyQueue> {
@@ -5136,7 +5050,11 @@ impl App {
             }
             let required_by = mod_entry.display_name();
             for dep in deps {
-                if existing_lookup.contains(&dep) {
+                let resolved_ids = resolved_dependency_ids(&existing_lookup, &dep, mod_entry);
+                if !resolved_ids.is_empty() {
+                    continue;
+                }
+                if is_unverified_dependency(&dep) {
                     continue;
                 }
                 let display_label = dependency_display_label(&dep);
@@ -5481,7 +5399,15 @@ impl App {
         if deps.is_empty() {
             return 0;
         }
-        deps.iter().filter(|dep| !lookup.contains(dep)).count()
+        deps.iter()
+            .filter(|dep| {
+                let ids = resolved_dependency_ids(lookup, dep, mod_entry);
+                if ids.is_empty() {
+                    return !is_unverified_dependency(dep);
+                }
+                false
+            })
+            .count()
     }
 
     pub fn debug_dependency_report(&self, query: &str) -> String {
@@ -7590,6 +7516,9 @@ impl App {
         for dep in dependency_labels {
             let ids = lookup.resolve_ids(&dep);
             if ids.is_empty() {
+                if is_unverified_dependency(&dep) {
+                    continue;
+                }
                 missing.push(dep);
             } else {
                 for id in ids {
@@ -8813,6 +8742,48 @@ fn dependency_search_link(query: &str) -> Option<String> {
     Some(format!(
         "https://www.nexusmods.com/baldursgate3/search/?gsearch={encoded}&gsearchtype=mods"
     ))
+}
+
+fn resolved_dependency_ids(
+    lookup: &DependencyLookup,
+    dependency: &str,
+    mod_entry: &ModEntry,
+) -> Vec<String> {
+    let mut ids = lookup.resolve_ids(dependency);
+    if ids.is_empty() {
+        return ids;
+    }
+    if dependency_is_self_alias(dependency, mod_entry, &ids) {
+        return ids;
+    }
+    let dep_lower = dependency.to_ascii_lowercase();
+    let self_id = mod_entry.id.to_ascii_lowercase();
+    if !dep_lower.contains(&self_id) {
+        ids.retain(|id| id != &mod_entry.id);
+    }
+    ids
+}
+
+fn is_unverified_dependency(dep: &str) -> bool {
+    if dep.starts_with('_') {
+        return true;
+    }
+    is_uuid_like(dep) && dependency_display_label(dep) == "Unknown dependency"
+}
+
+fn dependency_is_self_alias(
+    dependency: &str,
+    mod_entry: &ModEntry,
+    resolved_ids: &[String],
+) -> bool {
+    if resolved_ids.len() != 1 || resolved_ids[0] != mod_entry.id {
+        return false;
+    }
+    if dependency.starts_with('_') {
+        return true;
+    }
+    let dep_lower = dependency.to_ascii_lowercase();
+    dep_lower.contains(&mod_entry.id.to_ascii_lowercase())
 }
 
 fn filter_ignored_dependencies(deps: &mut Vec<String>) {
