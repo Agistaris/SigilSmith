@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.6.3
+
+- Rename profile list wording to mod list and surface Ctrl+E/Ctrl+P mod list import/export hotkeys.
+- Add a path browser with manual path entry for mod list import/export and a default export path.
+- Settings menu adds Clear System Caches plus enable-after-import and delete-files-on-remove toggles.
+- Align legend/hotkey panel layout and use uppercase A/S/X actions for visibility.
+- Show a friendly error when importing unsupported files instead of crashing.
+
 ## 0.6.2
 
 - Fix native .pak filename resolution for truncated UUID names so dependency metadata is detected.

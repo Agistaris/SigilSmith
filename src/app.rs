@@ -20,7 +20,7 @@ use std::{
     collections::{HashMap, HashSet, VecDeque},
     fs,
     io::{self, Write},
-    path::PathBuf,
+    path::{Path, PathBuf},
     process::{Command, Stdio},
     sync::{
         mpsc::{self, Receiver, Sender, TryRecvError},
@@ -72,11 +72,19 @@ pub enum SetupStep {
     DownloadsDir,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PathBrowserPurpose {
+    Setup(SetupStep),
+    ImportProfile,
+    ExportProfile { profile: String },
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PathBrowserEntryKind {
     Select,
     Parent,
     Dir,
+    File,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -95,7 +103,7 @@ pub struct PathBrowserEntry {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PathBrowser {
-    pub step: SetupStep,
+    pub purpose: PathBrowserPurpose,
     pub current: PathBuf,
     pub entries: Vec<PathBrowserEntry>,
     pub selected: usize,
@@ -2287,32 +2295,30 @@ impl App {
 
     pub fn enter_export_profile(&mut self, profile: &str) {
         self.move_mode = false;
-        self.input_mode = InputMode::Editing {
-            prompt: "Export path".to_string(),
-            buffer: String::new(),
-            purpose: InputPurpose::ExportProfile {
-                profile: profile.to_string(),
-            },
-            auto_submit: false,
-            last_edit_at: Instant::now(),
-        };
-        self.status = format!("Export profile: {profile}");
+        self.open_path_browser(PathBrowserPurpose::ExportProfile {
+            profile: profile.to_string(),
+        });
     }
 
     pub fn enter_import_profile(&mut self) {
         self.move_mode = false;
-        self.input_mode = InputMode::Editing {
-            prompt: "Import mod list".to_string(),
-            buffer: String::new(),
-            purpose: InputPurpose::ImportProfile,
-            auto_submit: false,
-            last_edit_at: Instant::now(),
-        };
-        self.status = "Import mod list: enter path".to_string();
+        self.open_path_browser(PathBrowserPurpose::ImportProfile);
     }
 
     fn normalize_profile_name(name: &str) -> String {
         name.trim().to_string()
+    }
+
+    fn sanitize_filename_component(value: &str) -> String {
+        let mut out = String::new();
+        for ch in value.trim().chars() {
+            if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' {
+                out.push(ch);
+            } else {
+                out.push('_');
+            }
+        }
+        out
     }
 
     fn profile_exists(&self, name: &str) -> bool {
@@ -2942,8 +2948,32 @@ impl App {
             return Ok(());
         }
 
-        let raw = fs::read_to_string(&path).context("read profile export")?;
-        let export: ProfileExport = serde_json::from_str(&raw).context("parse profile export")?;
+        let raw = match fs::read_to_string(&path) {
+            Ok(raw) => raw,
+            Err(err) => {
+                self.status = format!("Import failed: {}", path.display());
+                self.log_error(format!("Import read failed: {err}"));
+                self.set_toast(
+                    "Import failed: unable to read file",
+                    ToastLevel::Warn,
+                    Duration::from_secs(3),
+                );
+                return Ok(());
+            }
+        };
+        let export: ProfileExport = match serde_json::from_str(&raw) {
+            Ok(export) => export,
+            Err(err) => {
+                self.status = format!("Import failed: {}", path.display());
+                self.log_error(format!("Import parse failed: {err}"));
+                self.set_toast(
+                    "Import failed: invalid mod list",
+                    ToastLevel::Warn,
+                    Duration::from_secs(3),
+                );
+                return Ok(());
+            }
+        };
         let mut mismatch = false;
         if export.game_id != self.game_id.as_str() {
             mismatch = true;
@@ -3157,53 +3187,71 @@ impl App {
 
     pub fn enter_setup_game_root(&mut self) {
         self.move_mode = false;
-        self.open_path_browser(SetupStep::GameRoot);
+        self.open_path_browser(PathBrowserPurpose::Setup(SetupStep::GameRoot));
     }
 
     pub fn enter_setup_larian_dir(&mut self) {
         self.move_mode = false;
-        self.open_path_browser(SetupStep::LarianDir);
+        self.open_path_browser(PathBrowserPurpose::Setup(SetupStep::LarianDir));
     }
 
     pub fn enter_setup_downloads_dir(&mut self) {
         self.move_mode = false;
-        self.open_path_browser(SetupStep::DownloadsDir);
+        self.open_path_browser(PathBrowserPurpose::Setup(SetupStep::DownloadsDir));
     }
 
-    fn open_path_browser(&mut self, step: SetupStep) {
-        let current = self.path_browser_start(step);
-        let entries = self.build_path_browser_entries(step, &current);
-        let title = match step {
-            SetupStep::GameRoot => "Select BG3 install root (Data/ + bin/)",
-            SetupStep::LarianDir => "Select Larian data dir (PlayerProfiles/)",
-            SetupStep::DownloadsDir => "Select downloads folder",
+    fn open_path_browser(&mut self, purpose: PathBrowserPurpose) {
+        let current = self.path_browser_start(&purpose);
+        let input_seed = match &purpose {
+            PathBrowserPurpose::Setup(_) | PathBrowserPurpose::ImportProfile => {
+                current.display().to_string()
+            }
+            PathBrowserPurpose::ExportProfile { profile } => self
+                .default_profile_export_path(profile)
+                .display()
+                .to_string(),
         };
-        let input_seed = current.display().to_string();
+        let entries = self.build_path_browser_entries(&purpose, &current, &input_seed);
+        let title = match &purpose {
+            PathBrowserPurpose::Setup(SetupStep::GameRoot) => {
+                "Select BG3 install root (Data/ + bin/)"
+            }
+            PathBrowserPurpose::Setup(SetupStep::LarianDir) => {
+                "Select Larian data dir (PlayerProfiles/)"
+            }
+            PathBrowserPurpose::Setup(SetupStep::DownloadsDir) => "Select downloads folder",
+            PathBrowserPurpose::ImportProfile => "Import mod list",
+            PathBrowserPurpose::ExportProfile { .. } => "Export mod list",
+        };
+        let focus = match &purpose {
+            PathBrowserPurpose::Setup(_) => PathBrowserFocus::List,
+            _ => PathBrowserFocus::PathInput,
+        };
         self.input_mode = InputMode::Browsing(PathBrowser {
-            step,
+            purpose,
             current,
             entries,
             selected: 0,
             path_input: input_seed,
-            focus: PathBrowserFocus::List,
+            focus,
         });
         self.status = title.to_string();
     }
 
-    fn path_browser_start(&self, step: SetupStep) -> PathBuf {
+    fn path_browser_start(&self, purpose: &PathBrowserPurpose) -> PathBuf {
         let home = BaseDirs::new()
             .map(|base| base.home_dir().to_path_buf())
             .unwrap_or_else(|| PathBuf::from("/"));
         let mut candidates = Vec::new();
-        match step {
-            SetupStep::GameRoot => {
+        match purpose {
+            PathBrowserPurpose::Setup(SetupStep::GameRoot) => {
                 if !self.config.game_root.as_os_str().is_empty() {
                     candidates.push(self.config.game_root.clone());
                 }
                 candidates.push(home.join(".steam/steam/steamapps/common"));
                 candidates.push(home.join(".local/share/Steam/steamapps/common"));
             }
-            SetupStep::LarianDir => {
+            PathBrowserPurpose::Setup(SetupStep::LarianDir) => {
                 if !self.config.larian_dir.as_os_str().is_empty() {
                     candidates.push(self.config.larian_dir.clone());
                 }
@@ -3212,11 +3260,20 @@ impl App {
                     ".local/share/Steam/steamapps/compatdata/1086940/pfx/drive_c/users/steamuser/AppData/Local/Larian Studios",
                 ));
             }
-            SetupStep::DownloadsDir => {
+            PathBrowserPurpose::Setup(SetupStep::DownloadsDir) => {
                 if !self.app_config.downloads_dir.as_os_str().is_empty() {
                     candidates.push(self.app_config.downloads_dir.clone());
                 }
                 candidates.push(home.join("Downloads"));
+            }
+            PathBrowserPurpose::ImportProfile => {
+                if !self.app_config.downloads_dir.as_os_str().is_empty() {
+                    candidates.push(self.app_config.downloads_dir.clone());
+                }
+                candidates.push(home.join("Downloads"));
+            }
+            PathBrowserPurpose::ExportProfile { .. } => {
+                candidates.push(self.sigilsmith_dir());
             }
         }
         candidates
@@ -3225,24 +3282,71 @@ impl App {
             .unwrap_or(home)
     }
 
-    fn path_browser_selectable(&self, step: SetupStep, path: &PathBuf) -> bool {
-        match step {
-            SetupStep::GameRoot => game::looks_like_game_root(self.game_id, path),
-            SetupStep::LarianDir => game::looks_like_user_dir(self.game_id, path),
-            SetupStep::DownloadsDir => path.is_dir(),
+    fn sigilsmith_dir(&self) -> PathBuf {
+        std::env::var("APPIMAGE")
+            .ok()
+            .map(PathBuf::from)
+            .and_then(|path| path.parent().map(|parent| parent.to_path_buf()))
+            .or_else(|| {
+                std::env::current_exe()
+                    .ok()
+                    .and_then(|path| path.parent().map(|parent| parent.to_path_buf()))
+            })
+            .or_else(|| std::env::current_dir().ok())
+            .unwrap_or_else(|| self.config.data_dir.clone())
+    }
+
+    fn default_profile_export_path(&self, profile: &str) -> PathBuf {
+        let safe = Self::sanitize_filename_component(profile);
+        let filename = if safe.is_empty() {
+            "profile-export.json".to_string()
+        } else {
+            format!("{safe}.json")
+        };
+        self.sigilsmith_dir().join(filename)
+    }
+
+    pub(crate) fn path_browser_selectable(
+        &self,
+        purpose: &PathBrowserPurpose,
+        path: &PathBuf,
+    ) -> bool {
+        match purpose {
+            PathBrowserPurpose::Setup(SetupStep::GameRoot) => {
+                game::looks_like_game_root(self.game_id, path)
+            }
+            PathBrowserPurpose::Setup(SetupStep::LarianDir) => {
+                game::looks_like_user_dir(self.game_id, path)
+            }
+            PathBrowserPurpose::Setup(SetupStep::DownloadsDir) => path.is_dir(),
+            PathBrowserPurpose::ImportProfile => path.is_file(),
+            PathBrowserPurpose::ExportProfile { .. } => {
+                let parent = path.parent().unwrap_or_else(|| Path::new("."));
+                parent.is_dir() && path.file_name().is_some() && !path.is_dir()
+            }
         }
     }
 
     pub(crate) fn build_path_browser_entries(
         &self,
-        step: SetupStep,
+        purpose: &PathBrowserPurpose,
         current: &PathBuf,
+        path_input: &str,
     ) -> Vec<PathBrowserEntry> {
         let mut entries = Vec::new();
-        let selectable = self.path_browser_selectable(step, current);
+        let select_label = match purpose {
+            PathBrowserPurpose::Setup(_) => "[ Select this folder ]",
+            PathBrowserPurpose::ImportProfile => "[ Use entered path ]",
+            PathBrowserPurpose::ExportProfile { .. } => "[ Export to entered path ]",
+        };
+        let selectable_path = match purpose {
+            PathBrowserPurpose::Setup(_) => current.clone(),
+            _ => expand_tilde(path_input.trim()),
+        };
+        let selectable = self.path_browser_selectable(purpose, &selectable_path);
         entries.push(PathBrowserEntry {
-            label: "[ Select this folder ]".to_string(),
-            path: current.clone(),
+            label: select_label.to_string(),
+            path: selectable_path,
             kind: PathBrowserEntryKind::Select,
             selectable,
         });
@@ -3255,6 +3359,11 @@ impl App {
             });
         }
         let mut dirs = Vec::new();
+        let mut files = Vec::new();
+        let include_files = matches!(
+            purpose,
+            PathBrowserPurpose::ImportProfile | PathBrowserPurpose::ExportProfile { .. }
+        );
         if let Ok(read_dir) = fs::read_dir(current) {
             for entry in read_dir.flatten() {
                 let path = entry.path();
@@ -3270,24 +3379,44 @@ impl App {
                         kind: PathBrowserEntryKind::Dir,
                         selectable: false,
                     });
+                } else if include_files {
+                    let name = path
+                        .file_name()
+                        .and_then(|name| name.to_str())
+                        .map(|name| name.to_string())
+                        .unwrap_or_else(|| path.display().to_string());
+                    files.push(PathBrowserEntry {
+                        label: name,
+                        path,
+                        kind: PathBrowserEntryKind::File,
+                        selectable: false,
+                    });
                 }
             }
         }
         dirs.sort_by(|a, b| a.label.to_lowercase().cmp(&b.label.to_lowercase()));
+        files.sort_by(|a, b| a.label.to_lowercase().cmp(&b.label.to_lowercase()));
         entries.extend(dirs);
+        entries.extend(files);
         entries
     }
 
     pub(crate) fn apply_path_browser_selection(
         &mut self,
-        step: SetupStep,
+        purpose: &PathBrowserPurpose,
         path: PathBuf,
     ) -> Result<()> {
         self.input_mode = InputMode::Normal;
-        match step {
-            SetupStep::GameRoot => self.submit_game_root_path(path),
-            SetupStep::LarianDir => self.submit_larian_dir_path(path),
-            SetupStep::DownloadsDir => self.submit_downloads_dir_path(path),
+        match purpose {
+            PathBrowserPurpose::Setup(SetupStep::GameRoot) => self.submit_game_root_path(path),
+            PathBrowserPurpose::Setup(SetupStep::LarianDir) => self.submit_larian_dir_path(path),
+            PathBrowserPurpose::Setup(SetupStep::DownloadsDir) => {
+                self.submit_downloads_dir_path(path)
+            }
+            PathBrowserPurpose::ImportProfile => self.import_profile(path.display().to_string()),
+            PathBrowserPurpose::ExportProfile { profile } => {
+                self.export_profile(profile.clone(), path.display().to_string())
+            }
         }
     }
 
@@ -3815,14 +3944,14 @@ impl App {
         if !path.exists() {
             self.status = format!("Path not found: {}", path.display());
             self.log_warn(format!("Game root not found: {}", path.display()));
-            self.open_path_browser(SetupStep::GameRoot);
+            self.open_path_browser(PathBrowserPurpose::Setup(SetupStep::GameRoot));
             return Ok(());
         }
 
         if !game::looks_like_game_root(self.game_id, &path) {
             self.status = "Invalid game root: expected Data/ and bin/".to_string();
             self.log_warn(format!("Invalid game root: {}", path.display()));
-            self.open_path_browser(SetupStep::GameRoot);
+            self.open_path_browser(PathBrowserPurpose::Setup(SetupStep::GameRoot));
             return Ok(());
         }
 
@@ -3850,14 +3979,14 @@ impl App {
         if !path.exists() {
             self.status = format!("Path not found: {}", path.display());
             self.log_warn(format!("Larian dir not found: {}", path.display()));
-            self.open_path_browser(SetupStep::LarianDir);
+            self.open_path_browser(PathBrowserPurpose::Setup(SetupStep::LarianDir));
             return Ok(());
         }
 
         if !game::looks_like_user_dir(self.game_id, &path) {
             self.status = "Invalid Larian dir: expected PlayerProfiles/".to_string();
             self.log_warn(format!("Invalid Larian dir: {}", path.display()));
-            self.open_path_browser(SetupStep::LarianDir);
+            self.open_path_browser(PathBrowserPurpose::Setup(SetupStep::LarianDir));
             return Ok(());
         }
 
@@ -3880,7 +4009,7 @@ impl App {
         if !path.exists() || !path.is_dir() {
             self.status = format!("Path not found: {}", path.display());
             self.log_warn(format!("Downloads dir not found: {}", path.display()));
-            self.open_path_browser(SetupStep::DownloadsDir);
+            self.open_path_browser(PathBrowserPurpose::Setup(SetupStep::DownloadsDir));
             return Ok(());
         }
 

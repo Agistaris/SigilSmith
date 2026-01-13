@@ -2,7 +2,8 @@ use crate::{
     app::{
         expand_tilde, App, DependencyStatus, DialogChoice, DialogKind, ExplorerItem,
         ExplorerItemKind, Focus, InputMode, InputPurpose, LogLevel, ModSort, ModSortColumn,
-        PathBrowser, PathBrowserEntryKind, PathBrowserFocus, SetupStep, ToastLevel, UpdateStatus,
+        PathBrowser, PathBrowserEntryKind, PathBrowserFocus, PathBrowserPurpose, SetupStep,
+        ToastLevel, UpdateStatus,
     },
     library::{InstallTarget, ModEntry, TargetKind},
 };
@@ -30,7 +31,7 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
-const SIDE_PANEL_WIDTH: u16 = 40;
+const SIDE_PANEL_WIDTH: u16 = 44;
 const STATUS_WIDTH: u16 = SIDE_PANEL_WIDTH;
 const STATUS_HEIGHT: u16 = 3;
 const HEADER_HEIGHT: u16 = 3;
@@ -418,14 +419,14 @@ struct SettingsItem {
 fn settings_items(app: &App) -> Vec<SettingsItem> {
     vec![
         SettingsItem {
-            label: "Confirm profile delete".to_string(),
-            kind: SettingsItemKind::ToggleProfileDelete,
-            checked: Some(app.app_config.confirm_profile_delete),
+            label: "Configure game paths".to_string(),
+            kind: SettingsItemKind::ActionSetupPaths,
+            checked: None,
         },
         SettingsItem {
-            label: "Confirm mod delete".to_string(),
-            kind: SettingsItemKind::ToggleModDelete,
-            checked: Some(app.app_config.confirm_mod_delete),
+            label: "Configure downloads folder".to_string(),
+            kind: SettingsItemKind::ActionSetupDownloads,
+            checked: None,
         },
         SettingsItem {
             label: "Enable mods after import".to_string(),
@@ -436,6 +437,16 @@ fn settings_items(app: &App) -> Vec<SettingsItem> {
             label: "Delete mod files on remove".to_string(),
             kind: SettingsItemKind::ToggleDeleteModFilesOnRemove,
             checked: Some(app.app_config.delete_mod_files_on_remove),
+        },
+        SettingsItem {
+            label: "Confirm mod delete".to_string(),
+            kind: SettingsItemKind::ToggleModDelete,
+            checked: Some(app.app_config.confirm_mod_delete),
+        },
+        SettingsItem {
+            label: "Confirm profile delete".to_string(),
+            kind: SettingsItemKind::ToggleProfileDelete,
+            checked: Some(app.app_config.confirm_profile_delete),
         },
         SettingsItem {
             label: "Auto dependency downloads".to_string(),
@@ -451,16 +462,6 @@ fn settings_items(app: &App) -> Vec<SettingsItem> {
             label: "Startup dependency notice".to_string(),
             kind: SettingsItemKind::ToggleStartupDependencyNotice,
             checked: Some(app.app_config.show_startup_dependency_notice),
-        },
-        SettingsItem {
-            label: "Configure game paths".to_string(),
-            kind: SettingsItemKind::ActionSetupPaths,
-            checked: None,
-        },
-        SettingsItem {
-            label: "Configure downloads folder".to_string(),
-            kind: SettingsItemKind::ActionSetupDownloads,
-            checked: None,
         },
         SettingsItem {
             label: "Clear System Caches".to_string(),
@@ -743,11 +744,8 @@ fn ignore_repeat_toggle(key: &KeyEvent) -> bool {
         key.code,
         KeyCode::Char(' ')
             | KeyCode::Enter
-            | KeyCode::Char('a')
             | KeyCode::Char('A')
-            | KeyCode::Char('s')
             | KeyCode::Char('S')
-            | KeyCode::Char('x')
             | KeyCode::Char('X')
             | KeyCode::Char('c')
             | KeyCode::Char('C')
@@ -801,9 +799,9 @@ fn handle_mods_mode(app: &mut App, key: KeyEvent) -> Result<()> {
         }
         (KeyCode::Enter, _) | (KeyCode::Esc, _) if app.move_mode => app.toggle_move_mode(),
         (KeyCode::Char(' '), _) | (KeyCode::Enter, _) => app.toggle_selected(),
-        (KeyCode::Char('a'), _) | (KeyCode::Char('A'), _) => app.enable_visible_mods(),
-        (KeyCode::Char('s'), _) | (KeyCode::Char('S'), _) => app.disable_visible_mods(),
-        (KeyCode::Char('x'), _) | (KeyCode::Char('X'), _) => app.invert_visible_mods(),
+        (KeyCode::Char('A'), _) => app.enable_visible_mods(),
+        (KeyCode::Char('S'), _) => app.disable_visible_mods(),
+        (KeyCode::Char('X'), _) => app.invert_visible_mods(),
         (KeyCode::Char('c'), _) | (KeyCode::Char('C'), _) => app.clear_visible_overrides(),
         (KeyCode::Delete, _) | (KeyCode::Backspace, _) => app.request_remove_selected(),
         (KeyCode::Char('k'), _) | (KeyCode::Char('K'), _) | (KeyCode::Up, _) => {
@@ -882,10 +880,16 @@ fn handle_log_mode(app: &mut App, key: KeyEvent) -> Result<()> {
 }
 
 fn handle_browser_mode(app: &mut App, key: KeyEvent, browser: &mut PathBrowser) -> Result<bool> {
-    let invalid_hint = match browser.step {
-        SetupStep::GameRoot => "Not a BG3 install root (needs Data/ + bin/).",
-        SetupStep::LarianDir => "Not a Larian data dir (needs PlayerProfiles/).",
-        SetupStep::DownloadsDir => "Not a folder.",
+    let invalid_hint = match &browser.purpose {
+        PathBrowserPurpose::Setup(SetupStep::GameRoot) => {
+            "Not a BG3 install root (needs Data/ + bin/)."
+        }
+        PathBrowserPurpose::Setup(SetupStep::LarianDir) => {
+            "Not a Larian data dir (needs PlayerProfiles/)."
+        }
+        PathBrowserPurpose::Setup(SetupStep::DownloadsDir) => "Not a folder.",
+        PathBrowserPurpose::ImportProfile => "Select a file to import.",
+        PathBrowserPurpose::ExportProfile { .. } => "Enter a file name to export.",
     };
     let len = browser.entries.len();
     match browser.focus {
@@ -905,29 +909,69 @@ fn handle_browser_mode(app: &mut App, key: KeyEvent, browser: &mut PathBrowser) 
                 if path.is_dir() {
                     path_browser_set_current(app, browser, path);
                     browser.focus = PathBrowserFocus::List;
+                } else if app.path_browser_selectable(&browser.purpose, &path) {
+                    app.apply_path_browser_selection(&browser.purpose, path)?;
+                    return Ok(true);
                 } else {
-                    app.status = format!("Path not found: {}", browser.path_input.trim());
+                    app.status = invalid_hint.to_string();
                 }
             }
             KeyCode::Backspace | KeyCode::Delete => {
                 browser.path_input.pop();
+                browser.entries = app.build_path_browser_entries(
+                    &browser.purpose,
+                    &browser.current,
+                    &browser.path_input,
+                );
+            }
+            KeyCode::Char('h') | KeyCode::Char('H')
+                if key.modifiers.contains(KeyModifiers::CONTROL) =>
+            {
+                browser.path_input.pop();
+                browser.entries = app.build_path_browser_entries(
+                    &browser.purpose,
+                    &browser.current,
+                    &browser.path_input,
+                );
             }
             KeyCode::Char('u') | KeyCode::Char('U')
                 if key.modifiers.contains(KeyModifiers::CONTROL) =>
             {
                 browser.path_input.clear();
+                browser.entries = app.build_path_browser_entries(
+                    &browser.purpose,
+                    &browser.current,
+                    &browser.path_input,
+                );
             }
             KeyCode::Char('v') | KeyCode::Char('V')
                 if key.modifiers.contains(KeyModifiers::CONTROL)
                     && key.modifiers.contains(KeyModifiers::ALT) =>
             {
                 paste_clipboard_into(app, &mut browser.path_input);
+                browser.entries = app.build_path_browser_entries(
+                    &browser.purpose,
+                    &browser.current,
+                    &browser.path_input,
+                );
             }
             KeyCode::Char(c) => {
-                if !key.modifiers.contains(KeyModifiers::CONTROL)
+                if c == '\u{7f}' || c == '\u{8}' {
+                    browser.path_input.pop();
+                    browser.entries = app.build_path_browser_entries(
+                        &browser.purpose,
+                        &browser.current,
+                        &browser.path_input,
+                    );
+                } else if !key.modifiers.contains(KeyModifiers::CONTROL)
                     && !key.modifiers.contains(KeyModifiers::ALT)
                 {
                     browser.path_input.push(c);
+                    browser.entries = app.build_path_browser_entries(
+                        &browser.purpose,
+                        &browser.current,
+                        &browser.path_input,
+                    );
                 }
             }
             _ => {}
@@ -959,7 +1003,7 @@ fn handle_browser_mode(app: &mut App, key: KeyEvent, browser: &mut PathBrowser) 
             }
             KeyCode::Tab => {
                 browser.focus = PathBrowserFocus::PathInput;
-                browser.path_input = browser.current.display().to_string();
+                sync_path_input_for_browser(app, browser);
             }
             KeyCode::Left | KeyCode::Backspace => {
                 if let Some(parent) = browser.current.parent() {
@@ -973,7 +1017,7 @@ fn handle_browser_mode(app: &mut App, key: KeyEvent, browser: &mut PathBrowser) 
                     .find(|entry| entry.kind == PathBrowserEntryKind::Select)
                 {
                     if select.selectable {
-                        app.apply_path_browser_selection(browser.step, select.path.clone())?;
+                        app.apply_path_browser_selection(&browser.purpose, select.path.clone())?;
                         return Ok(true);
                     }
                     app.status = invalid_hint.to_string();
@@ -985,7 +1029,10 @@ fn handle_browser_mode(app: &mut App, key: KeyEvent, browser: &mut PathBrowser) 
                     match entry.kind {
                         PathBrowserEntryKind::Select => {
                             if entry.selectable {
-                                app.apply_path_browser_selection(browser.step, entry.path.clone())?;
+                                app.apply_path_browser_selection(
+                                    &browser.purpose,
+                                    entry.path.clone(),
+                                )?;
                                 return Ok(true);
                             }
                             app.status = invalid_hint.to_string();
@@ -993,6 +1040,17 @@ fn handle_browser_mode(app: &mut App, key: KeyEvent, browser: &mut PathBrowser) 
                         }
                         PathBrowserEntryKind::Parent | PathBrowserEntryKind::Dir => {
                             path_browser_set_current(app, browser, entry.path.clone());
+                        }
+                        PathBrowserEntryKind::File => {
+                            if app.path_browser_selectable(&browser.purpose, &entry.path) {
+                                app.apply_path_browser_selection(
+                                    &browser.purpose,
+                                    entry.path.clone(),
+                                )?;
+                                return Ok(true);
+                            }
+                            app.status = invalid_hint.to_string();
+                            app.set_toast(invalid_hint, ToastLevel::Warn, Duration::from_secs(2));
                         }
                     }
                 }
@@ -1012,9 +1070,37 @@ fn handle_browser_mode(app: &mut App, key: KeyEvent, browser: &mut PathBrowser) 
 
 fn path_browser_set_current(app: &App, browser: &mut PathBrowser, path: PathBuf) {
     browser.current = path.clone();
-    browser.entries = app.build_path_browser_entries(browser.step, &browser.current);
+    sync_path_input_for_browser(app, browser);
     browser.selected = 0;
-    browser.path_input = path.display().to_string();
+}
+
+fn sync_path_input_for_browser(app: &App, browser: &mut PathBrowser) {
+    let path_input = match &browser.purpose {
+        PathBrowserPurpose::ExportProfile { .. } => {
+            let trimmed = browser.path_input.trim();
+            let keep_name = if trimmed.is_empty() {
+                None
+            } else {
+                let candidate = PathBuf::from(trimmed);
+                if candidate.is_dir() || trimmed.ends_with(std::path::MAIN_SEPARATOR) {
+                    None
+                } else {
+                    candidate
+                        .file_name()
+                        .and_then(|name| name.to_str())
+                        .map(|name| name.to_string())
+                }
+            };
+            match keep_name {
+                Some(name) => browser.current.join(name).display().to_string(),
+                None => browser.current.display().to_string(),
+            }
+        }
+        _ => browser.current.display().to_string(),
+    };
+    browser.path_input = path_input;
+    browser.entries =
+        app.build_path_browser_entries(&browser.purpose, &browser.current, &browser.path_input);
 }
 
 fn sanitize_paste_text(text: &str) -> String {
@@ -1905,8 +1991,18 @@ fn draw(frame: &mut Frame<'_>, app: &mut App) {
         .unwrap_or(0)
         .saturating_add(1);
     let max_context_label = context_chunks[0].width.saturating_sub(2) as usize;
-    let context_label_width = context_label_width.min(max_context_label);
-    let legend_key_width = context_label_width.min(legend_content_width);
+    let max_key_len = legend_rows
+        .iter()
+        .chain(hotkey_rows.global.iter())
+        .chain(hotkey_rows.context.iter())
+        .map(|row| row.key.chars().count())
+        .max()
+        .unwrap_or(context_label_width);
+    let min_action_width = 12usize;
+    let max_key_width = legend_content_width.saturating_sub(min_action_width + 2);
+    let mut shared_label_width = context_label_width.max(max_key_len);
+    let max_label_width = max_context_label.min(max_key_width.max(1));
+    shared_label_width = shared_label_width.min(max_label_width).max(1);
 
     let mut context_lines = Vec::new();
     context_lines.push(Line::from(Span::styled(
@@ -1916,7 +2012,7 @@ fn draw(frame: &mut Frame<'_>, app: &mut App) {
     context_lines.extend(format_kv_lines_aligned(
         &context_rows,
         context_chunks[0].width as usize,
-        context_label_width,
+        shared_label_width,
     ));
     let context_widget =
         Paragraph::new(context_lines).style(Style::default().fg(theme.text).bg(theme.subpanel_bg));
@@ -1928,7 +2024,7 @@ fn draw(frame: &mut Frame<'_>, app: &mut App) {
         &theme,
         legend_content_width,
         legend_content_height,
-        legend_key_width,
+        shared_label_width,
         app.hotkey_fade_active(),
     );
     let legend_lines = pad_lines(
@@ -3401,10 +3497,12 @@ fn draw_path_browser(frame: &mut Frame<'_>, _app: &App, theme: &Theme, browser: 
 
     render_modal_backdrop(frame, outer_area, theme);
 
-    let title = match browser.step {
-        SetupStep::GameRoot => "Select BG3 install root",
-        SetupStep::LarianDir => "Select Larian data dir",
-        SetupStep::DownloadsDir => "Select downloads folder",
+    let title = match &browser.purpose {
+        PathBrowserPurpose::Setup(SetupStep::GameRoot) => "Select BG3 install root",
+        PathBrowserPurpose::Setup(SetupStep::LarianDir) => "Select Larian data dir",
+        PathBrowserPurpose::Setup(SetupStep::DownloadsDir) => "Select downloads folder",
+        PathBrowserPurpose::ImportProfile => "Import mod list",
+        PathBrowserPurpose::ExportProfile { .. } => "Export mod list",
     };
     let block = Block::default()
         .borders(Borders::ALL)
@@ -3465,16 +3563,18 @@ fn draw_path_browser(frame: &mut Frame<'_>, _app: &App, theme: &Theme, browser: 
         .find(|entry| entry.kind == PathBrowserEntryKind::Select)
         .map(|entry| entry.selectable)
         .unwrap_or(false);
-    let (valid_label, invalid_label) = match browser.step {
-        SetupStep::GameRoot => (
+    let (valid_label, invalid_label) = match &browser.purpose {
+        PathBrowserPurpose::Setup(SetupStep::GameRoot) => (
             " BG3 install root valid ",
             "Not a BG3 install root (needs Data/ + bin/)",
         ),
-        SetupStep::LarianDir => (
+        PathBrowserPurpose::Setup(SetupStep::LarianDir) => (
             " Larian data dir valid ",
             "Not a Larian data dir (needs PlayerProfiles/)",
         ),
-        SetupStep::DownloadsDir => (" Folder valid ", "Not a folder."),
+        PathBrowserPurpose::Setup(SetupStep::DownloadsDir) => (" Folder valid ", "Not a folder."),
+        PathBrowserPurpose::ImportProfile => (" File selected ", "Select a file to import."),
+        PathBrowserPurpose::ExportProfile { .. } => (" Export path valid ", "Enter a file name."),
     };
     let status_span = if selectable {
         Span::styled(
@@ -3510,6 +3610,7 @@ fn draw_path_browser(frame: &mut Frame<'_>, _app: &App, theme: &Theme, browser: 
                 }
                 PathBrowserEntryKind::Parent => Style::default().fg(theme.muted),
                 PathBrowserEntryKind::Dir => Style::default().fg(theme.text),
+                PathBrowserEntryKind::File => Style::default().fg(theme.text),
             };
             ListItem::new(Line::from(Span::styled(entry.label.clone(), style)))
         })
@@ -3575,7 +3676,7 @@ fn draw_path_browser(frame: &mut Frame<'_>, _app: &App, theme: &Theme, browser: 
     }
 
     let footer_plain =
-        "[Tab] Switch  [Enter] Open/Select  [Backspace] Parent  [S] Select  [Esc] Cancel";
+        "[Tab] Enter Path  [Enter] Open/Select  [Backspace] Parent  [S] Select  [Esc] Cancel";
     let footer_widget = if footer_plain.chars().count() > chunks[2].width as usize {
         let footer_line = truncate_text(footer_plain, chunks[2].width as usize);
         Paragraph::new(Line::from(Span::styled(
@@ -3590,7 +3691,7 @@ fn draw_path_browser(frame: &mut Frame<'_>, _app: &App, theme: &Theme, browser: 
         let text_style = Style::default().fg(theme.muted);
         let footer_line = Line::from(vec![
             Span::styled("[Tab]", key_style),
-            Span::styled(" Switch  ", text_style),
+            Span::styled(" Enter Path  ", text_style),
             Span::styled("[Enter]", key_style),
             Span::styled(" Open/Select  ", text_style),
             Span::styled("[Backspace]", key_style),
@@ -5667,7 +5768,7 @@ fn hotkey_rows_for_focus(focus: Focus) -> HotkeyRows {
                     action: "Auto/Mods/Gen/Data/Bin".to_string(),
                 },
                 LegendRow {
-                    key: "a/s/x".to_string(),
+                    key: "A/S/X".to_string(),
                     action: "Enable/Disable/Invert visible".to_string(),
                 },
                 LegendRow {
@@ -6003,7 +6104,7 @@ fn help_sections() -> Vec<HelpSection> {
                     action: "Target override (Auto/Mods/Gen/Data/Bin)".to_string(),
                 },
                 LegendRow {
-                    key: "a/s/x".to_string(),
+                    key: "A/S/X".to_string(),
                     action: "Enable/Disable/Invert visible".to_string(),
                 },
                 LegendRow {
