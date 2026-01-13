@@ -4,16 +4,18 @@ use crate::{
     config::GameConfig,
     game,
     library::{FileOverride, InstallTarget, Library, ModEntry, PakInfo, TargetKind},
-    metadata,
+    metadata, sigillink,
 };
 use anyhow::{Context, Result};
 use larian_formats::bg3::raw::{
     ModuleInfoAttribute, ModulesChildren, ModulesShortDescriptionNode, Save, Version,
 };
 use serde::{Deserialize, Serialize};
+#[cfg(unix)]
+use std::os::unix::fs::MetadataExt;
 use std::{
     collections::{HashMap, HashSet, VecDeque},
-    fs,
+    fs, io,
     path::{Path, PathBuf},
 };
 use walkdir::WalkDir;
@@ -24,6 +26,8 @@ pub struct DeployReport {
     pub file_count: usize,
     pub removed_count: usize,
     pub overridden_files: usize,
+    pub link_mode_summary: String,
+    pub warnings: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -56,6 +60,180 @@ impl Default for DeployOptions {
             reason: None,
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum SigilLinkMode {
+    Hardlink,
+    Symlink,
+}
+
+impl SigilLinkMode {
+    pub fn label(self) -> &'static str {
+        match self {
+            SigilLinkMode::Hardlink => "hardlink",
+            SigilLinkMode::Symlink => "symlink",
+        }
+    }
+}
+
+#[derive(Debug)]
+pub struct SigilLinkRelocationError {
+    pub target_root: PathBuf,
+    pub source: PathBuf,
+    pub dest: PathBuf,
+    pub err: io::Error,
+}
+
+impl std::fmt::Display for SigilLinkRelocationError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "sigillink symlink failed: {:?} -> {:?} ({})",
+            self.source, self.dest, self.err
+        )
+    }
+}
+
+impl std::error::Error for SigilLinkRelocationError {}
+
+struct LinkModeCache {
+    cache_dev: u64,
+    modes: HashMap<PathBuf, SigilLinkMode>,
+    used: HashSet<SigilLinkMode>,
+}
+
+impl LinkModeCache {
+    fn new(cache_root: &Path) -> Result<Self> {
+        fs::create_dir_all(cache_root).context("create sigillink cache root")?;
+        let cache_dev = filesystem_id(cache_root)?;
+        Ok(Self {
+            cache_dev,
+            modes: HashMap::new(),
+            used: HashSet::new(),
+        })
+    }
+
+    fn mode_for(&mut self, target_root: &Path) -> Result<SigilLinkMode> {
+        if let Some(mode) = self.modes.get(target_root) {
+            self.used.insert(*mode);
+            return Ok(*mode);
+        }
+        let target_dev = filesystem_id(target_root)?;
+        let mode = if target_dev == self.cache_dev {
+            SigilLinkMode::Hardlink
+        } else {
+            SigilLinkMode::Symlink
+        };
+        self.modes.insert(target_root.to_path_buf(), mode);
+        self.used.insert(mode);
+        Ok(mode)
+    }
+
+    fn summary(&self) -> String {
+        if self.used.is_empty() {
+            return "none".to_string();
+        }
+        if self.used.len() == 1 {
+            return self
+                .used
+                .iter()
+                .next()
+                .copied()
+                .unwrap()
+                .label()
+                .to_string();
+        }
+        "mixed".to_string()
+    }
+}
+
+pub fn resolve_sigillink_mode(cache_root: &Path, target_root: &Path) -> Result<SigilLinkMode> {
+    fs::create_dir_all(cache_root).context("create sigillink cache root")?;
+    let cache_dev = filesystem_id(cache_root)?;
+    let target_dev = filesystem_id(target_root)?;
+    Ok(if target_dev == cache_dev {
+        SigilLinkMode::Hardlink
+    } else {
+        SigilLinkMode::Symlink
+    })
+}
+
+pub fn summarize_sigillink_modes(cache_root: &Path, targets: &[PathBuf]) -> Result<String> {
+    let mut used = HashSet::new();
+    for target in targets {
+        if target.as_os_str().is_empty() {
+            continue;
+        }
+        let mode = resolve_sigillink_mode(cache_root, target)?;
+        used.insert(mode);
+    }
+    if used.is_empty() {
+        return Ok("none".to_string());
+    }
+    if used.len() == 1 {
+        return Ok(used.iter().next().copied().unwrap().label().to_string());
+    }
+    Ok("mixed".to_string())
+}
+
+#[cfg(unix)]
+fn filesystem_id(path: &Path) -> Result<u64> {
+    Ok(fs::metadata(path)
+        .with_context(|| format!("stat {:?}", path))?
+        .dev())
+}
+
+#[cfg(not(unix))]
+fn filesystem_id(path: &Path) -> Result<u64> {
+    let _ = path;
+    Ok(0)
+}
+
+#[cfg(unix)]
+fn create_symlink(source: &Path, dest: &Path) -> io::Result<()> {
+    std::os::unix::fs::symlink(source, dest)
+}
+
+#[cfg(not(unix))]
+fn create_symlink(_source: &Path, _dest: &Path) -> io::Result<()> {
+    Err(io::Error::new(
+        io::ErrorKind::Other,
+        "symlink unavailable on this platform",
+    ))
+}
+
+fn link_with_mode(
+    source: &Path,
+    dest: &Path,
+    target_root: &Path,
+    mode: SigilLinkMode,
+) -> Result<()> {
+    if dest.exists() {
+        fs::remove_file(dest).with_context(|| format!("remove existing file {:?}", dest))?;
+    }
+    match mode {
+        SigilLinkMode::Hardlink => {
+            fs::hard_link(source, dest)
+                .with_context(|| format!("hardlink {:?} -> {:?}", source, dest))?;
+        }
+        SigilLinkMode::Symlink => match create_symlink(source, dest) {
+            Ok(()) => {}
+            Err(err) => {
+                if dest.exists() {
+                    let _ = fs::remove_file(dest);
+                }
+                return Err(SigilLinkRelocationError {
+                    target_root: target_root.to_path_buf(),
+                    source: source.to_path_buf(),
+                    dest: dest.to_path_buf(),
+                    err,
+                }
+                .into());
+            }
+        },
+    }
+    Ok(())
 }
 
 #[derive(Default, Debug, Serialize, Deserialize)]
@@ -119,6 +297,7 @@ pub fn deploy_with_options(
         Some(&config.game_root),
         Some(&config.larian_dir),
     )?;
+    let cache_root = config.sigillink_cache_root();
 
     let active_profile = library.active_profile().context("active profile not set")?;
     let mod_map = library.index_by_id();
@@ -179,6 +358,8 @@ pub fn deploy_with_options(
 
     let mut manifest = load_manifest(&config.data_dir)?;
     let removed_count = remove_previous_deploy(&paths, &mut manifest)?;
+    let warnings = Vec::new();
+    let mut link_modes = LinkModeCache::new(&cache_root)?;
 
     let mut pak_files = Vec::new();
     for mod_entry in &all_mods {
@@ -191,10 +372,11 @@ pub fn deploy_with_options(
                 continue;
             }
             if let InstallTarget::Pak { file, info } = target {
-                let source = library_mod_path(&config.data_dir, &mod_entry.id).join(file);
+                let source = library_mod_path(&cache_root, &mod_entry.id).join(file);
                 let dest = paths.larian_mods_dir.join(format!("{}.pak", info.folder));
                 fs::create_dir_all(&paths.larian_mods_dir).context("create mods dir")?;
-                link_or_copy_pak(&source, &dest)
+                let mode = link_modes.mode_for(&paths.larian_mods_dir)?;
+                link_with_mode(&source, &dest, &paths.larian_mods_dir, mode)
                     .with_context(|| format!("deploy pak {:?}", source))?;
                 pak_files.push(dest.to_string_lossy().to_string());
             }
@@ -204,9 +386,10 @@ pub fn deploy_with_options(
     let overridden_files = deploy_loose_files(
         &paths,
         &loose_targets,
-        &config.data_dir,
+        &cache_root,
         &mut manifest,
         &file_overrides,
+        &mut link_modes,
     )?;
     update_modsettings(&paths, &installed_paks, &enabled_paks)?;
 
@@ -214,6 +397,7 @@ pub fn deploy_with_options(
     save_manifest(&config.data_dir, &manifest)?;
 
     let file_count = manifest.files.len() + manifest.pak_files.len();
+    let link_mode_summary = link_modes.summary();
 
     Ok(DeployReport {
         pak_count: installed_paks.len(),
@@ -221,24 +405,9 @@ pub fn deploy_with_options(
         file_count,
         removed_count,
         overridden_files,
+        link_mode_summary,
+        warnings,
     })
-}
-
-fn link_or_copy_pak(source: &Path, dest: &Path) -> Result<()> {
-    if dest.exists() {
-        fs::remove_file(dest).with_context(|| format!("remove existing pak {:?}", dest))?;
-    }
-    match fs::hard_link(source, dest) {
-        Ok(()) => Ok(()),
-        Err(err) => {
-            if dest.exists() {
-                let _ = fs::remove_file(dest);
-            }
-            fs::copy(source, dest)
-                .with_context(|| format!("copy pak {:?} (hardlink failed: {err})", source))?;
-            Ok(())
-        }
-    }
 }
 
 pub fn scan_conflicts(config: &GameConfig, library: &Library) -> Result<Vec<ConflictEntry>> {
@@ -259,8 +428,12 @@ pub fn scan_conflicts(config: &GameConfig, library: &Library) -> Result<Vec<Conf
         .collect();
 
     let file_overrides = active_profile.file_overrides.clone();
-    let (_plans, conflicts, _overridden_files) =
-        build_loose_plan(&paths, &ordered_mods, &config.data_dir, &file_overrides)?;
+    let (_plans, conflicts, _overridden_files) = build_loose_plan(
+        &paths,
+        &ordered_mods,
+        &config.sigillink_cache_root(),
+        &file_overrides,
+    )?;
     Ok(conflicts)
 }
 
@@ -553,19 +726,28 @@ fn default_modsettings() -> Save {
 fn deploy_loose_files(
     paths: &GamePaths,
     mods: &[ModEntry],
-    data_dir: &Path,
+    cache_root: &Path,
     manifest: &mut DeployManifest,
     file_overrides: &[FileOverride],
+    link_modes: &mut LinkModeCache,
 ) -> Result<usize> {
     let (plans, _conflicts, overridden_files) =
-        build_loose_plan(paths, mods, data_dir, file_overrides)?;
+        build_loose_plan(paths, mods, cache_root, file_overrides)?;
     let mut deployed = Vec::with_capacity(plans.len());
+    let mut created = Vec::with_capacity(plans.len());
 
     for plan in plans {
         if let Some(parent) = plan.dest.parent() {
             fs::create_dir_all(parent).context("create dir")?;
         }
-        fs::copy(&plan.source, &plan.dest).context("copy file")?;
+        let mode = link_modes.mode_for(&plan.dest_root)?;
+        if let Err(err) = link_with_mode(&plan.source, &plan.dest, &plan.dest_root, mode) {
+            for path in created.iter().rev() {
+                let _ = fs::remove_file(path);
+            }
+            return Err(err).context("deploy loose file");
+        }
+        created.push(plan.dest.clone());
         deployed.push(DeployedFile {
             target: plan.dest_root.to_string_lossy().to_string(),
             path: plan.dest.to_string_lossy().to_string(),
@@ -582,13 +764,14 @@ fn deploy_loose_files(
 fn build_loose_plan(
     paths: &GamePaths,
     mods: &[ModEntry],
-    data_dir: &Path,
+    cache_root: &Path,
     file_overrides: &[FileOverride],
 ) -> Result<(Vec<LooseFilePlan>, Vec<ConflictEntry>, usize)> {
     let mut map: HashMap<PathBuf, Vec<LooseFileCandidate>> = HashMap::new();
 
     for (order, mod_entry) in mods.iter().enumerate() {
-        let mod_root = library_mod_path(data_dir, &mod_entry.id);
+        let mod_root = library_mod_path(cache_root, &mod_entry.id);
+        let sigillink_index = sigillink::load_sigillink_index(cache_root, &mod_entry.id);
         for target in &mod_entry.targets {
             let kind = target.kind();
             if !mod_entry.is_target_enabled(kind) {
@@ -618,15 +801,28 @@ fn build_loose_plan(
             if !source_root.exists() {
                 continue;
             }
-            collect_target_files(
-                &source_root,
-                &dest_root,
-                mod_entry,
-                kind_label,
-                kind,
-                order,
-                &mut map,
-            )?;
+            if let Some(index) = sigillink_index.as_ref() {
+                collect_target_files_from_index(
+                    &source_root,
+                    &dest_root,
+                    mod_entry,
+                    kind_label,
+                    kind,
+                    order,
+                    index,
+                    &mut map,
+                )?;
+            } else {
+                collect_target_files(
+                    &source_root,
+                    &dest_root,
+                    mod_entry,
+                    kind_label,
+                    kind,
+                    order,
+                    &mut map,
+                )?;
+            }
         }
     }
 
@@ -732,6 +928,43 @@ fn collect_target_files(
     Ok(())
 }
 
+fn collect_target_files_from_index(
+    source_root: &Path,
+    dest_root: &Path,
+    mod_entry: &ModEntry,
+    kind_label: &str,
+    kind: TargetKind,
+    order: usize,
+    index: &sigillink::SigilLinkIndex,
+    map: &mut HashMap<PathBuf, Vec<LooseFileCandidate>>,
+) -> Result<()> {
+    for entry in &index.entries {
+        if entry.kind != kind {
+            continue;
+        }
+        let rel = PathBuf::from(&entry.relative_path);
+        let source = source_root.join(&rel);
+        if !source.exists() {
+            continue;
+        }
+        let dest = dest_root.join(&rel);
+        map.entry(dest.clone())
+            .or_default()
+            .push(LooseFileCandidate {
+                source,
+                dest_root: dest_root.to_path_buf(),
+                mod_id: mod_entry.id.clone(),
+                mod_name: mod_entry.name.clone(),
+                kind_label: kind_label.to_string(),
+                order,
+                kind,
+                relative_path: rel,
+            });
+    }
+
+    Ok(())
+}
+
 fn build_override_map(file_overrides: &[FileOverride]) -> HashMap<(TargetKind, PathBuf), String> {
     let mut map = HashMap::new();
     for override_entry in file_overrides {
@@ -805,6 +1038,6 @@ fn save_manifest(data_dir: &Path, manifest: &DeployManifest) -> Result<()> {
     Ok(())
 }
 
-fn library_mod_path(data_dir: &Path, id: &str) -> PathBuf {
-    data_dir.join("mods").join(id)
+fn library_mod_path(cache_root: &Path, id: &str) -> PathBuf {
+    cache_root.join("mods").join(id)
 }

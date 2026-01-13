@@ -1,7 +1,7 @@
 use crate::{
     config::GameConfig,
     game,
-    library::{InstallTarget, Library, ModEntry, ProfileEntry, TargetKind},
+    library::{library_mod_root, InstallTarget, Library, ModEntry, ProfileEntry, TargetKind},
     metadata, native_pak,
 };
 use anyhow::{Context, Result};
@@ -705,10 +705,10 @@ fn scan_mod_files(
     group: RankGroup,
     native_pak_index: &[native_pak::NativePakEntry],
 ) -> Result<Vec<FileEntry>> {
-    let data_dir = &config.data_dir;
+    let cache_root = config.sigillink_cache_root();
     match group {
-        RankGroup::Pak => scan_pak_files(mod_entry, data_dir, larian_mods_dir, native_pak_index),
-        RankGroup::Loose => scan_loose_files(mod_entry, data_dir),
+        RankGroup::Pak => scan_pak_files(mod_entry, &cache_root, larian_mods_dir, native_pak_index),
+        RankGroup::Loose => scan_loose_files(mod_entry, &cache_root),
     }
 }
 
@@ -790,8 +790,8 @@ fn read_mod_metadata(
     larian_mods_dir: &Path,
     native_pak_index: &[native_pak::NativePakEntry],
 ) -> Result<metadata::ModMeta> {
-    let data_dir = &config.data_dir;
-    let pak_paths = collect_pak_paths(mod_entry, data_dir, larian_mods_dir, native_pak_index);
+    let cache_root = config.sigillink_cache_root();
+    let pak_paths = collect_pak_paths(mod_entry, &cache_root, larian_mods_dir, native_pak_index);
     let mut merged = metadata::ModMeta::default();
     for pak_path in pak_paths {
         if !pak_path.exists() {
@@ -811,8 +811,8 @@ fn read_mod_metadata(
     Ok(merged)
 }
 
-fn scan_loose_files(mod_entry: &ModEntry, data_dir: &Path) -> Result<Vec<FileEntry>> {
-    let mod_root = data_dir.join("mods").join(&mod_entry.id);
+fn scan_loose_files(mod_entry: &ModEntry, cache_root: &Path) -> Result<Vec<FileEntry>> {
+    let mod_root = library_mod_root(cache_root).join(&mod_entry.id);
     let mut files = Vec::new();
 
     for target in &mod_entry.targets {
@@ -850,11 +850,11 @@ fn scan_loose_files(mod_entry: &ModEntry, data_dir: &Path) -> Result<Vec<FileEnt
 
 fn scan_pak_files(
     mod_entry: &ModEntry,
-    data_dir: &Path,
+    cache_root: &Path,
     larian_mods_dir: &Path,
     native_pak_index: &[native_pak::NativePakEntry],
 ) -> Result<Vec<FileEntry>> {
-    let pak_paths = collect_pak_paths(mod_entry, data_dir, larian_mods_dir, native_pak_index);
+    let pak_paths = collect_pak_paths(mod_entry, cache_root, larian_mods_dir, native_pak_index);
 
     let mut files = Vec::new();
     let mut found = false;
@@ -875,7 +875,7 @@ fn scan_pak_files(
 
 fn collect_pak_paths(
     mod_entry: &ModEntry,
-    data_dir: &Path,
+    cache_root: &Path,
     larian_mods_dir: &Path,
     native_pak_index: &[native_pak::NativePakEntry],
 ) -> Vec<std::path::PathBuf> {
@@ -893,7 +893,7 @@ fn collect_pak_paths(
                     pak_paths.push(by_file);
                 }
             } else {
-                pak_paths.push(data_dir.join("mods").join(&mod_entry.id).join(file));
+                pak_paths.push(library_mod_root(cache_root).join(&mod_entry.id).join(file));
             }
         }
     }

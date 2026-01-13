@@ -329,8 +329,8 @@ impl PakInfo {
     }
 }
 
-pub fn library_mod_root(data_dir: &Path) -> PathBuf {
-    data_dir.join("mods")
+pub fn library_mod_root(cache_root: &Path) -> PathBuf {
+    cache_root.join("mods")
 }
 
 pub fn path_times(path: &Path) -> (Option<i64>, Option<i64>) {

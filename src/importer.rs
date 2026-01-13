@@ -1,8 +1,9 @@
 use crate::library::{
-    library_mod_root, normalize_times, path_times, resolve_times, InstallTarget, ModEntry,
-    ModSource, PakInfo,
+    normalize_times, path_times, resolve_times, InstallTarget, ModEntry, ModSource, PakInfo,
+    TargetKind,
 };
 use crate::metadata;
+use crate::sigillink::{SigilLinkEntry, SigilLinkIndex, SIGILLINK_VERSION};
 use anyhow::{Context, Result};
 use blake3::Hasher;
 use filetime::{set_file_mtime, FileTime};
@@ -12,6 +13,7 @@ use std::{
     fs, io,
     path::{Path, PathBuf},
     process::{Command, Stdio},
+    sync::atomic::{AtomicUsize, Ordering},
     sync::Arc,
     time::{Instant, SystemTime, UNIX_EPOCH},
 };
@@ -31,7 +33,7 @@ struct SourceTimes {
 }
 
 struct DirImportResult {
-    mods: Vec<ModEntry>,
+    mods: Vec<ImportMod>,
     unrecognized: bool,
 }
 
@@ -92,15 +94,35 @@ struct CopyProgress<'a> {
     reporter: Option<&'a ProgressReporter>,
     copied: usize,
     total: usize,
+    stage: ImportStage,
+    offset: usize,
     last_report: Instant,
 }
 
 impl<'a> CopyProgress<'a> {
-    fn new(reporter: Option<&'a ProgressReporter>, total: usize) -> Self {
+    fn new(reporter: Option<&'a ProgressReporter>, total: usize, stage: ImportStage) -> Self {
         Self {
             reporter,
             copied: 0,
             total: total.max(1),
+            stage,
+            offset: 0,
+            last_report: Instant::now(),
+        }
+    }
+
+    fn new_with_offset(
+        reporter: Option<&'a ProgressReporter>,
+        total: usize,
+        stage: ImportStage,
+        offset: usize,
+    ) -> Self {
+        Self {
+            reporter,
+            copied: 0,
+            total: total.max(1),
+            stage,
+            offset,
             last_report: Instant::now(),
         }
     }
@@ -111,7 +133,8 @@ impl<'a> CopyProgress<'a> {
             force || self.copied % 50 == 0 || self.last_report.elapsed().as_millis() >= 120;
         if should_report {
             if let Some(reporter) = self.reporter {
-                reporter.report(ImportStage::ImportingLoose, self.copied, self.total, detail);
+                let current = self.copied.saturating_add(self.offset).min(self.total);
+                reporter.report(self.stage, current, self.total, detail);
             }
             self.last_report = Instant::now();
         }
@@ -123,14 +146,38 @@ impl<'a> CopyProgress<'a> {
         }
         self.copied = self.copied.saturating_add(count);
         if let Some(reporter) = self.reporter {
-            reporter.report(ImportStage::ImportingLoose, self.copied, self.total, None);
+            let current = self.copied.saturating_add(self.offset).min(self.total);
+            reporter.report(self.stage, current, self.total, None);
         }
         self.last_report = Instant::now();
     }
 
     fn finish(&mut self) {
         if let Some(reporter) = self.reporter {
-            reporter.report(ImportStage::ImportingLoose, self.total, self.total, None);
+            reporter.report(self.stage, self.total, self.total, None);
+        }
+    }
+}
+
+struct StagingGuard {
+    path: PathBuf,
+    armed: bool,
+}
+
+impl StagingGuard {
+    fn new(path: PathBuf) -> Self {
+        Self { path, armed: true }
+    }
+
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for StagingGuard {
+    fn drop(&mut self) {
+        if self.armed {
+            let _ = fs::remove_dir_all(&self.path);
         }
     }
 }
@@ -143,7 +190,7 @@ pub struct ImportSource {
 #[derive(Debug, Clone)]
 pub struct ImportBatch {
     pub source: ImportSource,
-    pub mods: Vec<ModEntry>,
+    pub mods: Vec<ImportMod>,
 }
 
 #[derive(Debug, Clone)]
@@ -152,35 +199,48 @@ pub struct ImportFailure {
     pub error: String,
 }
 
+#[derive(Debug, Clone)]
+pub struct ImportMod {
+    pub entry: ModEntry,
+    pub staging_root: Option<PathBuf>,
+    pub sigillink: Option<SigilLinkIndex>,
+}
+
+impl ImportMod {
+    pub fn cleanup_staging(&self) {
+        let Some(staging_root) = &self.staging_root else {
+            return;
+        };
+        let _ = fs::remove_dir_all(staging_root);
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ImportStage {
-    Preparing,
     Extracting,
-    Scanning,
-    ImportingPaks,
-    ImportingLoose,
+    Indexing,
+    Installing,
+    Linking,
     Finalizing,
 }
 
 impl ImportStage {
     fn index(self) -> usize {
         match self {
-            ImportStage::Preparing => 0,
-            ImportStage::Extracting => 1,
-            ImportStage::Scanning => 2,
-            ImportStage::ImportingPaks => 3,
-            ImportStage::ImportingLoose => 4,
-            ImportStage::Finalizing => 5,
+            ImportStage::Extracting => 0,
+            ImportStage::Indexing => 1,
+            ImportStage::Installing => 2,
+            ImportStage::Linking => 3,
+            ImportStage::Finalizing => 4,
         }
     }
 
     pub fn label(self) -> &'static str {
         match self {
-            ImportStage::Preparing => "Preparing",
             ImportStage::Extracting => "Extracting",
-            ImportStage::Scanning => "Scanning",
-            ImportStage::ImportingPaks => "Importing .pak files",
-            ImportStage::ImportingLoose => "Importing loose files",
+            ImportStage::Indexing => "Indexing",
+            ImportStage::Installing => "Installing",
+            ImportStage::Linking => "Linking (SigilLink Cache)",
             ImportStage::Finalizing => "Finalizing",
         }
     }
@@ -290,8 +350,6 @@ pub fn import_path_with_progress(
         });
     }
 
-    fs::create_dir_all(library_mod_root(data_dir)).context("create mod library root")?;
-
     let result = if path.is_dir() {
         import_batch_from_dir(path, data_dir, None, false, None, progress)?
     } else {
@@ -305,13 +363,11 @@ pub fn import_path_with_progress(
                     label: label.clone(),
                     unit_index: 0,
                     unit_count: 1,
-                    stage_count: 6,
+                    stage_count: 5,
                     callback: progress.clone(),
                 };
-                reporter.report(ImportStage::Preparing, 0, 1, None);
                 let mods =
                     import_pak_file(path, data_dir, source_label.as_deref(), Some(&reporter))?;
-                reporter.report(ImportStage::Finalizing, 1, 1, None);
                 ImportResult {
                     batches: vec![ImportBatch {
                         source: ImportSource { label },
@@ -351,10 +407,9 @@ fn import_archive_zip(
         label,
         unit_index: 0,
         unit_count: 1,
-        stage_count: 6,
+        stage_count: 5,
         callback: progress.clone(),
     };
-    reporter.report(ImportStage::Preparing, 0, 1, None);
     reporter.report(ImportStage::Extracting, 0, 1, None);
     if let Err(err) = extract_zip(path, &temp_dir) {
         let _ = fs::remove_dir_all(&temp_dir);
@@ -388,10 +443,9 @@ fn import_archive_7z(
         label,
         unit_index: 0,
         unit_count: 1,
-        stage_count: 6,
+        stage_count: 5,
         callback: progress.clone(),
     };
-    reporter.report(ImportStage::Preparing, 0, 1, None);
     reporter.report(ImportStage::Extracting, 0, 1, None);
     if let Err(err) = extract_7z(path, &temp_dir) {
         let _ = fs::remove_dir_all(&temp_dir);
@@ -449,13 +503,12 @@ fn import_batch_from_dir(
             label: display_label.clone(),
             unit_index: index,
             unit_count,
-            stage_count: 6,
+            stage_count: 5,
             callback: progress.clone(),
         };
 
         match candidate.kind {
             CandidateKind::PakFile => {
-                reporter.report(ImportStage::Preparing, 0, 1, None);
                 let mods = match import_pak_file(
                     &candidate.path,
                     data_dir,
@@ -538,7 +591,6 @@ fn import_batch_from_dir(
                 }
             }
             CandidateKind::Directory => {
-                reporter.report(ImportStage::Preparing, 0, 1, None);
                 let result = match import_from_dir(
                     &candidate.path,
                     data_dir,
@@ -602,14 +654,19 @@ fn import_from_dir(
     let allow_move = allow_move && !scan.has_overlap();
     let mut mods = Vec::new();
     let mut last_error: Option<anyhow::Error> = None;
+    let loose_file_count = if scan.has_loose_targets() {
+        count_loose_files(&scan)
+    } else {
+        0
+    };
 
     if let Some(reporter) = reporter {
-        reporter.report(
-            ImportStage::Scanning,
-            1,
-            1,
-            Some("Scanning layout".to_string()),
-        );
+        let detail = if scan.has_loose_targets() {
+            Some(format!("{loose_file_count} files"))
+        } else {
+            Some("Scanning layout".to_string())
+        };
+        reporter.report(ImportStage::Indexing, 1, 1, detail);
     }
 
     let use_archive_label = scan.pak_files.len() == 1;
@@ -625,6 +682,7 @@ fn import_from_dir(
         .unwrap_or_default();
 
     let pak_total = scan.pak_files.len();
+    let install_total = pak_total.saturating_add(loose_file_count).max(1);
     for (index, pak_path) in scan.pak_files.iter().enumerate() {
         let label = if use_archive_label {
             source_label
@@ -633,20 +691,13 @@ fn import_from_dir(
         };
         if let Some(reporter) = reporter {
             reporter.report(
-                ImportStage::ImportingPaks,
+                ImportStage::Installing,
                 index + 1,
-                pak_total.max(1),
+                install_total,
                 label.map(|label| format!("Importing {label}")),
             );
         }
-        match import_single_pak(
-            pak_path,
-            data_dir,
-            label,
-            source_times,
-            &json_mods,
-            reporter,
-        ) {
+        match import_single_pak(pak_path, data_dir, label, source_times, &json_mods, None) {
             Ok(entry) => mods.push(entry),
             Err(err) => {
                 last_error = Some(err.context(format!("import pak {:?}", pak_path)));
@@ -663,6 +714,8 @@ fn import_from_dir(
             allow_move,
             source_times,
             meta_created.or_else(|| json_mods.iter().filter_map(|info| info.created_at).min()),
+            loose_file_count,
+            pak_total,
             reporter,
         ) {
             Ok(entry) => mods.push(entry),
@@ -670,6 +723,13 @@ fn import_from_dir(
                 last_error = Some(err.context("import loose files"));
             }
         }
+    } else if let Some(reporter) = reporter {
+        reporter.report(
+            ImportStage::Linking,
+            1,
+            1,
+            Some("No loose files".to_string()),
+        );
     }
 
     if let Some(reporter) = reporter {
@@ -690,23 +750,32 @@ fn import_pak_file(
     data_dir: &Path,
     source_label: Option<&str>,
     reporter: Option<&ProgressReporter>,
-) -> Result<Vec<ModEntry>> {
+) -> Result<Vec<ImportMod>> {
     if let Some(reporter) = reporter {
         reporter.report(
-            ImportStage::ImportingPaks,
+            ImportStage::Indexing,
+            1,
+            1,
+            Some("Reading metadata".to_string()),
+        );
+        reporter.report(
+            ImportStage::Installing,
             1,
             1,
             Some(display_path_label(path)),
         );
     }
-    Ok(vec![import_single_pak(
-        path,
-        data_dir,
-        source_label,
-        None,
-        &[],
-        reporter,
-    )?])
+    let mod_entry = import_single_pak(path, data_dir, source_label, None, &[], None)?;
+    if let Some(reporter) = reporter {
+        reporter.report(
+            ImportStage::Linking,
+            1,
+            1,
+            Some("No loose files".to_string()),
+        );
+        reporter.report(ImportStage::Finalizing, 1, 1, None);
+    }
+    Ok(vec![mod_entry])
 }
 
 fn import_single_pak(
@@ -716,7 +785,7 @@ fn import_single_pak(
     source_times: Option<SourceTimes>,
     json_mods: &[metadata::JsonModInfo],
     _reporter: Option<&ProgressReporter>,
-) -> Result<ModEntry> {
+) -> Result<ImportMod> {
     let file = fs::File::open(path).context("open .pak")?;
     let lspk = lspk::Reader::new(file)
         .ok()
@@ -773,11 +842,11 @@ fn import_single_pak(
     dependencies.sort();
     dependencies.dedup();
     dependencies.retain(|dep| !dep.eq_ignore_ascii_case(&mod_id));
-    let mod_root = library_mod_root(data_dir).join(&mod_id);
-    fs::create_dir_all(&mod_root).context("create mod storage")?;
+    let staging_root = make_stage_dir(data_dir, &mod_id)?;
+    let mut guard = StagingGuard::new(staging_root.clone());
 
     let filename = format!("{}.pak", pak_info.folder);
-    let dest = mod_root.join(&filename);
+    let dest = staging_root.join(&filename);
     fs::copy(path, &dest).context("copy .pak")?;
 
     let mut times = source_times_for(path);
@@ -789,7 +858,7 @@ fn import_single_pak(
     let primary_created = json_created.or(meta_info.created_at);
     let (created_at, modified_at) =
         resolve_times(primary_created, times.created_at, times.modified_at);
-    Ok(ModEntry {
+    let entry = ModEntry {
         id: mod_id,
         name: pak_info.name.clone(),
         created_at,
@@ -803,6 +872,12 @@ fn import_single_pak(
         source_label: source_label.map(|label| label.to_string()),
         source: ModSource::Managed,
         dependencies,
+    };
+    guard.disarm();
+    Ok(ImportMod {
+        entry,
+        staging_root: Some(staging_root),
+        sigillink: None,
     })
 }
 
@@ -832,14 +907,15 @@ fn import_override_pak(
     data_dir: &Path,
     source_label: Option<&str>,
     source_times: Option<SourceTimes>,
-) -> Result<ModEntry> {
+) -> Result<ImportMod> {
     let filename = path
         .file_name()
         .and_then(|name| name.to_str())
         .unwrap_or("override.pak");
     let mod_id = hash_path_with_prefix(path, "pak");
-    let mod_root = library_mod_root(data_dir).join(&mod_id);
-    let data_root = mod_root.join("Data");
+    let staging_root = make_stage_dir(data_dir, &mod_id)?;
+    let mut guard = StagingGuard::new(staging_root.clone());
+    let data_root = staging_root.join("Data");
     fs::create_dir_all(&data_root).context("create override pak storage")?;
     let dest = data_root.join(filename);
     fs::copy(path, &dest).context("copy override .pak")?;
@@ -861,7 +937,7 @@ fn import_override_pak(
         format!("Override Pak: {stem}")
     };
 
-    Ok(ModEntry {
+    let entry = ModEntry {
         id: mod_id,
         name,
         created_at,
@@ -874,24 +950,16 @@ fn import_override_pak(
         source_label: source_label.map(|label| label.to_string()),
         source: ModSource::Managed,
         dependencies: Vec::new(),
+    };
+    guard.disarm();
+    Ok(ImportMod {
+        entry,
+        staging_root: Some(staging_root),
+        sigillink: None,
     })
 }
 
-fn import_loose(
-    path: &Path,
-    data_dir: &Path,
-    scan: &PayloadScan,
-    source_label: Option<&str>,
-    allow_move: bool,
-    source_times: Option<SourceTimes>,
-    meta_created: Option<i64>,
-    reporter: Option<&ProgressReporter>,
-) -> Result<ModEntry> {
-    let mod_id = hash_path(path);
-    let mod_root = library_mod_root(data_dir).join(&mod_id);
-    fs::create_dir_all(&mod_root).context("create loose mod storage")?;
-
-    let mut targets = Vec::new();
+fn count_loose_files(scan: &PayloadScan) -> usize {
     let mut total_files = 0usize;
     if let Some(data_dir) = &scan.data_dir {
         total_files = total_files.saturating_add(count_copy_files(data_dir));
@@ -904,18 +972,44 @@ fn import_loose(
     if let Some(bin_dir) = &scan.bin_dir {
         total_files = total_files.saturating_add(count_copy_files(bin_dir));
     }
+    total_files
+}
+
+fn import_loose(
+    path: &Path,
+    data_dir: &Path,
+    scan: &PayloadScan,
+    source_label: Option<&str>,
+    allow_move: bool,
+    source_times: Option<SourceTimes>,
+    meta_created: Option<i64>,
+    total_files: usize,
+    install_offset: usize,
+    reporter: Option<&ProgressReporter>,
+) -> Result<ImportMod> {
+    let mod_id = hash_path(path);
+    let staging_root = make_stage_dir(data_dir, &mod_id)?;
+    let mut guard = StagingGuard::new(staging_root.clone());
+
+    let mut targets = Vec::new();
+    let install_total = install_offset.saturating_add(total_files).max(1);
     if let Some(reporter) = reporter {
         reporter.report(
-            ImportStage::ImportingLoose,
-            0,
-            total_files.max(1),
+            ImportStage::Installing,
+            install_offset.min(install_total),
+            install_total,
             Some("Copying files".to_string()),
         );
     }
-    let mut progress = CopyProgress::new(reporter, total_files);
+    let mut progress = CopyProgress::new_with_offset(
+        reporter,
+        install_total,
+        ImportStage::Installing,
+        install_offset,
+    );
 
     if let Some(data_dir) = &scan.data_dir {
-        let dest = mod_root.join("Data");
+        let dest = staging_root.join("Data");
         if allow_move {
             move_or_copy_dir_with_progress(data_dir, &dest, &mut progress)?;
         } else {
@@ -927,7 +1021,7 @@ fn import_loose(
     }
 
     if let Some(generated_dir) = &scan.generated_dir {
-        let dest = mod_root.join("Generated");
+        let dest = staging_root.join("Generated");
         if allow_move {
             move_or_copy_dir_with_progress(generated_dir, &dest, &mut progress)?;
         } else {
@@ -937,7 +1031,7 @@ fn import_loose(
             dir: "Generated".to_string(),
         });
     } else if let Some(public_dir) = &scan.public_dir {
-        let dest = mod_root.join("Generated").join("Public");
+        let dest = staging_root.join("Generated").join("Public");
         if allow_move {
             move_or_copy_dir_with_progress(public_dir, &dest, &mut progress)?;
         } else {
@@ -949,7 +1043,7 @@ fn import_loose(
     }
 
     if let Some(bin_dir) = &scan.bin_dir {
-        let dest = mod_root.join("bin");
+        let dest = staging_root.join("bin");
         if allow_move {
             move_or_copy_dir_with_progress(bin_dir, &dest, &mut progress)?;
         } else {
@@ -961,7 +1055,8 @@ fn import_loose(
     }
     progress.finish();
 
-    persist_payload_metadata(scan, &mod_root);
+    persist_payload_metadata(scan, &staging_root);
+    let sigillink = build_sigillink_index(&staging_root, &targets, total_files, reporter)?;
 
     let name = if let Some(label) = source_label {
         format!("Loose Files: {label}")
@@ -978,7 +1073,7 @@ fn import_loose(
     let (created_at, modified_at) =
         resolve_times(meta_created, times.created_at, times.modified_at);
 
-    Ok(ModEntry {
+    let entry = ModEntry {
         id: mod_id,
         name,
         created_at,
@@ -989,6 +1084,12 @@ fn import_loose(
         source_label: source_label.map(|label| label.to_string()),
         source: ModSource::Managed,
         dependencies: Vec::new(),
+    };
+    guard.disarm();
+    Ok(ImportMod {
+        entry,
+        staging_root: Some(staging_root),
+        sigillink: Some(sigillink),
     })
 }
 
@@ -1018,6 +1119,76 @@ fn persist_payload_metadata(scan: &PayloadScan, mod_root: &Path) {
     if !copied_any {
         let _ = fs::remove_dir_all(mod_root.join("_meta"));
     }
+}
+
+fn build_sigillink_index(
+    mod_root: &Path,
+    targets: &[InstallTarget],
+    total_files: usize,
+    reporter: Option<&ProgressReporter>,
+) -> Result<SigilLinkIndex> {
+    let mut entries = Vec::new();
+    let mut total_bytes = 0u64;
+    let mut progress = CopyProgress::new(reporter, total_files, ImportStage::Linking);
+    if let Some(reporter) = reporter {
+        reporter.report(
+            ImportStage::Linking,
+            0,
+            total_files.max(1),
+            Some("Building SigilLink cache".to_string()),
+        );
+    }
+
+    for target in targets {
+        let (kind, dir) = match target {
+            InstallTarget::Data { dir } => (TargetKind::Data, dir.as_str()),
+            InstallTarget::Generated { dir } => (TargetKind::Generated, dir.as_str()),
+            InstallTarget::Bin { dir } => (TargetKind::Bin, dir.as_str()),
+            InstallTarget::Pak { .. } => continue,
+        };
+        let root = mod_root.join(dir);
+        if !root.exists() {
+            continue;
+        }
+        collect_sigillink_entries(&root, kind, &mut entries, &mut total_bytes, &mut progress)?;
+    }
+
+    progress.finish();
+    Ok(SigilLinkIndex {
+        version: SIGILLINK_VERSION,
+        entries,
+        total_bytes,
+    })
+}
+
+fn collect_sigillink_entries(
+    root: &Path,
+    kind: TargetKind,
+    entries: &mut Vec<SigilLinkEntry>,
+    total_bytes: &mut u64,
+    progress: &mut CopyProgress<'_>,
+) -> Result<()> {
+    for entry in WalkDir::new(root)
+        .follow_links(false)
+        .into_iter()
+        .filter_entry(|entry| !is_ignored_path(entry.path()))
+    {
+        let entry = entry?;
+        if !entry.file_type().is_file() {
+            continue;
+        }
+        let rel = entry.path().strip_prefix(root).context("rel path")?;
+        let size = entry.metadata().map(|meta| meta.len()).unwrap_or(0);
+        *total_bytes = total_bytes.saturating_add(size);
+        entries.push(SigilLinkEntry {
+            kind,
+            relative_path: rel.to_string_lossy().to_string(),
+            size,
+        });
+        progress.bump(None, false);
+    }
+
+    Ok(())
 }
 
 fn source_label_for_archive(path: &Path) -> Option<String> {
@@ -1544,14 +1715,39 @@ fn contains_ignored_path(source: &Path) -> bool {
     false
 }
 
+static TEMP_COUNTER: AtomicUsize = AtomicUsize::new(0);
+
 fn make_temp_dir(data_dir: &Path, suffix: &str) -> Result<PathBuf> {
     let temp_root = data_dir.join("tmp");
     fs::create_dir_all(&temp_root).context("create temp root")?;
 
-    let name = format!("import-{}-{}", now_timestamp(), suffix);
+    let counter = TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let name = format!("import-{nanos}-{counter}-{suffix}");
     let temp_dir = temp_root.join(name);
     fs::create_dir_all(&temp_dir).context("create temp dir")?;
     Ok(temp_dir)
+}
+
+fn make_stage_dir(data_dir: &Path, mod_id: &str) -> Result<PathBuf> {
+    let label = sanitize_stage_label(mod_id);
+    make_temp_dir(data_dir, &format!("stage-{label}"))
+}
+
+fn sanitize_stage_label(value: &str) -> String {
+    value
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .collect()
 }
 
 fn hash_path(path: &Path) -> String {

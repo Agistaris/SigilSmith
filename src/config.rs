@@ -74,6 +74,8 @@ pub struct GameConfig {
     pub game_id: GameId,
     pub game_name: String,
     pub data_dir: PathBuf,
+    #[serde(default)]
+    pub sigillink_cache_dir: Option<PathBuf>,
     pub game_root: PathBuf,
     pub larian_dir: PathBuf,
     pub active_profile: String,
@@ -104,6 +106,7 @@ impl GameConfig {
             game_id: game,
             game_name: game.display_name().to_string(),
             data_dir,
+            sigillink_cache_dir: None,
             game_root,
             larian_dir,
             active_profile: "Default".to_string(),
@@ -118,6 +121,24 @@ impl GameConfig {
         let raw = serde_json::to_string_pretty(self).context("serialize config")?;
         fs::write(config_path, raw).context("write config")?;
         Ok(())
+    }
+
+    pub fn sigillink_cache_root(&self) -> PathBuf {
+        self.sigillink_cache_dir
+            .clone()
+            .unwrap_or_else(|| self.data_dir.clone())
+    }
+
+    pub fn sigillink_mods_root(&self) -> PathBuf {
+        self.sigillink_cache_root().join("mods")
+    }
+
+    pub fn sigillink_index_root(&self) -> PathBuf {
+        self.sigillink_cache_root().join("sigillink")
+    }
+
+    pub fn sigillink_temp_root(&self) -> PathBuf {
+        self.sigillink_cache_root().join("tmp")
     }
 }
 

@@ -9,7 +9,7 @@ use crate::{
         FileOverride, InstallTarget, Library, ModEntry, ModSource, Profile, ProfileEntry,
         TargetKind, TargetOverride,
     },
-    metadata, native_pak, smart_rank, update,
+    metadata, native_pak, sigillink, smart_rank, update,
 };
 use anyhow::{Context, Result};
 use arboard::Clipboard;
@@ -32,6 +32,9 @@ use std::{
 use walkdir::WalkDir;
 
 use blake3::Hasher;
+
+#[cfg(unix)]
+use std::os::unix::fs::MetadataExt;
 
 const SEARCH_DEBOUNCE_MS: u64 = 250;
 const HOTKEY_DEBOUNCE_MS: u64 = 200;
@@ -73,10 +76,22 @@ pub enum SetupStep {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SigilLinkCacheAction {
+    Move,
+    Relocate { target_root: PathBuf },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PathBrowserPurpose {
     Setup(SetupStep),
     ImportProfile,
-    ExportProfile { profile: String },
+    ExportProfile {
+        profile: String,
+    },
+    SigilLinkCache {
+        action: SigilLinkCacheAction,
+        require_dev: Option<u64>,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -150,6 +165,9 @@ pub enum DialogKind {
         name: String,
         native: bool,
         dependents: Vec<DependentMod>,
+    },
+    SigilLinkRelocation {
+        target_root: PathBuf,
     },
     MoveBlocked {
         resume_move_mode: bool,
@@ -318,6 +336,7 @@ enum ImportMessage {
 
 enum DeployMessage {
     Completed { report: deploy::DeployReport },
+    SigilLinkRelocation { error: String, target_root: PathBuf },
     Failed { error: String },
 }
 
@@ -368,7 +387,7 @@ enum DuplicateKind {
 }
 
 struct DuplicateDecision {
-    mod_entry: ModEntry,
+    import_mod: importer::ImportMod,
     existing_id: String,
     existing_label: String,
     kind: DuplicateKind,
@@ -617,7 +636,7 @@ pub struct App {
     duplicate_queue: VecDeque<DuplicateDecision>,
     pending_duplicate: Option<DuplicateDecision>,
     duplicate_apply_all: Option<bool>,
-    approved_imports: Vec<ModEntry>,
+    approved_imports: Vec<importer::ImportMod>,
     pub conflicts: Vec<deploy::ConflictEntry>,
     pub conflict_selected: usize,
     pub override_swap: Option<OverrideSwap>,
@@ -1332,6 +1351,18 @@ impl App {
         self.smart_rank_cache = None;
         self.smart_rank_cache_last_saved = None;
         self.clear_smart_rank_cache_file();
+        let sigillink_root = sigillink::sigillink_root(&self.config.sigillink_cache_root());
+        if sigillink_root.exists() {
+            if let Err(err) = fs::remove_dir_all(&sigillink_root) {
+                self.log_warn(format!("SigilLink cache clear failed: {err}"));
+            }
+        }
+        let temp_root = self.config.sigillink_temp_root();
+        if temp_root.exists() {
+            if let Err(err) = fs::remove_dir_all(&temp_root) {
+                self.log_warn(format!("Import staging clear failed: {err}"));
+            }
+        }
         if let Err(err) = self.library.save(&self.config.data_dir) {
             self.log_warn(format!("System cache clear save failed: {err}"));
         }
@@ -3300,12 +3331,32 @@ impl App {
         self.open_path_browser(PathBrowserPurpose::Setup(SetupStep::DownloadsDir));
     }
 
+    pub fn open_sigillink_cache_move(&mut self) {
+        self.move_mode = false;
+        self.open_path_browser(PathBrowserPurpose::SigilLinkCache {
+            action: SigilLinkCacheAction::Move,
+            require_dev: None,
+        });
+    }
+
+    fn open_sigillink_cache_relocation(&mut self, target_root: PathBuf) {
+        let Some(require_dev) = path_dev_id_or_parent(&target_root) else {
+            self.status = "SigilLink relocation failed: unable to read BG3 filesystem.".to_string();
+            return;
+        };
+        self.move_mode = false;
+        self.open_path_browser(PathBrowserPurpose::SigilLinkCache {
+            action: SigilLinkCacheAction::Relocate { target_root },
+            require_dev: Some(require_dev),
+        });
+    }
+
     fn open_path_browser(&mut self, purpose: PathBrowserPurpose) {
         let current = self.path_browser_start(&purpose);
         let input_seed = match &purpose {
-            PathBrowserPurpose::Setup(_) | PathBrowserPurpose::ImportProfile => {
-                current.display().to_string()
-            }
+            PathBrowserPurpose::Setup(_)
+            | PathBrowserPurpose::ImportProfile
+            | PathBrowserPurpose::SigilLinkCache { .. } => current.display().to_string(),
             PathBrowserPurpose::ExportProfile { profile } => self
                 .default_profile_export_path(profile)
                 .display()
@@ -3322,6 +3373,10 @@ impl App {
             PathBrowserPurpose::Setup(SetupStep::DownloadsDir) => "Select downloads folder",
             PathBrowserPurpose::ImportProfile => "Import mod list",
             PathBrowserPurpose::ExportProfile { .. } => "Export mod list",
+            PathBrowserPurpose::SigilLinkCache { action, .. } => match action {
+                SigilLinkCacheAction::Move => "Move SigilLink cache",
+                SigilLinkCacheAction::Relocate { .. } => "Select SigilLink cache folder",
+            },
         };
         let focus = match &purpose {
             PathBrowserPurpose::Setup(_) => PathBrowserFocus::List,
@@ -3375,6 +3430,21 @@ impl App {
             PathBrowserPurpose::ExportProfile { .. } => {
                 candidates.push(self.sigilsmith_dir());
             }
+            PathBrowserPurpose::SigilLinkCache { action, .. } => match action {
+                SigilLinkCacheAction::Move => {
+                    let cache_root = self.config.sigillink_cache_root();
+                    if cache_root.is_dir() {
+                        candidates.push(cache_root);
+                    }
+                    candidates.push(home.clone());
+                }
+                SigilLinkCacheAction::Relocate { target_root } => {
+                    if let Some(mountpoint) = mountpoint_for_path(target_root) {
+                        candidates.push(mountpoint);
+                    }
+                    candidates.push(PathBuf::from("/"));
+                }
+            },
         }
         candidates
             .into_iter()
@@ -3424,6 +3494,22 @@ impl App {
                 let parent = path.parent().unwrap_or_else(|| Path::new("."));
                 parent.is_dir() && path.file_name().is_some() && !path.is_dir()
             }
+            PathBrowserPurpose::SigilLinkCache { require_dev, .. } => {
+                let valid_dir = if path.exists() {
+                    path.is_dir()
+                } else {
+                    path.parent().map(|parent| parent.is_dir()).unwrap_or(false)
+                };
+                if !valid_dir {
+                    return false;
+                }
+                match require_dev {
+                    Some(dev) => path_dev_id_or_parent(path)
+                        .map(|found| found == *dev)
+                        .unwrap_or(false),
+                    None => true,
+                }
+            }
         }
     }
 
@@ -3435,7 +3521,9 @@ impl App {
     ) -> Vec<PathBrowserEntry> {
         let mut entries = Vec::new();
         let select_label = match purpose {
-            PathBrowserPurpose::Setup(_) => "[ Select this folder ]",
+            PathBrowserPurpose::Setup(_) | PathBrowserPurpose::SigilLinkCache { .. } => {
+                "[ Select this folder ]"
+            }
             PathBrowserPurpose::ImportProfile => "[ Use entered path ]",
             PathBrowserPurpose::ExportProfile { .. } => "[ Export to entered path ]",
         };
@@ -3516,6 +3604,132 @@ impl App {
             PathBrowserPurpose::ImportProfile => self.import_profile(path.display().to_string()),
             PathBrowserPurpose::ExportProfile { profile } => {
                 self.export_profile(profile.clone(), path.display().to_string())
+            }
+            PathBrowserPurpose::SigilLinkCache { action, .. } => {
+                self.apply_sigillink_cache_selection(path, action.clone())
+            }
+        }
+    }
+
+    fn apply_sigillink_cache_selection(
+        &mut self,
+        path: PathBuf,
+        action: SigilLinkCacheAction,
+    ) -> Result<()> {
+        if !path.exists() {
+            fs::create_dir_all(&path).context("create sigillink cache dir")?;
+        } else if !path.is_dir() {
+            return Err(anyhow::anyhow!("SigilLink cache path is not a directory"));
+        }
+
+        let action_label = match action {
+            SigilLinkCacheAction::Move => "Moving",
+            SigilLinkCacheAction::Relocate { .. } => "Relocating",
+        };
+        self.status = format!("{action_label} SigilLink Cache");
+        self.log_info(format!(
+            "{action_label} SigilLink cache to {}",
+            path.display()
+        ));
+
+        self.move_sigillink_cache(path.clone())?;
+
+        if path == self.config.data_dir {
+            self.config.sigillink_cache_dir = None;
+        } else {
+            self.config.sigillink_cache_dir = Some(path.clone());
+        }
+        self.config.save()?;
+
+        self.status = format!("SigilLink cache moved: {}", path.display());
+        self.log_info(format!("SigilLink cache moved to {}", path.display()));
+        self.log_sigillink_mode();
+
+        if matches!(action, SigilLinkCacheAction::Relocate { .. }) {
+            self.queue_deploy("sigillink cache relocated");
+        }
+        Ok(())
+    }
+
+    fn move_sigillink_cache(&mut self, new_root: PathBuf) -> Result<()> {
+        let current_root = self.config.sigillink_cache_root();
+        if current_root == new_root {
+            return Ok(());
+        }
+
+        if !new_root.exists() {
+            fs::create_dir_all(&new_root).context("create sigillink cache root")?;
+        }
+
+        let same_fs = match (
+            path_dev_id_or_parent(&current_root),
+            path_dev_id_or_parent(&new_root),
+        ) {
+            (Some(current_dev), Some(next_dev)) => current_dev == next_dev,
+            _ => false,
+        };
+
+        let entries = ["mods", "sigillink", "tmp", "trash"];
+        for entry in entries {
+            let source = current_root.join(entry);
+            if !source.exists() {
+                continue;
+            }
+            let dest = new_root.join(entry);
+            if dest.exists() {
+                let occupied = fs::read_dir(&dest)
+                    .ok()
+                    .and_then(|mut read| read.next())
+                    .is_some();
+                if occupied {
+                    return Err(anyhow::anyhow!(
+                        "SigilLink cache move aborted: destination {entry} not empty"
+                    ));
+                }
+            }
+        }
+
+        for entry in entries {
+            let source = current_root.join(entry);
+            if !source.exists() {
+                continue;
+            }
+            let dest = new_root.join(entry);
+            if let Some(parent) = dest.parent() {
+                fs::create_dir_all(parent).context("create sigillink cache parent")?;
+            }
+            if same_fs {
+                fs::rename(&source, &dest).with_context(|| {
+                    format!(
+                        "move sigillink cache {} -> {}",
+                        source.display(),
+                        dest.display()
+                    )
+                })?;
+            } else {
+                copy_dir_recursive(&source, &dest)?;
+                fs::remove_dir_all(&source)
+                    .with_context(|| format!("cleanup sigillink cache {}", source.display()))?;
+            }
+        }
+
+        Ok(())
+    }
+
+    fn log_sigillink_mode(&mut self) {
+        let Ok(paths) = game::detect_paths(
+            self.game_id,
+            Some(&self.config.game_root),
+            Some(&self.config.larian_dir),
+        ) else {
+            return;
+        };
+        if let Ok(summary) = deploy::summarize_sigillink_modes(
+            &self.config.sigillink_cache_root(),
+            &[paths.game_root, paths.larian_mods_dir],
+        ) {
+            if !summary.is_empty() && summary != "none" {
+                self.log_info(format!("SigilLink mode: {summary}"));
             }
         }
     }
@@ -4170,26 +4384,29 @@ impl App {
             });
 
             let start = Instant::now();
-            let imports =
-                match importer::import_path_with_progress(&path, &self.config.data_dir, progress)
-                    .with_context(|| format!("import {path:?}"))
-                {
-                    Ok(imports) => imports,
-                    Err(err) => {
-                        let label = path.display().to_string();
-                        if options.verbosity != CliVerbosity::Quiet {
-                            eprintln!(
-                                "Import failed: {label} ({})",
-                                summarize_error(&err.to_string())
-                            );
-                        }
-                        failures.push(importer::ImportFailure {
-                            source: importer::ImportSource { label },
-                            error: err.to_string(),
-                        });
-                        continue;
+            let imports = match importer::import_path_with_progress(
+                &path,
+                &self.config.sigillink_cache_root(),
+                progress,
+            )
+            .with_context(|| format!("import {path:?}"))
+            {
+                Ok(imports) => imports,
+                Err(err) => {
+                    let label = path.display().to_string();
+                    if options.verbosity != CliVerbosity::Quiet {
+                        eprintln!(
+                            "Import failed: {label} ({})",
+                            summarize_error(&err.to_string())
+                        );
                     }
-                };
+                    failures.push(importer::ImportFailure {
+                        source: importer::ImportSource { label },
+                        error: err.to_string(),
+                    });
+                    continue;
+                }
+            };
 
             if imports.unrecognized && imports.batches.is_empty() {
                 let label = path.display().to_string();
@@ -4227,14 +4444,15 @@ impl App {
                     println!("  Source: {}", source_label);
                 }
                 let mut approved = Vec::new();
-                for mod_entry in batch.mods {
+                for import_mod in batch.mods {
+                    let mod_entry = &import_mod.entry;
                     if let Some(existing) = self.find_duplicate_by_name(&mod_entry.name).cloned() {
-                        let default_overwrite = duplicate_default_overwrite(&mod_entry, &existing);
+                        let default_overwrite = duplicate_default_overwrite(mod_entry, &existing);
                         let overwrite = if let Some(choice) = apply_all {
                             choice
                         } else {
                             let resolution = prompt_duplicate_cli(
-                                &mod_entry,
+                                mod_entry,
                                 &existing,
                                 default_overwrite,
                                 None,
@@ -4256,14 +4474,14 @@ impl App {
                             if existing.id != mod_entry.id {
                                 let _ = self.remove_mod_by_id(&existing.id);
                             }
-                            approved.push(mod_entry);
+                            approved.push(import_mod);
                         } else {
-                            self.remove_mod_root(&mod_entry.id);
+                            self.cleanup_import_staging(&import_mod);
                         }
                         continue;
                     }
 
-                    if let Some(similar) = self.find_similar_by_label(&mod_entry) {
+                    if let Some(similar) = self.find_similar_by_label(mod_entry) {
                         let default_overwrite = similar
                             .new_stamp
                             .zip(similar.existing_stamp)
@@ -4277,7 +4495,7 @@ impl App {
                         {
                             Some(existing) => existing,
                             None => {
-                                approved.push(mod_entry);
+                                approved.push(import_mod);
                                 continue;
                             }
                         };
@@ -4285,7 +4503,7 @@ impl App {
                             choice
                         } else {
                             let resolution = prompt_duplicate_cli(
-                                &mod_entry,
+                                mod_entry,
                                 &existing,
                                 default_overwrite,
                                 Some(similar.similarity),
@@ -4307,14 +4525,14 @@ impl App {
                             if similar.existing_id != mod_entry.id {
                                 let _ = self.remove_mod_by_id(&similar.existing_id);
                             }
-                            approved.push(mod_entry);
+                            approved.push(import_mod);
                         } else {
-                            self.remove_mod_root(&mod_entry.id);
+                            self.cleanup_import_staging(&import_mod);
                         }
                         continue;
                     }
 
-                    approved.push(mod_entry);
+                    approved.push(import_mod);
                 }
 
                 if !approved.is_empty() {
@@ -4405,6 +4623,9 @@ impl App {
                             "Deploy complete: {} pak, {} loose ({} files)",
                             report.pak_count, report.loose_count, report.file_count
                         );
+                        for warning in &report.warnings {
+                            eprintln!("Deploy warning: {warning}");
+                        }
                     }
                     self.library = library;
                 }
@@ -5162,12 +5383,12 @@ impl App {
 
         let tx = self.import_tx.clone();
         let progress_tx = tx.clone();
-        let data_dir = self.config.data_dir.clone();
+        let cache_root = self.config.sigillink_cache_root();
         thread::spawn(move || {
             let progress = Arc::new(move |progress: importer::ImportProgress| {
                 let _ = progress_tx.send(ImportMessage::Progress(progress));
             });
-            let result = importer::import_path_with_progress(&path, &data_dir, Some(progress))
+            let result = importer::import_path_with_progress(&path, &cache_root, Some(progress))
                 .with_context(|| format!("import {path:?}"));
             let message = match result {
                 Ok(result) => ImportMessage::Completed { path, result },
@@ -5234,28 +5455,29 @@ impl App {
         }
     }
 
-    fn stage_imports(&mut self, mods: Vec<ModEntry>, source: &importer::ImportSource) {
+    fn stage_imports(&mut self, mods: Vec<importer::ImportMod>, source: &importer::ImportSource) {
         let mut approved = Vec::new();
         let mut duplicates = VecDeque::new();
 
-        for mod_entry in mods {
+        for import_mod in mods {
+            let mod_entry = &import_mod.entry;
             if let Some(existing) = self.find_duplicate_by_name(&mod_entry.name) {
-                let default_overwrite = duplicate_default_overwrite(&mod_entry, existing);
+                let default_overwrite = duplicate_default_overwrite(mod_entry, existing);
                 duplicates.push_back(DuplicateDecision {
-                    mod_entry,
+                    import_mod,
                     existing_id: existing.id.clone(),
                     existing_label: existing.display_name(),
                     kind: DuplicateKind::Exact,
                     default_overwrite,
                 });
-            } else if let Some(similar) = self.find_similar_by_label(&mod_entry) {
+            } else if let Some(similar) = self.find_similar_by_label(mod_entry) {
                 let existing_label = similar.existing_label.clone();
                 let default_overwrite = similar
                     .new_stamp
                     .zip(similar.existing_stamp)
                     .map(|(new_stamp, existing_stamp)| new_stamp > existing_stamp);
                 duplicates.push_back(DuplicateDecision {
-                    mod_entry,
+                    import_mod,
                     existing_id: similar.existing_id,
                     existing_label: existing_label.clone(),
                     kind: DuplicateKind::Similar {
@@ -5268,7 +5490,7 @@ impl App {
                     default_overwrite,
                 });
             } else {
-                approved.push(mod_entry);
+                approved.push(import_mod);
             }
         }
 
@@ -5394,7 +5616,7 @@ impl App {
     }
 
     fn collect_mod_dependencies(&self, mod_entry: &ModEntry) -> Vec<String> {
-        let mod_root = library_mod_root(&self.config.data_dir).join(&mod_entry.id);
+        let mod_root = library_mod_root(&self.config.sigillink_cache_root()).join(&mod_entry.id);
         let use_managed_root = mod_root.exists();
         let mut native_paths = None;
         let mut native_index = None;
@@ -5766,7 +5988,8 @@ impl App {
                 mod_entry.id
             ));
             lines.push(format!("Source: {:?}", mod_entry.source));
-            let managed_root = library_mod_root(&self.config.data_dir).join(&mod_entry.id);
+            let managed_root =
+                library_mod_root(&self.config.sigillink_cache_root()).join(&mod_entry.id);
             lines.push(format!(
                 "Managed root: {} ({})",
                 managed_root.display(),
@@ -6187,7 +6410,7 @@ impl App {
                 else {
                     continue;
                 };
-                let mod_root = config.data_dir.join("mods").join(&mod_entry.id);
+                let mod_root = config.sigillink_mods_root().join(&mod_entry.id);
                 if mod_root.exists() {
                     remove_entry = Some(mod_entry.clone());
                     remove_profile_entry = Some(entry.clone());
@@ -6550,14 +6773,17 @@ impl App {
 
         for (index, path) in archives.iter().enumerate() {
             lines.push(format!("import {}: {}", index + 1, path.display()));
-            let result =
-                match importer::import_path_with_progress(path, &self.config.data_dir, None) {
-                    Ok(result) => result,
-                    Err(err) => {
-                        lines.push(format!("  import failed: {err}"));
-                        continue;
-                    }
-                };
+            let result = match importer::import_path_with_progress(
+                path,
+                &self.config.sigillink_cache_root(),
+                None,
+            ) {
+                Ok(result) => result,
+                Err(err) => {
+                    lines.push(format!("  import failed: {err}"));
+                    continue;
+                }
+            };
             if result.batches.is_empty() {
                 lines.push("  no mods found".to_string());
                 continue;
@@ -6689,7 +6915,7 @@ impl App {
     }
 
     fn normalize_mod_sources(&mut self) -> bool {
-        let mods_root = library_mod_root(&self.config.data_dir);
+        let mods_root = library_mod_root(&self.config.sigillink_cache_root());
         let mut changed = false;
         for mod_entry in &mut self.library.mods {
             if mods_root.join(&mod_entry.id).exists() {
@@ -6746,14 +6972,12 @@ impl App {
         }
     }
 
-    fn cancel_pending_import(&mut self, keep_files: bool) {
+    fn cancel_pending_import(&mut self, _keep_files: bool) {
         let Some(batch) = self.pending_import_batch.take() else {
             return;
         };
-        if !keep_files {
-            for mod_entry in &batch.mods {
-                self.remove_mod_root(&mod_entry.id);
-            }
+        for import_mod in &batch.mods {
+            self.cleanup_import_staging(import_mod);
         }
         self.status = "Import canceled".to_string();
         self.log_warn("Import canceled during dependency check".to_string());
@@ -6807,7 +7031,7 @@ impl App {
         });
     }
 
-    fn apply_mod_entries(&mut self, mods: Vec<ModEntry>) -> Result<usize> {
+    fn apply_mod_entries(&mut self, mods: Vec<importer::ImportMod>) -> Result<usize> {
         let count = mods.len();
         if count == 0 {
             return Ok(0);
@@ -6819,7 +7043,14 @@ impl App {
         );
 
         let mut added = Vec::new();
-        for mod_entry in mods {
+        for import_mod in mods {
+            let mod_entry = match self.finalize_import_mod(&import_mod) {
+                Ok(entry) => entry,
+                Err(err) => {
+                    self.cleanup_import_staging(&import_mod);
+                    return Err(err);
+                }
+            };
             self.library.mods.retain(|entry| entry.id != mod_entry.id);
             self.library.mods.push(mod_entry.clone());
             added.push(mod_entry);
@@ -6840,6 +7071,48 @@ impl App {
             self.queue_conflict_scan("library update");
         }
         Ok(count)
+    }
+
+    fn finalize_import_mod(&mut self, import_mod: &importer::ImportMod) -> Result<ModEntry> {
+        let mod_entry = import_mod.entry.clone();
+        if let Some(staging_root) = &import_mod.staging_root {
+            if !staging_root.exists() {
+                return Err(anyhow::anyhow!("import staging missing"));
+            }
+            let mods_root = library_mod_root(&self.config.sigillink_cache_root());
+            fs::create_dir_all(&mods_root).context("create mod library root")?;
+            let final_root = mods_root.join(&mod_entry.id);
+            if final_root.exists() {
+                if !path_within_root(&final_root, &mods_root) {
+                    return Err(anyhow::anyhow!("import finalize outside managed mods dir"));
+                }
+                fs::remove_dir_all(&final_root)
+                    .with_context(|| format!("remove existing mod root {:?}", final_root))?;
+            }
+            fs::rename(staging_root, &final_root)
+                .with_context(|| format!("finalize import {:?}", staging_root))?;
+        }
+
+        if let Some(index) = &import_mod.sigillink {
+            if let Err(err) = sigillink::write_sigillink_index(
+                &self.config.sigillink_cache_root(),
+                &mod_entry.id,
+                index,
+            ) {
+                self.log_warn(format!(
+                    "SigilLink cache write failed for {}: {err}",
+                    mod_entry.display_name()
+                ));
+            }
+        } else {
+            sigillink::remove_sigillink_index(&self.config.sigillink_cache_root(), &mod_entry.id);
+        }
+
+        Ok(mod_entry)
+    }
+
+    fn cleanup_import_staging(&mut self, import_mod: &importer::ImportMod) {
+        import_mod.cleanup_staging();
     }
 
     fn prompt_next_duplicate(&mut self) {
@@ -6893,7 +7166,7 @@ impl App {
             return;
         };
 
-        let display_name = next.mod_entry.display_name();
+        let display_name = next.import_mod.entry.display_name();
         let existing_label = next.existing_label.clone();
         let (title, message, kind) = match &next.kind {
             DuplicateKind::Exact => (
@@ -6973,7 +7246,7 @@ impl App {
 
     fn apply_duplicate_decision(&mut self, decision: DuplicateDecision, overwrite: bool) {
         if overwrite {
-            let same_id = decision.existing_id == decision.mod_entry.id;
+            let same_id = decision.existing_id == decision.import_mod.entry.id;
             let removed = if same_id {
                 false
             } else {
@@ -6985,7 +7258,7 @@ impl App {
             };
             if same_id {
                 self.log_info(format!(
-                    "Overwriting {label} mod \"{}\" (keeping files)",
+                    "Overwriting {label} mod \"{}\" (same ID)",
                     decision.existing_label
                 ));
             } else if removed {
@@ -6994,7 +7267,7 @@ impl App {
                     decision.existing_label
                 ));
             }
-            self.approved_imports.push(decision.mod_entry);
+            self.approved_imports.push(decision.import_mod);
         } else {
             let label = match decision.kind {
                 DuplicateKind::Exact => "duplicate",
@@ -7002,9 +7275,9 @@ impl App {
             };
             self.log_warn(format!(
                 "Skipped {label} \"{}\"",
-                decision.mod_entry.display_name()
+                decision.import_mod.entry.display_name()
             ));
-            self.remove_mod_root(&decision.mod_entry.id);
+            self.cleanup_import_staging(&decision.import_mod);
         }
     }
 
@@ -7034,6 +7307,20 @@ impl App {
         self.dialog = Some(dialog);
         self.move_mode = false;
         self.input_mode = InputMode::Normal;
+    }
+
+    fn open_sigillink_relocation_dialog(&mut self, target_root: PathBuf) {
+        self.open_dialog(Dialog {
+            title: "SigilLink needs a cache location on the BG3 drive".to_string(),
+            message: "Symlink creation failed. Select a cache folder on the same drive as BG3 to continue without symlinks."
+                .to_string(),
+            yes_label: "Select location".to_string(),
+            no_label: "Cancel".to_string(),
+            choice: DialogChoice::Yes,
+            kind: DialogKind::SigilLinkRelocation { target_root },
+            toggle: None,
+            scroll: 0,
+        });
     }
 
     pub fn close_dialog(&mut self) {
@@ -7096,9 +7383,14 @@ impl App {
             DialogKind::Unrecognized { path, label } => {
                 if matches!(choice, DialogChoice::Yes) {
                     let entry = build_unknown_entry(&path, &label);
+                    let import_mod = importer::ImportMod {
+                        entry,
+                        staging_root: None,
+                        sigillink: None,
+                    };
                     self.log_warn(format!("Importing unknown layout: {label}"));
                     self.stage_imports(
-                        vec![entry],
+                        vec![import_mod],
                         &importer::ImportSource {
                             label: label.clone(),
                         },
@@ -7156,6 +7448,13 @@ impl App {
                 }
                 self.clamp_selection();
                 self.queue_auto_deploy("mod removed");
+            }
+            DialogKind::SigilLinkRelocation { target_root } => {
+                if matches!(choice, DialogChoice::Yes) {
+                    self.open_sigillink_cache_relocation(target_root);
+                } else {
+                    self.status = "Deploy canceled".to_string();
+                }
             }
             DialogKind::DisableDependents {
                 ids,
@@ -7446,11 +7745,12 @@ impl App {
     }
 
     fn remove_mod_root(&mut self, id: &str) {
-        let mod_root = self.config.data_dir.join("mods").join(id);
+        let mod_root = self.config.sigillink_mods_root().join(id);
         if !mod_root.exists() {
+            sigillink::remove_sigillink_index(&self.config.sigillink_cache_root(), id);
             return;
         }
-        let allowed_root = self.config.data_dir.join("mods");
+        let allowed_root = self.config.sigillink_mods_root();
         if !path_within_root(&mod_root, &allowed_root) {
             self.log_warn(format!(
                 "Remove mod files skipped: outside managed mods dir ({})",
@@ -7459,14 +7759,16 @@ impl App {
             return;
         }
         let _ = fs::remove_dir_all(&mod_root);
+        sigillink::remove_sigillink_index(&self.config.sigillink_cache_root(), id);
     }
 
     fn queue_remove_mod_root(&mut self, id: &str) {
-        let mod_root = self.config.data_dir.join("mods").join(id);
+        let mod_root = self.config.sigillink_mods_root().join(id);
         if !mod_root.exists() {
+            sigillink::remove_sigillink_index(&self.config.sigillink_cache_root(), id);
             return;
         }
-        let allowed_root = self.config.data_dir.join("mods");
+        let allowed_root = self.config.sigillink_mods_root();
         if !path_within_root(&mod_root, &allowed_root) {
             self.log_warn(format!(
                 "Remove mod files skipped: outside managed mods dir ({})",
@@ -7474,7 +7776,7 @@ impl App {
             ));
             return;
         }
-        let trash_root = self.config.data_dir.join("trash");
+        let trash_root = self.config.sigillink_cache_root().join("trash");
         if let Err(err) = fs::create_dir_all(&trash_root) {
             self.log_warn(format!("Remove mod files skipped: {err}"));
             return;
@@ -7491,6 +7793,7 @@ impl App {
                 self.log_warn(format!("Remove mod files skipped: {err}"));
             }
         }
+        sigillink::remove_sigillink_index(&self.config.sigillink_cache_root(), id);
     }
 
     fn apply_native_sync_delta(&mut self, delta: NativeSyncDelta) {
@@ -7509,7 +7812,7 @@ impl App {
             else {
                 continue;
             };
-            let managed_root = self.config.data_dir.join("mods").join(&update.id);
+            let managed_root = self.config.sigillink_mods_root().join(&update.id);
             if update.source == ModSource::Native && managed_root.exists() {
                 if entry.source != ModSource::Managed {
                     entry.source = ModSource::Managed;
@@ -7718,7 +8021,7 @@ impl App {
             let mut has_other_enabled = false;
             let pak_enabled = mod_entry.is_target_enabled(TargetKind::Pak);
             let mut has_pak_target = false;
-            let mod_root = library_mod_root(&self.config.data_dir).join(id);
+            let mod_root = library_mod_root(&self.config.sigillink_cache_root()).join(id);
             let pak_index = if mod_root.exists() {
                 Some(native_pak::build_native_pak_index(&mod_root))
             } else {
@@ -7763,7 +8066,8 @@ impl App {
             }
             if has_pak_target && !pak_exists {
                 pak_exists =
-                    !resolve_pak_paths(mod_entry, &self.config.data_dir, None, None).is_empty();
+                    !resolve_pak_paths(mod_entry, &self.config.sigillink_cache_root(), None, None)
+                        .is_empty();
             }
             if has_pak_target && pak_enabled && !pak_exists {
                 missing_pak = true;
@@ -8599,7 +8903,24 @@ impl App {
         self.deploy_active = true;
         let backup = self.deploy_backup;
 
-        self.status = format!("Deploying ({reason})");
+        let link_label = game::detect_paths(
+            self.game_id,
+            Some(&self.config.game_root),
+            Some(&self.config.larian_dir),
+        )
+        .ok()
+        .and_then(|paths| {
+            deploy::summarize_sigillink_modes(
+                &self.config.sigillink_cache_root(),
+                &[paths.game_root, paths.larian_mods_dir],
+            )
+            .ok()
+        });
+        if let Some(label) = link_label {
+            self.status = format!("Deploying ({reason}) | Linking (SigilLink: {label})");
+        } else {
+            self.status = format!("Deploying ({reason})");
+        }
         self.log_info(format!("Deploy started ({reason})"));
 
         let tx = self.deploy_tx.clone();
@@ -8616,9 +8937,25 @@ impl App {
             );
             let message = match result {
                 Ok(report) => DeployMessage::Completed { report },
-                Err(err) => DeployMessage::Failed {
-                    error: err.to_string(),
-                },
+                Err(err) => {
+                    let relocate = err
+                        .downcast_ref::<deploy::SigilLinkRelocationError>()
+                        .or_else(|| {
+                            err.chain().find_map(|cause| {
+                                cause.downcast_ref::<deploy::SigilLinkRelocationError>()
+                            })
+                        });
+                    if let Some(relocate) = relocate {
+                        DeployMessage::SigilLinkRelocation {
+                            error: relocate.to_string(),
+                            target_root: relocate.target_root.clone(),
+                        }
+                    } else {
+                        DeployMessage::Failed {
+                            error: err.to_string(),
+                        }
+                    }
+                }
             };
             let _ = tx.send(message);
         });
@@ -8680,6 +9017,12 @@ impl App {
                         report.removed_count
                     ));
                 }
+                for warning in &report.warnings {
+                    self.log_warn(format!("Deploy warning: {warning}"));
+                }
+                if !report.link_mode_summary.is_empty() && report.link_mode_summary != "none" {
+                    self.log_info(format!("SigilLink mode: {}", report.link_mode_summary));
+                }
                 self.log_info(format!(
                     "Deploy complete: {} pak, {} loose, {} files, {} overrides",
                     report.pak_count,
@@ -8688,6 +9031,11 @@ impl App {
                     report.overridden_files
                 ));
                 let _ = self.library.save(&self.config.data_dir);
+            }
+            DeployMessage::SigilLinkRelocation { error, target_root } => {
+                self.status = format!("Deploy paused: {error}");
+                self.log_warn(format!("Deploy halted for SigilLink relocation: {error}"));
+                self.open_sigillink_relocation_dialog(target_root);
             }
             DeployMessage::Failed { error } => {
                 self.status = format!("Deploy failed: {error}");
@@ -8964,6 +9312,173 @@ pub(crate) fn expand_tilde(input: &str) -> PathBuf {
         }
     }
     PathBuf::from(value)
+}
+
+#[cfg(unix)]
+fn path_dev_id_or_parent(path: &Path) -> Option<u64> {
+    let mut current = Some(path);
+    while let Some(candidate) = current {
+        if let Ok(meta) = fs::metadata(candidate) {
+            return Some(meta.dev());
+        }
+        current = candidate.parent();
+    }
+    None
+}
+
+#[cfg(not(unix))]
+fn path_dev_id_or_parent(_path: &Path) -> Option<u64> {
+    None
+}
+
+#[cfg(unix)]
+fn mountpoint_for_path(path: &Path) -> Option<PathBuf> {
+    let base = if path.exists() {
+        path.to_path_buf()
+    } else {
+        path.parent()?.to_path_buf()
+    };
+    let base = fs::canonicalize(&base).unwrap_or(base);
+    let mountpoints = mountpoints_from_mountinfo()
+        .or_else(mountpoints_from_mounts)
+        .unwrap_or_default();
+    let mut best: Option<PathBuf> = None;
+    let mut best_len = 0usize;
+    for mount in mountpoints {
+        if base.starts_with(&mount) {
+            let len = mount.components().count();
+            if len > best_len {
+                best_len = len;
+                best = Some(mount);
+            }
+        }
+    }
+    best
+}
+
+#[cfg(not(unix))]
+fn mountpoint_for_path(_path: &Path) -> Option<PathBuf> {
+    None
+}
+
+#[cfg(unix)]
+fn mountpoints_from_mountinfo() -> Option<Vec<PathBuf>> {
+    let raw = fs::read_to_string("/proc/self/mountinfo").ok()?;
+    let mut out = Vec::new();
+    for line in raw.lines() {
+        let Some((left, _)) = line.split_once(" - ") else {
+            continue;
+        };
+        let mut parts = left.split_whitespace();
+        let _ = parts.next();
+        let _ = parts.next();
+        let _ = parts.next();
+        let _ = parts.next();
+        let mount = match parts.next() {
+            Some(mount) => mount,
+            None => continue,
+        };
+        out.push(PathBuf::from(unescape_mount_path(mount)));
+    }
+    Some(out)
+}
+
+#[cfg(unix)]
+fn mountpoints_from_mounts() -> Option<Vec<PathBuf>> {
+    let raw = fs::read_to_string("/proc/mounts").ok()?;
+    let mut out = Vec::new();
+    for line in raw.lines() {
+        let mut parts = line.split_whitespace();
+        let _ = parts.next();
+        let mount = match parts.next() {
+            Some(mount) => mount,
+            None => continue,
+        };
+        out.push(PathBuf::from(unescape_mount_path(mount)));
+    }
+    Some(out)
+}
+
+#[cfg(unix)]
+fn unescape_mount_path(value: &str) -> String {
+    let bytes = value.as_bytes();
+    let mut out = String::new();
+    let mut idx = 0;
+    while idx < bytes.len() {
+        if bytes[idx] == b'\\' && idx + 3 < bytes.len() {
+            if let (Some(a), Some(b), Some(c)) = (
+                octal_value(bytes[idx + 1]),
+                octal_value(bytes[idx + 2]),
+                octal_value(bytes[idx + 3]),
+            ) {
+                out.push((a * 64 + b * 8 + c) as char);
+                idx += 4;
+                continue;
+            }
+        }
+        out.push(bytes[idx] as char);
+        idx += 1;
+    }
+    out
+}
+
+#[cfg(unix)]
+fn octal_value(byte: u8) -> Option<u8> {
+    if (b'0'..=b'7').contains(&byte) {
+        Some(byte - b'0')
+    } else {
+        None
+    }
+}
+
+fn copy_dir_recursive(source: &Path, dest: &Path) -> Result<()> {
+    fs::create_dir_all(dest).with_context(|| format!("create dir {}", dest.display()))?;
+    for entry in WalkDir::new(source).follow_links(false) {
+        let entry = entry?;
+        let rel = entry.path().strip_prefix(source)?;
+        if rel.as_os_str().is_empty() {
+            continue;
+        }
+        let dest_path = dest.join(rel);
+        if entry.file_type().is_dir() {
+            fs::create_dir_all(&dest_path)
+                .with_context(|| format!("create dir {}", dest_path.display()))?;
+            continue;
+        }
+        if entry.file_type().is_symlink() {
+            if let Some(parent) = dest_path.parent() {
+                fs::create_dir_all(parent)
+                    .with_context(|| format!("create dir {}", parent.display()))?;
+            }
+            if dest_path.exists() {
+                let _ = fs::remove_file(&dest_path);
+            }
+            #[cfg(unix)]
+            {
+                let target = fs::read_link(entry.path())?;
+                std::os::unix::fs::symlink(&target, &dest_path).with_context(|| {
+                    format!("symlink {} -> {}", target.display(), dest_path.display())
+                })?;
+            }
+            #[cfg(not(unix))]
+            {
+                fs::copy(entry.path(), &dest_path).with_context(|| {
+                    format!("copy {} -> {}", entry.path().display(), dest_path.display())
+                })?;
+            }
+            continue;
+        }
+        if entry.file_type().is_file() {
+            if let Some(parent) = dest_path.parent() {
+                fs::create_dir_all(parent)
+                    .with_context(|| format!("create dir {}", parent.display()))?;
+            }
+            fs::copy(entry.path(), &dest_path).with_context(|| {
+                format!("copy {} -> {}", entry.path().display(), dest_path.display())
+            })?;
+        }
+    }
+    Ok(())
 }
 
 fn strip_outer_quotes(value: &str) -> String {
@@ -9733,7 +10248,7 @@ fn collect_metadata_updates(
 
         for pak_path in resolve_pak_paths(
             mod_entry,
-            &config.data_dir,
+            &config.sigillink_cache_root(),
             paths.as_ref(),
             native_index.as_deref(),
         ) {
@@ -9763,7 +10278,7 @@ fn collect_metadata_updates(
             }
         }
 
-        let mod_root = library_mod_root(&config.data_dir).join(&mod_entry.id);
+        let mod_root = library_mod_root(&config.sigillink_cache_root()).join(&mod_entry.id);
         if mod_root.exists() {
             if let Some(meta_path) = metadata::find_meta_lsx(&mod_root) {
                 if let Some(meta) = metadata::read_meta_lsx(&meta_path) {
@@ -9948,7 +10463,7 @@ fn sync_native_mods_delta(
         .map(|module| (module.info.uuid.clone(), module))
         .collect();
 
-    let mods_root = config.data_dir.join("mods");
+    let mods_root = config.sigillink_mods_root();
     let mut updates = Vec::new();
     let mut updated_native_files = 0usize;
 
@@ -10196,7 +10711,7 @@ fn now_timestamp() -> i64 {
 
 fn resolve_pak_paths(
     mod_entry: &ModEntry,
-    data_dir: &PathBuf,
+    cache_root: &PathBuf,
     paths: Option<&crate::bg3::GamePaths>,
     native_index: Option<&[native_pak::NativePakEntry]>,
 ) -> Vec<PathBuf> {
@@ -10206,6 +10721,7 @@ fn resolve_pak_paths(
             out.push(path);
         }
     };
+    let mods_root = library_mod_root(cache_root);
     for target in &mod_entry.targets {
         let InstallTarget::Pak { file, info } = target else {
             continue;
@@ -10227,12 +10743,12 @@ fn resolve_pak_paths(
                 }
             }
         } else {
-            let path = data_dir.join("mods").join(&mod_entry.id).join(file);
+            let path = mods_root.join(&mod_entry.id).join(file);
             if path.exists() {
                 push_unique(path);
-            } else if let Some(index) = if data_dir.join("mods").join(&mod_entry.id).exists() {
+            } else if let Some(index) = if mods_root.join(&mod_entry.id).exists() {
                 Some(native_pak::build_native_pak_index(
-                    &data_dir.join("mods").join(&mod_entry.id),
+                    &mods_root.join(&mod_entry.id),
                 ))
             } else {
                 None

@@ -973,7 +973,7 @@ fn debug_smart_rank_cache_simulate(_app: &App) -> Result<()> {
 
 fn collect_dependencies(app: &App, mod_entry: &ModEntry, paths: Option<&GamePaths>) -> Vec<String> {
     let mut out = Vec::new();
-    let mod_root = library_mod_root(&app.config.data_dir).join(&mod_entry.id);
+    let mod_root = library_mod_root(&app.config.sigillink_cache_root()).join(&mod_entry.id);
     let base_dir = if mod_entry.is_native() {
         paths
             .map(|paths| paths.larian_mods_dir.clone())

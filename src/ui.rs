@@ -3,7 +3,7 @@ use crate::{
         expand_tilde, App, DependencyStatus, DialogChoice, DialogKind, ExplorerItem,
         ExplorerItemKind, Focus, InputMode, InputPurpose, LogLevel, ModSort, ModSortColumn,
         PathBrowser, PathBrowserEntryKind, PathBrowserFocus, PathBrowserPurpose, SetupStep,
-        ToastLevel, UpdateStatus,
+        SigilLinkCacheAction, ToastLevel, UpdateStatus,
     },
     library::{InstallTarget, ModEntry, TargetKind},
 };
@@ -419,6 +419,7 @@ enum SettingsItemKind {
     ToggleDependencyWarnings,
     ToggleStartupDependencyNotice,
     ActionClearSystemCaches,
+    ActionMoveSigilLinkCache,
     ActionClearSmartRankCache,
     ActionCheckUpdates,
 }
@@ -480,6 +481,11 @@ fn settings_items(app: &App) -> Vec<SettingsItem> {
         SettingsItem {
             label: "Clear System Caches".to_string(),
             kind: SettingsItemKind::ActionClearSystemCaches,
+            checked: None,
+        },
+        SettingsItem {
+            label: "Move SigilLink Cache".to_string(),
+            kind: SettingsItemKind::ActionMoveSigilLinkCache,
             checked: None,
         },
         SettingsItem {
@@ -580,6 +586,10 @@ fn handle_settings_menu(app: &mut App, key: KeyEvent) -> Result<()> {
                     }
                     SettingsItemKind::ActionClearSystemCaches => {
                         app.clear_system_caches();
+                    }
+                    SettingsItemKind::ActionMoveSigilLinkCache => {
+                        app.close_settings_menu();
+                        app.open_sigillink_cache_move();
                     }
                     SettingsItemKind::ActionClearSmartRankCache => {
                         app.clear_smart_rank_cache();
@@ -904,6 +914,13 @@ fn handle_browser_mode(app: &mut App, key: KeyEvent, browser: &mut PathBrowser) 
         PathBrowserPurpose::Setup(SetupStep::DownloadsDir) => "Not a folder.",
         PathBrowserPurpose::ImportProfile => "Select a file to import.",
         PathBrowserPurpose::ExportProfile { .. } => "Enter a file name to export.",
+        PathBrowserPurpose::SigilLinkCache { require_dev, .. } => {
+            if require_dev.is_some() {
+                "Select a directory on the same drive as BG3 to use SigilLink without symlinks."
+            } else {
+                "Select a folder for the SigilLink cache."
+            }
+        }
     };
     let len = browser.entries.len();
     match browser.focus {
@@ -3569,6 +3586,10 @@ fn draw_path_browser(frame: &mut Frame<'_>, _app: &App, theme: &Theme, browser: 
         PathBrowserPurpose::Setup(SetupStep::DownloadsDir) => "Select downloads folder",
         PathBrowserPurpose::ImportProfile => "Import mod list",
         PathBrowserPurpose::ExportProfile { .. } => "Export mod list",
+        PathBrowserPurpose::SigilLinkCache { action, .. } => match action {
+            SigilLinkCacheAction::Move => "Move SigilLink cache",
+            SigilLinkCacheAction::Relocate { .. } => "Select SigilLink cache folder",
+        },
     };
     let block = Block::default()
         .borders(Borders::ALL)
@@ -3641,6 +3662,19 @@ fn draw_path_browser(frame: &mut Frame<'_>, _app: &App, theme: &Theme, browser: 
         PathBrowserPurpose::Setup(SetupStep::DownloadsDir) => (" Folder valid ", "Not a folder."),
         PathBrowserPurpose::ImportProfile => (" File selected ", "Select a file to import."),
         PathBrowserPurpose::ExportProfile { .. } => (" Export path valid ", "Enter a file name."),
+        PathBrowserPurpose::SigilLinkCache { require_dev, .. } => {
+            if require_dev.is_some() {
+                (
+                    " BG3 cache location valid ",
+                    "Select a directory on the same drive as BG3 to use SigilLink without symlinks.",
+                )
+            } else {
+                (
+                    " Folder selected ",
+                    "Select a folder for the SigilLink cache.",
+                )
+            }
+        }
     };
     let status_span = if selectable {
         Span::styled(
@@ -4206,6 +4240,7 @@ fn build_settings_menu_lines(app: &App, theme: &Theme, selected: usize) -> Vec<L
             SettingsItemKind::ActionSetupPaths
             | SettingsItemKind::ActionSetupDownloads
             | SettingsItemKind::ActionClearSystemCaches
+            | SettingsItemKind::ActionMoveSigilLinkCache
             | SettingsItemKind::ActionClearSmartRankCache
             | SettingsItemKind::ActionCheckUpdates => vec![
                 Span::styled(prefix.to_string(), style),
