@@ -1798,7 +1798,7 @@ fn draw(frame: &mut Frame<'_>, app: &mut App) {
         let header = Row::new(vec![
             mod_header_cell("On", ModSortColumn::Enabled, app.mod_sort, &theme),
             mod_header_cell("N", ModSortColumn::Native, app.mod_sort, &theme),
-            mod_header_cell_static("D", &theme),
+            mod_header_cell_static("Dep", &theme),
             mod_header_cell("Order", ModSortColumn::Order, app.mod_sort, &theme),
             mod_header_cell("Kind", ModSortColumn::Kind, app.mod_sort, &theme),
             mod_header_cell("Target", ModSortColumn::Target, app.mod_sort, &theme),
@@ -2763,7 +2763,14 @@ fn draw_dialog(frame: &mut Frame<'_>, app: &mut App, theme: &Theme) {
     let area = frame.size();
     let message_lines = build_dialog_message_lines(dialog, theme);
 
+    let has_cancel = matches!(dialog.kind, DialogKind::DeleteMod { .. });
     let yes_selected = matches!(dialog.choice, DialogChoice::Yes);
+    let no_selected = if has_cancel {
+        matches!(dialog.choice, DialogChoice::No)
+    } else {
+        !yes_selected
+    };
+    let cancel_selected = matches!(dialog.choice, DialogChoice::Cancel);
     let yes_style = if yes_selected {
         Style::default()
             .fg(Color::Black)
@@ -2772,7 +2779,7 @@ fn draw_dialog(frame: &mut Frame<'_>, app: &mut App, theme: &Theme) {
     } else {
         Style::default().fg(theme.text)
     };
-    let no_style = if !yes_selected {
+    let no_style = if no_selected {
         Style::default()
             .fg(Color::Black)
             .bg(theme.warning)
@@ -2781,12 +2788,31 @@ fn draw_dialog(frame: &mut Frame<'_>, app: &mut App, theme: &Theme) {
         Style::default().fg(theme.text)
     };
 
-    let buttons = Line::from(vec![
-        Span::raw(" "),
-        Span::styled(format!(" {} ", dialog.yes_label), yes_style),
-        Span::raw("   "),
-        Span::styled(format!(" {} ", dialog.no_label), no_style),
-    ]);
+    let buttons = if has_cancel {
+        let cancel_style = if cancel_selected {
+            Style::default()
+                .fg(Color::Black)
+                .bg(theme.muted)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(theme.text)
+        };
+        Line::from(vec![
+            Span::raw(" "),
+            Span::styled(" Cancel ".to_string(), cancel_style),
+            Span::raw("   "),
+            Span::styled(format!(" {} ", dialog.yes_label), yes_style),
+            Span::raw("   "),
+            Span::styled(format!(" {} ", dialog.no_label), no_style),
+        ])
+    } else {
+        Line::from(vec![
+            Span::raw(" "),
+            Span::styled(format!(" {} ", dialog.yes_label), yes_style),
+            Span::raw("   "),
+            Span::styled(format!(" {} ", dialog.no_label), no_style),
+        ])
+    };
 
     let header_lines = vec![
         Line::from(Span::styled(
@@ -4916,18 +4942,26 @@ fn row_for_entry(
         };
         let created_text = format_date_cell(mod_entry.created_at);
         let added_text = format_date_cell(Some(mod_entry.added_at));
-        let dep_text = format!("{:02}{:02}", missing, disabled);
-        let dep_style = if missing > 0 {
+        let missing_text = dep_count_segment(missing);
+        let disabled_text = dep_count_segment(disabled);
+        let missing_style = if missing > 0 {
             Style::default().fg(theme.warning)
-        } else if disabled > 0 {
+        } else {
+            Style::default().fg(theme.muted)
+        };
+        let disabled_style = if disabled > 0 {
             Style::default().fg(theme.accent)
         } else {
             Style::default().fg(theme.muted)
         };
+        let dep_cell = Cell::from(Line::from(vec![
+            Span::styled(missing_text, missing_style),
+            Span::styled(disabled_text, disabled_style),
+        ]));
         Row::new(vec![
             Cell::from(enabled_text.to_string()).style(enabled_style),
             Cell::from(native_marker.to_string()).style(native_style),
-            Cell::from(dep_text).style(dep_style),
+            dep_cell,
             Cell::from((order_index + 1).to_string()),
             Cell::from(kind.to_string()).style(kind_style),
             Cell::from(state_label).style(state_style),
@@ -4940,6 +4974,17 @@ fn row_for_entry(
         row = row.style(Style::default().bg(theme.row_alt_bg));
     }
     (row, target_len)
+}
+
+fn dep_count_segment(count: usize) -> String {
+    let count = count.min(99);
+    if count == 0 {
+        "  ".to_string()
+    } else if count < 10 {
+        format!(" {}", count)
+    } else {
+        format!("{count:02}")
+    }
 }
 
 fn truncate_text(value: &str, max_width: usize) -> String {
@@ -5692,7 +5737,7 @@ fn legend_rows_for_focus(focus: Focus) -> Vec<LegendRow> {
                 action: "Native mod (mod.io)".to_string(),
             });
             legend.push(LegendRow {
-                key: "D".to_string(),
+                key: "Dep".to_string(),
                 action: "Missing/disabled dependencies".to_string(),
             });
         }

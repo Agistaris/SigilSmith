@@ -115,6 +115,7 @@ pub struct PathBrowser {
 pub enum DialogChoice {
     Yes,
     No,
+    Cancel,
 }
 
 #[derive(Debug, Clone)]
@@ -2565,11 +2566,7 @@ impl App {
             .find(|entry| entry.id == id)
             .map(|entry| entry.is_native())
             .unwrap_or(false);
-        let default_choice = if self.app_config.delete_mod_files_on_remove {
-            DialogChoice::No
-        } else {
-            DialogChoice::Yes
-        };
+        let default_choice = DialogChoice::Yes;
         let (title, toggle) = if is_native {
             ("Remove Native Mod".to_string(), None)
         } else {
@@ -7043,15 +7040,35 @@ impl App {
         self.dialog = None;
     }
 
+    fn dialog_supports_cancel(dialog: &Dialog) -> bool {
+        matches!(dialog.kind, DialogKind::DeleteMod { .. })
+    }
+
     pub fn dialog_choice_left(&mut self) {
         if let Some(dialog) = &mut self.dialog {
-            dialog.choice = DialogChoice::Yes;
+            if Self::dialog_supports_cancel(dialog) {
+                dialog.choice = match dialog.choice {
+                    DialogChoice::No => DialogChoice::Yes,
+                    DialogChoice::Yes => DialogChoice::Cancel,
+                    DialogChoice::Cancel => DialogChoice::Cancel,
+                };
+            } else {
+                dialog.choice = DialogChoice::Yes;
+            }
         }
     }
 
     pub fn dialog_choice_right(&mut self) {
         if let Some(dialog) = &mut self.dialog {
-            dialog.choice = DialogChoice::No;
+            if Self::dialog_supports_cancel(dialog) {
+                dialog.choice = match dialog.choice {
+                    DialogChoice::Cancel => DialogChoice::Yes,
+                    DialogChoice::Yes => DialogChoice::No,
+                    DialogChoice::No => DialogChoice::No,
+                };
+            } else {
+                dialog.choice = DialogChoice::No;
+            }
         }
     }
 
@@ -7111,6 +7128,9 @@ impl App {
                 native,
                 dependents,
             } => {
+                if matches!(choice, DialogChoice::Cancel) {
+                    return;
+                }
                 let delete_files = matches!(choice, DialogChoice::No);
                 if !native {
                     if let Some(toggle) = dialog.toggle {

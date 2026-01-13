@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.6.5
+
+- Label the Dep column in the header and legend.
+- Hide leading zeroes in the Dep column and color missing/disabled counts separately.
+- Remove mod dialog adds Cancel and defaults to Remove in the center option.
+
 ## 0.6.4
 
 - Show missing/disabled dependency counts in the D column.
