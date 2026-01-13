@@ -1,9 +1,9 @@
 use crate::{
     app::{
         expand_tilde, App, DependencyStatus, DialogChoice, DialogKind, ExplorerItem,
-        ExplorerItemKind, Focus, InputMode, InputPurpose, LogLevel, ModSort, ModSortColumn,
-        PathBrowser, PathBrowserEntryKind, PathBrowserFocus, PathBrowserPurpose, SetupStep,
-        SigilLinkCacheAction, ToastLevel, UpdateStatus,
+        ExplorerItemKind, ExportKind, Focus, InputMode, InputPurpose, LogLevel, ModSort,
+        ModSortColumn, PathBrowser, PathBrowserEntryKind, PathBrowserFocus, PathBrowserPurpose,
+        SetupStep, SigilLinkCacheAction, ToastLevel, UpdateStatus,
     },
     library::{InstallTarget, ModEntry, TargetKind},
 };
@@ -209,6 +209,12 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Result<()> {
     if app.smart_rank_preview.is_some() {
         return handle_smart_rank_preview(app, key);
     }
+    if app.mod_list_preview.is_some() {
+        return handle_mod_list_preview(app, key);
+    }
+    if app.export_menu.is_some() {
+        return handle_export_menu(app, key);
+    }
     if app.settings_menu.is_some() {
         return handle_settings_menu(app, key);
     }
@@ -385,6 +391,46 @@ fn handle_smart_rank_preview(app: &mut App, key: KeyEvent) -> Result<()> {
     Ok(())
 }
 
+fn handle_mod_list_preview(app: &mut App, key: KeyEvent) -> Result<()> {
+    match key.code {
+        KeyCode::Enter => {
+            if let Err(err) = app.apply_mod_list_preview() {
+                app.status = format!("Mod list import failed: {err}");
+                app.log_error(format!("Mod list import failed: {err}"));
+            }
+        }
+        KeyCode::Esc => {
+            app.cancel_mod_list_preview();
+        }
+        KeyCode::Char('d') | KeyCode::Char('D') => {
+            app.toggle_mod_list_destination();
+        }
+        KeyCode::Char('m') | KeyCode::Char('M') => {
+            app.toggle_mod_list_mode();
+        }
+        KeyCode::Up | KeyCode::Char('k') | KeyCode::Char('K') => {
+            app.mod_list_scroll = app.mod_list_scroll.saturating_sub(1);
+        }
+        KeyCode::Down | KeyCode::Char('j') | KeyCode::Char('J') => {
+            app.mod_list_scroll = app.mod_list_scroll.saturating_add(1);
+        }
+        KeyCode::PageUp => {
+            app.mod_list_scroll = app.mod_list_scroll.saturating_sub(6);
+        }
+        KeyCode::PageDown => {
+            app.mod_list_scroll = app.mod_list_scroll.saturating_add(6);
+        }
+        KeyCode::Home => {
+            app.mod_list_scroll = 0;
+        }
+        KeyCode::End => {
+            app.mod_list_scroll = usize::MAX;
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
 fn handle_dependency_queue(app: &mut App, key: KeyEvent) -> Result<()> {
     match key.code {
         KeyCode::Up | KeyCode::Char('k') | KeyCode::Char('K') => app.dependency_queue_move(-1),
@@ -410,18 +456,24 @@ fn handle_dependency_queue(app: &mut App, key: KeyEvent) -> Result<()> {
 #[derive(Debug, Clone, Copy)]
 enum SettingsItemKind {
     ActionSetupPaths,
-    ActionSetupDownloads,
-    ToggleProfileDelete,
+    ActionMoveSigilLinkCache,
+    ActionClearFrameworkCaches,
+    ActionClearSigilLinkCaches,
     ToggleModDelete,
+    ToggleProfileDelete,
     ToggleEnableModsAfterImport,
     ToggleDeleteModFilesOnRemove,
     ToggleDependencyDownloads,
     ToggleDependencyWarnings,
     ToggleStartupDependencyNotice,
-    ActionClearSystemCaches,
-    ActionMoveSigilLinkCache,
-    ActionClearSmartRankCache,
     ActionCheckUpdates,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum ExportMenuItemKind {
+    ExportModList,
+    ExportModListClipboard,
+    ExportModsettings,
 }
 
 #[derive(Debug, Clone)]
@@ -431,27 +483,33 @@ struct SettingsItem {
     checked: Option<bool>,
 }
 
+#[derive(Debug, Clone)]
+struct ExportMenuItem {
+    label: String,
+    kind: ExportMenuItemKind,
+}
+
 fn settings_items(app: &App) -> Vec<SettingsItem> {
     vec![
         SettingsItem {
-            label: "Configure game paths".to_string(),
+            label: "Configure Game Paths".to_string(),
             kind: SettingsItemKind::ActionSetupPaths,
             checked: None,
         },
         SettingsItem {
-            label: "Configure downloads folder".to_string(),
-            kind: SettingsItemKind::ActionSetupDownloads,
+            label: "Move SigilLink Cache".to_string(),
+            kind: SettingsItemKind::ActionMoveSigilLinkCache,
             checked: None,
         },
         SettingsItem {
-            label: "Enable mods after import".to_string(),
-            kind: SettingsItemKind::ToggleEnableModsAfterImport,
-            checked: Some(app.app_config.enable_mods_after_import),
+            label: "Clear Framework Caches".to_string(),
+            kind: SettingsItemKind::ActionClearFrameworkCaches,
+            checked: None,
         },
         SettingsItem {
-            label: "Delete mod files on remove".to_string(),
-            kind: SettingsItemKind::ToggleDeleteModFilesOnRemove,
-            checked: Some(app.app_config.delete_mod_files_on_remove),
+            label: "Clear SigilLink Caches".to_string(),
+            kind: SettingsItemKind::ActionClearSigilLinkCaches,
+            checked: None,
         },
         SettingsItem {
             label: "Confirm mod delete".to_string(),
@@ -469,34 +527,46 @@ fn settings_items(app: &App) -> Vec<SettingsItem> {
             checked: Some(app.app_config.offer_dependency_downloads),
         },
         SettingsItem {
-            label: "Warn on missing dependencies".to_string(),
-            kind: SettingsItemKind::ToggleDependencyWarnings,
-            checked: Some(app.app_config.warn_missing_dependencies),
-        },
-        SettingsItem {
             label: "Startup dependency notice".to_string(),
             kind: SettingsItemKind::ToggleStartupDependencyNotice,
             checked: Some(app.app_config.show_startup_dependency_notice),
         },
         SettingsItem {
-            label: "Clear System Caches".to_string(),
-            kind: SettingsItemKind::ActionClearSystemCaches,
-            checked: None,
+            label: "Warn on missing dependencies".to_string(),
+            kind: SettingsItemKind::ToggleDependencyWarnings,
+            checked: Some(app.app_config.warn_missing_dependencies),
         },
         SettingsItem {
-            label: "Move SigilLink Cache".to_string(),
-            kind: SettingsItemKind::ActionMoveSigilLinkCache,
-            checked: None,
+            label: "Enable mods after import".to_string(),
+            kind: SettingsItemKind::ToggleEnableModsAfterImport,
+            checked: Some(app.app_config.enable_mods_after_import),
         },
         SettingsItem {
-            label: "Clear smart rank cache".to_string(),
-            kind: SettingsItemKind::ActionClearSmartRankCache,
-            checked: None,
+            label: "Delete mod files on remove".to_string(),
+            kind: SettingsItemKind::ToggleDeleteModFilesOnRemove,
+            checked: Some(app.app_config.delete_mod_files_on_remove),
         },
         SettingsItem {
             label: update_menu_label(app),
             kind: SettingsItemKind::ActionCheckUpdates,
             checked: None,
+        },
+    ]
+}
+
+fn export_menu_items() -> Vec<ExportMenuItem> {
+    vec![
+        ExportMenuItem {
+            label: "Export mod list (JSON)".to_string(),
+            kind: ExportMenuItemKind::ExportModList,
+        },
+        ExportMenuItem {
+            label: "Copy active mod list to clipboard".to_string(),
+            kind: ExportMenuItemKind::ExportModListClipboard,
+        },
+        ExportMenuItem {
+            label: "Export modsettings.lsx (interop)".to_string(),
+            kind: ExportMenuItemKind::ExportModsettings,
         },
     ]
 }
@@ -513,6 +583,56 @@ fn update_menu_label(app: &App) -> String {
         UpdateStatus::Skipped { .. } => "Check for updates (see log)".to_string(),
         UpdateStatus::Idle => "Check for updates".to_string(),
     }
+}
+
+fn handle_export_menu(app: &mut App, key: KeyEvent) -> Result<()> {
+    if app.export_menu.is_none() {
+        return Ok(());
+    }
+    let items = export_menu_items();
+    let items_len = items.len();
+    match key.code {
+        KeyCode::Up | KeyCode::Char('k') | KeyCode::Char('K') => {
+            if let Some(menu) = &mut app.export_menu {
+                menu.selected = menu.selected.saturating_sub(1);
+            }
+        }
+        KeyCode::Down | KeyCode::Char('j') | KeyCode::Char('J') => {
+            if let Some(menu) = &mut app.export_menu {
+                menu.selected = (menu.selected + 1).min(items_len.saturating_sub(1));
+            }
+        }
+        KeyCode::Enter | KeyCode::Char(' ') => {
+            let (action, profile) = match app.export_menu.as_ref() {
+                Some(menu) => (
+                    items.get(menu.selected).map(|item| item.kind),
+                    menu.profile.clone(),
+                ),
+                None => return Ok(()),
+            };
+            if let Some(item) = action {
+                match item {
+                    ExportMenuItemKind::ExportModList => {
+                        app.close_export_menu();
+                        app.open_export_path_browser(&profile, ExportKind::ModList);
+                    }
+                    ExportMenuItemKind::ExportModListClipboard => {
+                        if let Err(err) = app.export_mod_list_clipboard(&profile) {
+                            app.status = format!("Export failed: {err}");
+                            app.log_error(format!("Export failed: {err}"));
+                        }
+                    }
+                    ExportMenuItemKind::ExportModsettings => {
+                        app.close_export_menu();
+                        app.open_export_path_browser(&profile, ExportKind::Modsettings);
+                    }
+                }
+            }
+        }
+        KeyCode::Esc => app.close_export_menu(),
+        _ => {}
+    }
+    Ok(())
 }
 
 fn handle_settings_menu(app: &mut App, key: KeyEvent) -> Result<()> {
@@ -537,10 +657,6 @@ fn handle_settings_menu(app: &mut App, key: KeyEvent) -> Result<()> {
                     SettingsItemKind::ActionSetupPaths => {
                         app.close_settings_menu();
                         app.enter_setup_game_root();
-                    }
-                    SettingsItemKind::ActionSetupDownloads => {
-                        app.close_settings_menu();
-                        app.enter_setup_downloads_dir();
                     }
                     SettingsItemKind::ToggleProfileDelete => {
                         if let Err(err) = app.toggle_confirm_profile_delete() {
@@ -584,15 +700,15 @@ fn handle_settings_menu(app: &mut App, key: KeyEvent) -> Result<()> {
                             app.log_error(format!("Settings update failed: {err}"));
                         }
                     }
-                    SettingsItemKind::ActionClearSystemCaches => {
-                        app.clear_system_caches();
-                    }
                     SettingsItemKind::ActionMoveSigilLinkCache => {
                         app.close_settings_menu();
                         app.open_sigillink_cache_move();
                     }
-                    SettingsItemKind::ActionClearSmartRankCache => {
-                        app.clear_smart_rank_cache();
+                    SettingsItemKind::ActionClearFrameworkCaches => {
+                        app.clear_framework_caches();
+                    }
+                    SettingsItemKind::ActionClearSigilLinkCaches => {
+                        app.clear_sigillink_caches();
                     }
                     SettingsItemKind::ActionCheckUpdates => {
                         if matches!(app.update_status, UpdateStatus::Available { .. }) {
@@ -2244,6 +2360,12 @@ fn draw(frame: &mut Frame<'_>, app: &mut App) {
     if app.smart_rank_preview.is_some() {
         draw_smart_rank_preview(frame, app, &theme);
     }
+    if app.mod_list_preview.is_some() {
+        draw_mod_list_preview(frame, app, &theme);
+    }
+    if app.export_menu.is_some() {
+        draw_export_menu(frame, app, &theme);
+    }
     if app.settings_menu.is_some() {
         draw_settings_menu(frame, app, &theme);
     }
@@ -3180,6 +3302,50 @@ fn draw_settings_menu(frame: &mut Frame<'_>, app: &App, theme: &Theme) {
     frame.render_widget(menu_widget, menu_area);
 }
 
+fn draw_export_menu(frame: &mut Frame<'_>, app: &App, theme: &Theme) {
+    let Some(menu) = &app.export_menu else {
+        return;
+    };
+
+    let area = frame.size();
+    let lines = build_export_menu_lines(theme, menu);
+    let mut max_line = 0usize;
+    for line in &lines {
+        let width = line.to_string().chars().count();
+        if width > max_line {
+            max_line = width;
+        }
+    }
+    let content_height = lines.len().max(1) as u16;
+    let mut height = content_height + 3;
+    if height < 10 {
+        height = 10;
+    }
+    if height > area.height.saturating_sub(2) {
+        height = area.height.saturating_sub(2);
+    }
+    let max_width = area.width.saturating_sub(2).max(1);
+    let width = (max_line as u16 + 6).clamp(38, max_width.min(64));
+    let (outer_area, menu_area) = padded_modal(area, width, height, 2, 1);
+
+    render_modal_backdrop(frame, outer_area, theme);
+    let menu_block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(theme.accent_soft))
+        .style(Style::default().bg(theme.header_bg))
+        .title(Span::styled(
+            "Export",
+            Style::default()
+                .fg(theme.accent)
+                .add_modifier(Modifier::BOLD),
+        ));
+    let menu_widget = Paragraph::new(lines)
+        .block(menu_block)
+        .style(Style::default().fg(theme.text));
+    frame.render_widget(menu_widget, menu_area);
+}
+
 fn draw_help_menu(frame: &mut Frame<'_>, app: &mut App, theme: &Theme) {
     if !app.help_open {
         return;
@@ -3597,7 +3763,10 @@ fn draw_path_browser(frame: &mut Frame<'_>, _app: &App, theme: &Theme, browser: 
         PathBrowserPurpose::Setup(SetupStep::LarianDir) => "Select Larian data dir",
         PathBrowserPurpose::Setup(SetupStep::DownloadsDir) => "Select downloads folder",
         PathBrowserPurpose::ImportProfile => "Import mod list",
-        PathBrowserPurpose::ExportProfile { .. } => "Export mod list",
+        PathBrowserPurpose::ExportProfile { kind, .. } => match kind {
+            ExportKind::ModList => "Export mod list",
+            ExportKind::Modsettings => "Export modsettings.lsx",
+        },
         PathBrowserPurpose::SigilLinkCache { action, .. } => match action {
             SigilLinkCacheAction::Move => "Move SigilLink cache",
             SigilLinkCacheAction::Relocate { .. } => "Select SigilLink cache folder",
@@ -3832,6 +4001,12 @@ struct SmartRankScroll {
     header_lines: usize,
 }
 
+struct ModListPreviewRender {
+    lines: Vec<Line<'static>>,
+    scroll: usize,
+    max_scroll: usize,
+}
+
 fn draw_smart_rank_preview(frame: &mut Frame<'_>, app: &mut App, theme: &Theme) {
     let Some(preview) = &app.smart_rank_preview else {
         return;
@@ -3902,6 +4077,74 @@ fn draw_smart_rank_preview(frame: &mut Frame<'_>, app: &mut App, theme: &Theme) 
         }
     } else {
         app.smart_rank_scroll = 0;
+    }
+}
+
+fn draw_mod_list_preview(frame: &mut Frame<'_>, app: &mut App, theme: &Theme) {
+    let Some(preview) = &app.mod_list_preview else {
+        return;
+    };
+
+    let area = frame.size();
+    let max_width = area.width.saturating_sub(2).max(1);
+    let width = max_width.min(110).max(58).min(max_width);
+    let max_height = area.height.saturating_sub(2).max(1);
+    let height = max_height.min(24).max(12);
+    let (outer_area, preview_area) = padded_modal(area, width, height, 2, 1);
+
+    let inner_width = preview_area.width.saturating_sub(3) as usize;
+    let inner_height = preview_area.height.saturating_sub(2) as usize;
+    let render = build_mod_list_preview_render(
+        app,
+        preview,
+        theme,
+        inner_width,
+        inner_height,
+        app.mod_list_scroll,
+    );
+    app.mod_list_scroll = render.scroll;
+
+    render_modal_backdrop(frame, outer_area, theme);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(theme.accent_soft))
+        .style(Style::default().bg(theme.header_bg))
+        .title(Span::styled(
+            "Mod list preview",
+            Style::default()
+                .fg(theme.accent)
+                .add_modifier(Modifier::BOLD),
+        ));
+    let inner = block.inner(preview_area);
+    let widget = Paragraph::new(render.lines)
+        .block(block)
+        .style(Style::default().fg(theme.text))
+        .alignment(Alignment::Left);
+    frame.render_widget(widget, preview_area);
+
+    if render.max_scroll > 0 && inner.width > 0 && inner.height > 0 {
+        let body_height = inner.height.saturating_sub(2);
+        if body_height > 0 {
+            let scroll_area = Rect {
+                x: inner.x + inner.width.saturating_sub(1),
+                y: inner.y + 1,
+                width: 1,
+                height: body_height,
+            };
+            let scroll_len = render.max_scroll.saturating_add(1);
+            let mut scroll_state = ScrollbarState::new(scroll_len)
+                .position(render.scroll)
+                .viewport_content_length(body_height as usize);
+            let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
+                .track_symbol(Some("░"))
+                .thumb_symbol("▓")
+                .begin_symbol(None)
+                .end_symbol(None)
+                .track_style(Style::default().fg(theme.border))
+                .thumb_style(Style::default().fg(theme.accent));
+            frame.render_stateful_widget(scrollbar, scroll_area, &mut scroll_state);
+        }
     }
 }
 
@@ -4214,6 +4457,223 @@ fn build_smart_rank_preview_render(
     }
 }
 
+fn build_mod_list_preview_render(
+    app: &App,
+    preview: &crate::app::ModListPreview,
+    theme: &Theme,
+    width: usize,
+    height: usize,
+    scroll: usize,
+) -> ModListPreviewRender {
+    if width == 0 || height == 0 {
+        return ModListPreviewRender {
+            lines: Vec::new(),
+            scroll: 0,
+            max_scroll: 0,
+        };
+    }
+
+    let mut matched = 0usize;
+    let mut missing = Vec::new();
+    let mut ambiguous = Vec::new();
+    for entry in &preview.entries {
+        let base_label = if entry.source.name.trim().is_empty() {
+            entry.source.id.trim()
+        } else {
+            entry.source.name.trim()
+        };
+        let label = if base_label.is_empty() {
+            "(unnamed)".to_string()
+        } else {
+            base_label.to_string()
+        };
+        match &entry.outcome {
+            crate::app::ModListMatchOutcome::Matched { .. } => matched += 1,
+            crate::app::ModListMatchOutcome::Missing => missing.push(label),
+            crate::app::ModListMatchOutcome::Ambiguous { candidates, .. } => {
+                ambiguous.push((label, candidates.clone()));
+            }
+        }
+    }
+
+    let total = preview.entries.len();
+    let missing_count = missing.len();
+    let ambiguous_count = ambiguous.len();
+    let active_profile = if app.library.active_profile.is_empty() {
+        "<none>".to_string()
+    } else {
+        app.library.active_profile.clone()
+    };
+    let dest_label = match preview.destination {
+        crate::app::ModListDestination::NewProfile => {
+            format!("New profile ({})", preview.new_profile_name)
+        }
+        crate::app::ModListDestination::ActiveProfile => {
+            format!("Active profile ({active_profile})")
+        }
+    };
+    let mode_label = match preview.mode {
+        crate::app::ModListApplyMode::Merge => "Merge",
+        crate::app::ModListApplyMode::Strict => "Strict",
+    };
+    let override_label = match preview.override_mode {
+        crate::app::ModListOverrideMode::Merge => "Merge",
+        crate::app::ModListOverrideMode::Replace => "Replace",
+    };
+
+    let mut header_lines = Vec::new();
+    header_lines.push(Line::from(vec![
+        Span::styled("Source: ", Style::default().fg(theme.muted)),
+        Span::styled(
+            truncate_text(&preview.source_label, width),
+            Style::default().fg(theme.text),
+        ),
+    ]));
+    header_lines.push(Line::from(vec![
+        Span::styled("Destination: ", Style::default().fg(theme.muted)),
+        Span::styled(
+            truncate_text(&dest_label, width),
+            Style::default().fg(theme.text),
+        ),
+        Span::styled("  [D]", Style::default().fg(theme.muted)),
+    ]));
+    header_lines.push(Line::from(vec![
+        Span::styled("Mode: ", Style::default().fg(theme.muted)),
+        Span::styled(mode_label, Style::default().fg(theme.text)),
+        Span::styled("  [M]  Overrides: ", Style::default().fg(theme.muted)),
+        Span::styled(override_label, Style::default().fg(theme.text)),
+    ]));
+    header_lines.push(Line::from(vec![
+        Span::styled("Entries: ", Style::default().fg(theme.muted)),
+        Span::styled(total.to_string(), Style::default().fg(theme.text)),
+        Span::styled("  Matched: ", Style::default().fg(theme.muted)),
+        Span::styled(matched.to_string(), Style::default().fg(theme.text)),
+        Span::styled("  Missing: ", Style::default().fg(theme.muted)),
+        Span::styled(
+            missing_count.to_string(),
+            Style::default().fg(theme.warning),
+        ),
+        Span::styled("  Ambiguous: ", Style::default().fg(theme.muted)),
+        Span::styled(
+            ambiguous_count.to_string(),
+            Style::default().fg(theme.error),
+        ),
+    ]));
+    if ambiguous_count > 0 {
+        header_lines.push(Line::from(Span::styled(
+            "Ambiguous matches block apply.",
+            Style::default().fg(theme.warning),
+        )));
+    }
+
+    if !preview.warnings.is_empty() {
+        header_lines.push(Line::from(""));
+        header_lines.push(Line::from(Span::styled(
+            "Warnings:",
+            Style::default()
+                .fg(theme.warning)
+                .add_modifier(Modifier::BOLD),
+        )));
+        for warning in &preview.warnings {
+            header_lines.push(Line::from(Span::styled(
+                truncate_text(warning, width),
+                Style::default().fg(theme.warning),
+            )));
+        }
+    }
+
+    let mut body_lines = Vec::new();
+    body_lines.push(Line::from(""));
+    body_lines.push(Line::from(Span::styled(
+        "Missing:",
+        Style::default()
+            .fg(theme.warning)
+            .add_modifier(Modifier::BOLD),
+    )));
+    if missing.is_empty() {
+        body_lines.push(Line::from(Span::styled(
+            "None",
+            Style::default().fg(theme.muted),
+        )));
+    } else {
+        for label in missing {
+            body_lines.push(Line::from(Span::styled(
+                truncate_text(&format!("- {label}"), width),
+                Style::default().fg(theme.warning),
+            )));
+        }
+    }
+
+    body_lines.push(Line::from(""));
+    body_lines.push(Line::from(Span::styled(
+        "Ambiguous:",
+        Style::default()
+            .fg(theme.error)
+            .add_modifier(Modifier::BOLD),
+    )));
+    if ambiguous.is_empty() {
+        body_lines.push(Line::from(Span::styled(
+            "None",
+            Style::default().fg(theme.muted),
+        )));
+    } else {
+        for (label, candidates) in ambiguous {
+            body_lines.push(Line::from(Span::styled(
+                truncate_text(&format!("- {label}"), width),
+                Style::default().fg(theme.error),
+            )));
+            if !candidates.is_empty() {
+                body_lines.push(Line::from(Span::styled(
+                    truncate_text(&format!("  -> {}", candidates.join(", ")), width),
+                    Style::default().fg(theme.muted),
+                )));
+            }
+        }
+    }
+
+    let mut lines = header_lines;
+    let available = height.saturating_sub(lines.len() + 1);
+    let total_body = body_lines.len();
+    let max_scroll = total_body.saturating_sub(available);
+    let scroll = scroll.min(max_scroll);
+    if available == 0 {
+        lines.push(Line::from(Span::styled(
+            "Enter: apply | Esc: cancel | D: destination | M: mode",
+            Style::default().fg(theme.muted),
+        )));
+        return ModListPreviewRender {
+            lines,
+            scroll,
+            max_scroll,
+        };
+    }
+
+    let end = (scroll + available).min(total_body);
+    if total_body > 0 {
+        lines.extend(body_lines[scroll..end].iter().cloned());
+    }
+
+    let footer = if total_body > available {
+        format!(
+            "Enter: apply | Esc: cancel | D: destination | M: mode | ↑/↓ scroll {}/{}",
+            scroll + 1,
+            max_scroll + 1
+        )
+    } else {
+        "Enter: apply | Esc: cancel | D: destination | M: mode".to_string()
+    };
+    lines.push(Line::from(Span::styled(
+        truncate_text(&footer, width),
+        Style::default().fg(theme.muted),
+    )));
+
+    ModListPreviewRender {
+        lines,
+        scroll,
+        max_scroll,
+    }
+}
+
 fn format_padded_cell(value: &str, width: usize) -> String {
     let text = truncate_text(value, width);
     let pad = width.saturating_sub(text.chars().count());
@@ -4250,10 +4710,9 @@ fn build_settings_menu_lines(app: &App, theme: &Theme, selected: usize) -> Vec<L
         };
         let row = match item.kind {
             SettingsItemKind::ActionSetupPaths
-            | SettingsItemKind::ActionSetupDownloads
-            | SettingsItemKind::ActionClearSystemCaches
             | SettingsItemKind::ActionMoveSigilLinkCache
-            | SettingsItemKind::ActionClearSmartRankCache
+            | SettingsItemKind::ActionClearFrameworkCaches
+            | SettingsItemKind::ActionClearSigilLinkCaches
             | SettingsItemKind::ActionCheckUpdates => vec![
                 Span::styled(prefix.to_string(), style),
                 Span::raw(" "),
@@ -4372,6 +4831,45 @@ fn build_settings_menu_lines(app: &App, theme: &Theme, selected: usize) -> Vec<L
         Style::default().fg(theme.muted),
     )));
 
+    lines
+}
+
+fn build_export_menu_lines(theme: &Theme, menu: &crate::app::ExportMenu) -> Vec<Line<'static>> {
+    let mut lines = Vec::new();
+    lines.push(Line::from(Span::styled(
+        "Export",
+        Style::default()
+            .fg(theme.accent)
+            .add_modifier(Modifier::BOLD),
+    )));
+    lines.push(Line::from(Span::styled(
+        format!("Profile: {}", menu.profile),
+        Style::default().fg(theme.muted),
+    )));
+    lines.push(Line::from(""));
+
+    let items = export_menu_items();
+    for (index, item) in items.iter().enumerate() {
+        let prefix = if index == menu.selected { ">" } else { " " };
+        let style = if index == menu.selected {
+            Style::default()
+                .fg(theme.accent)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(theme.text)
+        };
+        lines.push(Line::from(vec![
+            Span::styled(prefix.to_string(), style),
+            Span::raw(" "),
+            Span::styled(item.label.clone(), style),
+        ]));
+    }
+
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        "Enter: select  Esc: cancel",
+        Style::default().fg(theme.muted),
+    )));
     lines
 }
 
@@ -4810,12 +5308,21 @@ fn build_rows(app: &App, theme: &Theme) -> (Vec<Row<'static>>, ModCounts, usize)
     let total_rows = profile_entries.len();
 
     for (row_index, (order_index, entry)) in profile_entries.iter().enumerate() {
-        let Some(mod_entry) = mod_map.get(&entry.id) else {
-            continue;
-        };
-        if entry.enabled {
+        if entry.enabled && entry.missing_label.is_none() {
             visible_enabled += 1;
         }
+        if entry.missing_label.is_some() {
+            let (row, target_len) = row_for_missing_entry(row_index, *order_index, entry, theme);
+            target_width = target_width.max(target_len);
+            rows.push(row);
+            continue;
+        }
+        let Some(mod_entry) = mod_map.get(&entry.id) else {
+            let (row, target_len) = row_for_missing_entry(row_index, *order_index, entry, theme);
+            target_width = target_width.max(target_len);
+            rows.push(row);
+            continue;
+        };
         let loading = app.mod_row_loading(&entry.id, row_index, total_rows);
         let (row, target_len) = row_for_entry(
             app,
@@ -4936,6 +5443,41 @@ fn lerp_u64(min: u64, max: u64, t: f32) -> u64 {
     let clamped = t.clamp(0.0, 1.0);
     let span = max.saturating_sub(min) as f32;
     min + (span * clamped) as u64
+}
+
+fn row_for_missing_entry(
+    row_index: usize,
+    order_index: usize,
+    entry: &crate::library::ProfileEntry,
+    theme: &Theme,
+) -> (Row<'static>, usize) {
+    let label = entry
+        .missing_label
+        .as_deref()
+        .filter(|label| !label.trim().is_empty())
+        .unwrap_or(&entry.id);
+    let display = format!("{} (missing)", label.trim());
+    let enabled_text = if entry.enabled { "[x]" } else { "[ ]" };
+    let muted = Style::default().fg(theme.muted);
+    let dep_cell = Cell::from(Line::from(vec![
+        Span::styled("  ", muted),
+        Span::styled("  ", muted),
+    ]));
+    let mut row = Row::new(vec![
+        Cell::from(enabled_text.to_string()).style(muted),
+        Cell::from(" ".to_string()).style(muted),
+        dep_cell,
+        Cell::from((order_index + 1).to_string()).style(muted),
+        Cell::from(" ".to_string()).style(muted),
+        Cell::from(" ".to_string()).style(muted),
+        Cell::from(" ".to_string()).style(muted),
+        Cell::from(" ".to_string()).style(muted),
+        Cell::from(display).style(muted),
+    ]);
+    if row_index % 2 == 1 {
+        row = row.style(Style::default().bg(theme.row_alt_bg));
+    }
+    (row, 1)
 }
 
 fn row_for_entry(
@@ -5169,6 +5711,48 @@ fn build_details(app: &App, theme: &Theme, width: usize) -> Vec<Line<'static>> {
     let Some((order_index, entry)) = profile_entries.get(app.selected) else {
         return vec![Line::from("No mod selected.")];
     };
+    if entry.missing_label.is_some() || !mod_map.contains_key(&entry.id) {
+        let label = entry
+            .missing_label
+            .as_deref()
+            .filter(|label| !label.trim().is_empty())
+            .unwrap_or(&entry.id);
+        let display = format!("{} (missing)", label.trim());
+        let label_style = Style::default().fg(theme.muted);
+        let value_style = Style::default().fg(theme.muted);
+        let mut rows = Vec::new();
+        rows.push(KvRow {
+            label: "Name".to_string(),
+            value: display,
+            label_style,
+            value_style,
+        });
+        rows.push(KvRow {
+            label: "Status".to_string(),
+            value: "Missing mod".to_string(),
+            label_style,
+            value_style,
+        });
+        rows.push(KvRow {
+            label: "Enabled".to_string(),
+            value: if entry.enabled { "Yes" } else { "No" }.to_string(),
+            label_style,
+            value_style,
+        });
+        rows.push(KvRow {
+            label: "Order".to_string(),
+            value: (order_index + 1).to_string(),
+            label_style,
+            value_style,
+        });
+        rows.push(KvRow {
+            label: "ID".to_string(),
+            value: entry.id.clone(),
+            label_style,
+            value_style,
+        });
+        return format_kv_lines(&rows, width);
+    }
     let Some(mod_entry) = mod_map.get(&entry.id) else {
         return vec![Line::from("No mod selected.")];
     };

@@ -513,8 +513,25 @@ fn update_modsettings(
     installed_paks: &[PakInfo],
     enabled_paks: &[PakInfo],
 ) -> Result<()> {
-    let mut save = read_modsettings(&paths.modsettings_path)?;
+    let save = read_modsettings(&paths.modsettings_path)?;
+    let save = build_modsettings_save(save, installed_paks, enabled_paks);
+    write_modsettings(&paths.modsettings_path, &save)
+}
 
+pub(crate) fn build_modsettings_export(
+    modsettings_path: &Path,
+    installed_paks: &[PakInfo],
+    enabled_paks: &[PakInfo],
+) -> Result<Save> {
+    let save = read_modsettings(modsettings_path)?;
+    Ok(build_modsettings_save(save, installed_paks, enabled_paks))
+}
+
+fn build_modsettings_save(
+    mut save: Save,
+    installed_paks: &[PakInfo],
+    enabled_paks: &[PakInfo],
+) -> Save {
     let existing_order_uuids: Vec<String> = save
         .find_node_by_id("ModOrder")
         .ok()
@@ -570,14 +587,7 @@ fn update_modsettings(
             .find(|attr| attr.id == "Folder")
             .map(|attr| attr.value.clone())
             .unwrap_or_default();
-        let is_base = matches!(
-            name.as_str(),
-            "Gustav" | "GustavX" | "GustavDev" | "Honour" | "HonourX"
-        ) || matches!(
-            folder.as_str(),
-            "Gustav" | "GustavX" | "GustavDev" | "Honour" | "HonourX"
-        );
-        if is_base {
+        if is_base_module(&name, &folder) {
             if let Some(uuid) = node
                 .attribute
                 .iter()
@@ -592,7 +602,6 @@ fn update_modsettings(
     }
 
     let mut mods_list = VecDeque::new();
-
     for node in &base_nodes {
         mods_list.push_back(node.clone());
     }
@@ -638,7 +647,7 @@ fn update_modsettings(
     let mod_order_node = save.get_or_insert_node_mut_by_id("ModOrder");
     mod_order_node.children = vec![ModulesChildren { node: order_list }];
 
-    write_modsettings(&paths.modsettings_path, &save)
+    save
 }
 
 fn module_attr(node: &ModulesShortDescriptionNode, key: &str) -> Option<String> {
@@ -692,24 +701,46 @@ fn read_modsettings(path: &Path) -> Result<Save> {
     Ok(parsed)
 }
 
-pub(crate) fn read_modsettings_export(path: &Path) -> Result<Save> {
-    read_modsettings(path)
-}
-
 pub(crate) fn write_modsettings_export(path: &Path, save: &Save) -> Result<()> {
-    write_modsettings(path, save)
+    let xml = modsettings_xml(save)?;
+    write_atomic_text(path, &xml).context("write modsettings export")
 }
 
 fn write_modsettings(path: &Path, save: &Save) -> Result<()> {
+    let xml = modsettings_xml(save)?;
+    fs::create_dir_all(path.parent().context("modsettings parent")?)
+        .context("create modsettings dir")?;
+    fs::write(path, xml).context("write modsettings")?;
+    Ok(())
+}
+
+fn modsettings_xml(save: &Save) -> Result<String> {
     let mut xml = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n".to_string();
     let mut ser = quick_xml::se::Serializer::new(&mut xml);
     ser.indent(' ', 4);
     save.serialize(ser).context("serialize modsettings")?;
     xml.push('\n');
-    let xml = xml.replace("/>\n", " />\n");
-    fs::create_dir_all(path.parent().context("modsettings parent")?)
-        .context("create modsettings dir")?;
-    fs::write(path, xml).context("write modsettings")?;
+    Ok(xml.replace("/>\n", " />\n"))
+}
+
+fn write_atomic_text(path: &Path, contents: &str) -> Result<()> {
+    let parent = path.parent().context("modsettings export parent")?;
+    fs::create_dir_all(parent).context("create modsettings export dir")?;
+    let file_name = path.file_name().context("modsettings export filename")?;
+    let mut temp_name = std::ffi::OsString::from(file_name);
+    temp_name.push(".tmp");
+    let mut temp_path = parent.join(temp_name);
+    if temp_path.exists() {
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let mut temp_name = std::ffi::OsString::from(file_name);
+        temp_name.push(format!(".{stamp}.tmp"));
+        temp_path = parent.join(temp_name);
+    }
+    fs::write(&temp_path, contents).context("write modsettings export temp")?;
+    fs::rename(&temp_path, path).context("finalize modsettings export")?;
     Ok(())
 }
 

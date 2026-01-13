@@ -2519,8 +2519,16 @@ impl App {
         self.status = "Export mod list".to_string();
     }
 
-    fn close_export_menu(&mut self) {
+    pub(crate) fn close_export_menu(&mut self) {
         self.export_menu = None;
+    }
+
+    pub fn open_export_path_browser(&mut self, profile: &str, kind: ExportKind) {
+        self.move_mode = false;
+        self.open_path_browser(PathBrowserPurpose::ExportProfile {
+            profile: profile.to_string(),
+            kind,
+        });
     }
 
     fn normalize_profile_name(name: &str) -> String {
@@ -3192,13 +3200,46 @@ impl App {
         Ok(())
     }
 
-    fn export_modsettings_file(&mut self, _profile_data: &Profile, path: &Path) -> Result<()> {
+    fn export_modsettings_file(&mut self, profile_data: &Profile, path: &Path) -> Result<()> {
         let paths = game::detect_paths(
             self.game_id,
             Some(&self.config.game_root),
             Some(&self.config.larian_dir),
         )?;
-        let save = deploy::read_modsettings_export(&paths.modsettings_path)?;
+        let mod_map = self.library.index_by_id();
+        let mut enabled_paks = Vec::new();
+        let mut installed_paks = Vec::new();
+        let mut enabled_ids: HashSet<String> = HashSet::new();
+        let mut installed_ids: HashSet<String> = HashSet::new();
+
+        for entry in &profile_data.order {
+            if entry.missing_label.is_some() {
+                continue;
+            }
+            let Some(mod_entry) = mod_map.get(&entry.id) else {
+                continue;
+            };
+            for target in &mod_entry.targets {
+                let kind = target.kind();
+                if !mod_entry.is_target_enabled(kind) {
+                    continue;
+                }
+                if let InstallTarget::Pak { info, .. } = target {
+                    if installed_ids.insert(info.uuid.clone()) {
+                        installed_paks.push(info.clone());
+                    }
+                    if entry.enabled && enabled_ids.insert(info.uuid.clone()) {
+                        enabled_paks.push(info.clone());
+                    }
+                }
+            }
+        }
+
+        let save = deploy::build_modsettings_export(
+            &paths.modsettings_path,
+            &installed_paks,
+            &enabled_paks,
+        )?;
         deploy::write_modsettings_export(path, &save)?;
         self.status = format!("modsettings exported: {}", path.display());
         self.log_info(format!("modsettings exported: {}", path.display()));
@@ -3512,6 +3553,9 @@ impl App {
     }
 
     pub fn import_profile(&mut self, input: String) -> Result<()> {
+        if self.block_mod_changes("import") {
+            return Ok(());
+        }
         let trimmed = input.trim();
         if trimmed.is_empty() {
             self.status = "Import path is required".to_string();
@@ -3524,7 +3568,19 @@ impl App {
         }
 
         let import = if trimmed.starts_with('{') {
-            self.parse_mod_list_json(trimmed, "Pasted JSON".to_string())?
+            match self.parse_mod_list_json(trimmed, "Pasted JSON".to_string()) {
+                Ok(import) => import,
+                Err(err) => {
+                    self.status = "Import failed: invalid mod list".to_string();
+                    self.log_error(format!("Import parse failed: {err}"));
+                    self.set_toast(
+                        "Import failed: invalid mod list",
+                        ToastLevel::Warn,
+                        Duration::from_secs(3),
+                    );
+                    return Ok(());
+                }
+            }
         } else {
             let path = expand_tilde(trimmed);
             if !path.exists() {
@@ -3541,7 +3597,7 @@ impl App {
                 .and_then(|name| name.to_str())
                 .map(|name| name.to_string())
                 .unwrap_or_else(|| path.display().to_string());
-            if path
+            let parsed = if path
                 .extension()
                 .and_then(|ext| ext.to_str())
                 .map(|ext| ext.eq_ignore_ascii_case("lsx"))
@@ -3552,7 +3608,7 @@ impl App {
                     .map(|name| name.eq_ignore_ascii_case("modsettings.lsx"))
                     .unwrap_or(false)
             {
-                self.parse_modsettings_import(&path, source_label)?
+                self.parse_modsettings_import(&path, source_label)
             } else {
                 let raw = match fs::read_to_string(&path) {
                     Ok(raw) => raw,
@@ -3569,11 +3625,24 @@ impl App {
                 };
                 let raw_trimmed = raw.trim_start();
                 if raw_trimmed.starts_with('{') {
-                    self.parse_mod_list_json(&raw, source_label)?
+                    self.parse_mod_list_json(&raw, source_label)
                 } else if raw_trimmed.starts_with('<') {
-                    self.parse_modsettings_import(&path, source_label)?
+                    self.parse_modsettings_import(&path, source_label)
                 } else {
                     self.status = format!("Import failed: {}", path.display());
+                    self.set_toast(
+                        "Import failed: invalid mod list",
+                        ToastLevel::Warn,
+                        Duration::from_secs(3),
+                    );
+                    return Ok(());
+                }
+            };
+            match parsed {
+                Ok(import) => import,
+                Err(err) => {
+                    self.status = format!("Import failed: {}", path.display());
+                    self.log_error(format!("Import parse failed: {err}"));
                     self.set_toast(
                         "Import failed: invalid mod list",
                         ToastLevel::Warn,
@@ -3589,6 +3658,237 @@ impl App {
         self.mod_list_scroll = 0;
         self.status = "Mod list preview ready".to_string();
         Ok(())
+    }
+
+    pub fn cancel_mod_list_preview(&mut self) {
+        if self.mod_list_preview.take().is_some() {
+            self.status = "Mod list import canceled".to_string();
+        }
+        self.mod_list_scroll = 0;
+    }
+
+    pub fn toggle_mod_list_destination(&mut self) {
+        if let Some(preview) = &mut self.mod_list_preview {
+            preview.destination = match preview.destination {
+                ModListDestination::NewProfile => ModListDestination::ActiveProfile,
+                ModListDestination::ActiveProfile => ModListDestination::NewProfile,
+            };
+        }
+    }
+
+    pub fn toggle_mod_list_mode(&mut self) {
+        if let Some(preview) = &mut self.mod_list_preview {
+            preview.mode = match preview.mode {
+                ModListApplyMode::Merge => ModListApplyMode::Strict,
+                ModListApplyMode::Strict => ModListApplyMode::Merge,
+            };
+            preview.override_mode = match preview.mode {
+                ModListApplyMode::Merge => ModListOverrideMode::Merge,
+                ModListApplyMode::Strict => ModListOverrideMode::Replace,
+            };
+        }
+    }
+
+    pub fn apply_mod_list_preview(&mut self) -> Result<()> {
+        let Some(preview) = self.mod_list_preview.take() else {
+            return Ok(());
+        };
+        if self.block_mod_changes("mod list import") {
+            self.mod_list_preview = Some(preview);
+            return Ok(());
+        }
+        if Self::mod_list_preview_has_ambiguous(&preview) {
+            self.mod_list_preview = Some(preview);
+            self.status = "Mod list import blocked: ambiguous matches".to_string();
+            self.set_toast(
+                "Ambiguous matches detected; import blocked",
+                ToastLevel::Warn,
+                Duration::from_secs(3),
+            );
+            return Ok(());
+        }
+
+        let mut seen: HashSet<String> = HashSet::new();
+        let mut import_entries = Vec::new();
+        for (index, plan) in preview.entries.iter().enumerate() {
+            match &plan.outcome {
+                ModListMatchOutcome::Matched { resolved_id, .. } => {
+                    if seen.insert(resolved_id.clone()) {
+                        import_entries.push(ProfileEntry {
+                            id: resolved_id.clone(),
+                            enabled: plan.source.enabled,
+                            missing_label: None,
+                        });
+                    }
+                }
+                ModListMatchOutcome::Missing => {
+                    let id = Self::mod_list_preview_missing_id(&plan.source, index);
+                    if seen.insert(id.clone()) {
+                        let mut label = plan.source.name.trim().to_string();
+                        if label.is_empty() {
+                            label = plan.source.id.trim().to_string();
+                        }
+                        if label.is_empty() {
+                            label = "Missing mod".to_string();
+                        }
+                        import_entries.push(ProfileEntry {
+                            id,
+                            enabled: plan.source.enabled,
+                            missing_label: Some(label),
+                        });
+                    }
+                }
+                ModListMatchOutcome::Ambiguous { .. } => {}
+            }
+        }
+
+        let applied_to = match preview.destination {
+            ModListDestination::NewProfile => {
+                let mut profile = Profile::new(&preview.new_profile_name);
+                profile.order = import_entries;
+                let mod_ids: Vec<String> = self
+                    .library
+                    .mods
+                    .iter()
+                    .map(|entry| entry.id.clone())
+                    .collect();
+                profile.ensure_mods(&mod_ids);
+                profile.file_overrides = preview.overrides.clone();
+                self.library.profiles.push(profile);
+                self.set_active_profile(&preview.new_profile_name)?;
+                preview.new_profile_name.clone()
+            }
+            ModListDestination::ActiveProfile => {
+                let Some(profile) = self.library.active_profile_mut() else {
+                    self.status = "Mod list import failed: no profile".to_string();
+                    return Ok(());
+                };
+                let mut new_order = import_entries;
+                for entry in &profile.order {
+                    if seen.contains(&entry.id) {
+                        continue;
+                    }
+                    let mut clone = entry.clone();
+                    if matches!(preview.mode, ModListApplyMode::Strict) {
+                        clone.enabled = false;
+                    }
+                    new_order.push(clone);
+                }
+                profile.order = new_order;
+
+                let overrides = match preview.mode {
+                    ModListApplyMode::Merge => {
+                        Self::merge_overrides(&profile.file_overrides, &preview.overrides)
+                    }
+                    ModListApplyMode::Strict => preview.overrides.clone(),
+                };
+                profile.file_overrides = overrides;
+                if self.allow_persistence() {
+                    self.library.save(&self.config.data_dir)?;
+                }
+                self.queue_auto_deploy("mod list import");
+                self.library.active_profile.clone()
+            }
+        };
+
+        if self.resolve_missing_profile_entries() && self.allow_persistence() {
+            let _ = self.library.save(&self.config.data_dir);
+        }
+
+        self.mod_list_scroll = 0;
+        self.status = format!("Mod list applied: {applied_to}");
+        self.set_toast(
+            &format!("Mod list applied: {applied_to}"),
+            ToastLevel::Info,
+            Duration::from_secs(3),
+        );
+        Ok(())
+    }
+
+    fn merge_overrides(existing: &[FileOverride], incoming: &[FileOverride]) -> Vec<FileOverride> {
+        let mut merged = existing.to_vec();
+        let mut index: HashMap<(TargetKind, String), usize> = HashMap::new();
+        for (idx, entry) in merged.iter().enumerate() {
+            index.insert((entry.kind, entry.relative_path.clone()), idx);
+        }
+        for entry in incoming {
+            let key = (entry.kind, entry.relative_path.clone());
+            if let Some(idx) = index.get(&key).copied() {
+                merged[idx] = entry.clone();
+            } else {
+                index.insert(key, merged.len());
+                merged.push(entry.clone());
+            }
+        }
+        merged
+    }
+
+    fn resolve_missing_profile_entries(&mut self) -> bool {
+        if self.library.mods.is_empty() {
+            return false;
+        }
+
+        let mod_map = self.library.index_by_id();
+        let mut name_map: HashMap<String, Vec<String>> = HashMap::new();
+        let mut label_map: HashMap<String, Vec<String>> = HashMap::new();
+
+        for mod_entry in &self.library.mods {
+            let names = [mod_entry.display_name(), mod_entry.name.clone()];
+            for name in names {
+                let key = name.trim().to_lowercase();
+                if !key.is_empty() {
+                    let bucket = name_map.entry(key).or_default();
+                    if !bucket.iter().any(|id| id == &mod_entry.id) {
+                        bucket.push(mod_entry.id.clone());
+                    }
+                }
+                let label = normalize_label(&name);
+                if !label.is_empty() {
+                    let bucket = label_map.entry(label).or_default();
+                    if !bucket.iter().any(|id| id == &mod_entry.id) {
+                        bucket.push(mod_entry.id.clone());
+                    }
+                }
+            }
+        }
+
+        let mut changed = false;
+        for profile in &mut self.library.profiles {
+            for entry in &mut profile.order {
+                let Some(label) = entry.missing_label.clone() else {
+                    continue;
+                };
+                if mod_map.contains_key(&entry.id) {
+                    entry.missing_label = None;
+                    changed = true;
+                    continue;
+                }
+                let mut resolved: Option<String> = None;
+                let name_key = label.trim().to_lowercase();
+                if !name_key.is_empty() {
+                    if let Some(ids) = name_map.get(&name_key) {
+                        if ids.len() == 1 {
+                            resolved = Some(ids[0].clone());
+                        }
+                    }
+                }
+                if resolved.is_none() {
+                    let label_key = normalize_label(&label);
+                    if let Some(ids) = label_map.get(&label_key) {
+                        if ids.len() == 1 {
+                            resolved = Some(ids[0].clone());
+                        }
+                    }
+                }
+                if let Some(id) = resolved {
+                    entry.id = id;
+                    entry.missing_label = None;
+                    changed = true;
+                }
+            }
+        }
+
+        changed
     }
 
     pub fn tick(&mut self) {
@@ -7555,6 +7855,7 @@ impl App {
         }
 
         self.library.ensure_mods_in_profiles();
+        let _ = self.resolve_missing_profile_entries();
         if !added_ids.is_empty() {
             let enable_imported = self.app_config.enable_mods_after_import;
             if let Some(profile) = self.library.active_profile_mut() {
@@ -8472,6 +8773,9 @@ impl App {
         }
 
         if self.normalize_mod_sources() {
+            changed = true;
+        }
+        if self.resolve_missing_profile_entries() {
             changed = true;
         }
 

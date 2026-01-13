@@ -387,7 +387,7 @@ pub fn clean_source_label(label: &str) -> String {
     if raw.is_empty() {
         return String::new();
     }
-
+    let raw = raw.split_whitespace().collect::<Vec<_>>().join(" ");
     let joiner = if raw.contains(" - ") { " - " } else { "-" };
     let parts: Vec<&str> = raw.split('-').collect();
     let mut idx = parts.len();
@@ -407,15 +407,18 @@ pub fn clean_source_label(label: &str) -> String {
         }
     }
 
+    let mut keep_len = parts.len();
     if !numeric_segments.is_empty() {
         let last_len = numeric_segments[0].len();
-        if !(last_len >= 6 || numeric_segments.len() >= 2) {
-            idx = parts.len();
+        let has_timestamp = last_len >= 10;
+        let has_nexus_chain = numeric_segments.len() >= 4;
+        if has_timestamp || has_nexus_chain {
+            keep_len = idx;
         }
     }
 
     let mut cleaned_parts = Vec::new();
-    for part in parts.iter().take(idx) {
+    for part in parts.iter().take(keep_len) {
         let trimmed = part.trim();
         if !trimmed.is_empty() {
             cleaned_parts.push(trimmed);
@@ -424,7 +427,12 @@ pub fn clean_source_label(label: &str) -> String {
 
     let mut base = cleaned_parts.join(joiner);
     base = base.split_whitespace().collect::<Vec<_>>().join(" ");
-    base.trim().to_string()
+    let base = base.trim().to_string();
+    if base.is_empty() {
+        raw
+    } else {
+        base
+    }
 }
 
 pub fn normalize_label(label: &str) -> String {
