@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.6.4
+
+- Show missing/disabled dependency counts in the D column.
+- Confirm before disabling dependents or enabling required dependencies.
+- Remove mod now offers Remove vs Remove + delete file(s) with safe-path checks.
+
 ## 0.6.3
 
 - Rename profile list wording to mod list and surface Ctrl+E/Ctrl+P mod list import/export hotkeys.
