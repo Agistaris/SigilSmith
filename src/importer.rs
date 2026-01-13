@@ -107,17 +107,11 @@ impl<'a> CopyProgress<'a> {
 
     fn bump(&mut self, detail: Option<String>, force: bool) {
         self.copied = self.copied.saturating_add(1);
-        let should_report = force
-            || self.copied % 50 == 0
-            || self.last_report.elapsed().as_millis() >= 120;
+        let should_report =
+            force || self.copied % 50 == 0 || self.last_report.elapsed().as_millis() >= 120;
         if should_report {
             if let Some(reporter) = self.reporter {
-                reporter.report(
-                    ImportStage::ImportingLoose,
-                    self.copied,
-                    self.total,
-                    detail,
-                );
+                reporter.report(ImportStage::ImportingLoose, self.copied, self.total, detail);
             }
             self.last_report = Instant::now();
         }
@@ -129,12 +123,7 @@ impl<'a> CopyProgress<'a> {
         }
         self.copied = self.copied.saturating_add(count);
         if let Some(reporter) = self.reporter {
-            reporter.report(
-                ImportStage::ImportingLoose,
-                self.copied,
-                self.total,
-                None,
-            );
+            reporter.report(ImportStage::ImportingLoose, self.copied, self.total, None);
         }
         self.last_report = Instant::now();
     }
@@ -320,13 +309,12 @@ pub fn import_path_with_progress(
                     callback: progress.clone(),
                 };
                 reporter.report(ImportStage::Preparing, 0, 1, None);
-                let mods = import_pak_file(path, data_dir, source_label.as_deref(), Some(&reporter))?;
+                let mods =
+                    import_pak_file(path, data_dir, source_label.as_deref(), Some(&reporter))?;
                 reporter.report(ImportStage::Finalizing, 1, 1, None);
                 ImportResult {
                     batches: vec![ImportBatch {
-                        source: ImportSource {
-                            label,
-                        },
+                        source: ImportSource { label },
                         mods,
                     }],
                     unrecognized: false,
@@ -509,9 +497,12 @@ fn import_batch_from_dir(
                     .and_then(|ext| ext.to_str())
                     .unwrap_or("")
                 {
-                    "zip" | "ZIP" => {
-                        import_archive_zip(&candidate.path, data_dir, source_label, progress.clone())
-                    }
+                    "zip" | "ZIP" => import_archive_zip(
+                        &candidate.path,
+                        data_dir,
+                        source_label,
+                        progress.clone(),
+                    ),
                     "7z" | "7Z" | "rar" | "RAR" => {
                         import_archive_7z(&candidate.path, data_dir, source_label, progress.clone())
                     }
@@ -835,7 +826,6 @@ fn pak_info_from_meta(meta: &metadata::ModMeta) -> Option<PakInfo> {
         module_type: meta.module_type.clone(),
     })
 }
-
 
 fn import_override_pak(
     path: &Path,

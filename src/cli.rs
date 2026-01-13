@@ -257,9 +257,7 @@ fn parse_subcommand(tokens: &[String], global: &GlobalOptions) -> Result<Option<
                 "cache-validate" | "cache_validate" | "validate" => {
                     DebugCommand::SmartRankCacheValidate
                 }
-                "cache-sim" | "cache-simulate" | "simulate" => {
-                    DebugCommand::SmartRankCacheSimulate
-                }
+                "cache-sim" | "cache-simulate" | "simulate" => DebugCommand::SmartRankCacheSimulate,
                 "smart-rank-scenario" | "smart_rank_scenario" | "scenario" => {
                     DebugCommand::SmartRankScenario
                 }
@@ -269,9 +267,7 @@ fn parse_subcommand(tokens: &[String], global: &GlobalOptions) -> Result<Option<
                 "restart-check" | "restart_check" | "restart" => {
                     DebugCommand::SmartRankRestartCheck
                 }
-                "warmup-flow" | "warmup_flow" | "warmup-edits" => {
-                    DebugCommand::SmartRankWarmupFlow
-                }
+                "warmup-flow" | "warmup_flow" | "warmup-edits" => DebugCommand::SmartRankWarmupFlow,
                 "zip-flow" | "zip_flow" | "import-flow" => DebugCommand::SmartRankZipFlow,
                 _ => {
                     bail!(
@@ -723,7 +719,10 @@ fn list_missing_dependencies(app: &App, profile: &Profile, format: OutputFormat)
                 .filter_map(|id| mod_map.get(id))
                 .collect();
             resolved_mods.sort_by(|a, b| a.display_name().cmp(&b.display_name()));
-            if resolved_mods.iter().any(|dep_mod| enabled_ids.contains(&dep_mod.id)) {
+            if resolved_mods
+                .iter()
+                .any(|dep_mod| enabled_ids.contains(&dep_mod.id))
+            {
                 continue;
             }
             let dependency_name = resolved_mods
@@ -803,14 +802,14 @@ fn list_resolved_dependencies(app: &App, profile: &Profile, format: OutputFormat
                 continue;
             }
             let key = format!("{}|{}", mod_entry.id, dep_id);
-            let item = resolved_map.entry(key.clone()).or_insert_with(|| {
-                ResolvedDependencyItem {
+            let item = resolved_map
+                .entry(key.clone())
+                .or_insert_with(|| ResolvedDependencyItem {
                     required_by: mod_entry.display_name(),
                     required_by_id: mod_entry.id.clone(),
                     dependency: dep_id.clone(),
                     resolved: Vec::new(),
-                }
-            });
+                });
             for resolved_id in resolved_ids {
                 let seen_key = format!("{}|{}", key, resolved_id);
                 if !seen.insert(seen_key) {
@@ -841,7 +840,11 @@ fn list_resolved_dependencies(app: &App, profile: &Profile, format: OutputFormat
                 for item in resolved {
                     println!("{} -> {}", item.required_by, item.dependency);
                     for target in item.resolved {
-                        let status = if target.enabled { "enabled" } else { "disabled" };
+                        let status = if target.enabled {
+                            "enabled"
+                        } else {
+                            "disabled"
+                        };
                         println!("  => {} ({}) {status}", target.name, target.id);
                     }
                 }
@@ -1166,7 +1169,9 @@ fn print_help() {
     println!("  sigilsmith profiles list        List profiles");
     println!("  sigilsmith deps list            List dependencies for installed mods");
     println!("  sigilsmith deps missing         List missing dependencies");
-    println!("  sigilsmith deps resolved        List dependency aliases resolved to installed mods");
+    println!(
+        "  sigilsmith deps resolved        List dependency aliases resolved to installed mods"
+    );
     println!("  sigilsmith deps debug <mod>     Show dependency matching details");
     println!("  sigilsmith debug smart-rank     Debug smart rank cache (debug builds)");
     println!("  sigilsmith debug warmup         Build smart rank cache (debug builds)");

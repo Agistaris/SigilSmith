@@ -192,11 +192,7 @@ pub fn parse_meta_lsx(bytes: &[u8]) -> ModMeta {
     }
 }
 
-fn push_dependency_ref(
-    deps: &mut Vec<String>,
-    uuid: Option<String>,
-    label: Option<String>,
-) {
+fn push_dependency_ref(deps: &mut Vec<String>, uuid: Option<String>, label: Option<String>) {
     if let Some(uuid) = uuid.as_deref() {
         if is_base_dependency_uuid(uuid) {
             return;
@@ -456,11 +452,7 @@ fn is_uuid_bytes(bytes: &[u8]) -> bool {
 }
 
 fn fill_dependency_fallback(meta: &mut ModMeta, path: &Path) {
-    if !meta
-        .dependencies
-        .iter()
-        .all(|dep| is_uuid_like_str(dep))
-    {
+    if !meta.dependencies.iter().all(|dep| is_uuid_like_str(dep)) {
         return;
     }
     if let Ok(bytes) = fs::read(path) {
@@ -583,7 +575,12 @@ fn parse_json_mod(value: &Value) -> Option<JsonModInfo> {
 
 fn parse_json_dependencies(obj: &serde_json::Map<String, Value>) -> Vec<String> {
     let mut out = Vec::new();
-    for key in ["Dependencies", "dependencies", "RequiredMods", "requiredMods"] {
+    for key in [
+        "Dependencies",
+        "dependencies",
+        "RequiredMods",
+        "requiredMods",
+    ] {
         if let Some(value) = obj.get(key) {
             out.extend(parse_json_dependency_list(value));
         }

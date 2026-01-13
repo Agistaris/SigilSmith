@@ -11,6 +11,10 @@ pub struct AppConfig {
     pub confirm_profile_delete: bool,
     #[serde(default = "default_true")]
     pub confirm_mod_delete: bool,
+    #[serde(default = "default_true")]
+    pub enable_mods_after_import: bool,
+    #[serde(default = "default_false")]
+    pub delete_mod_files_on_remove: bool,
     #[serde(default = "default_downloads_dir")]
     pub downloads_dir: PathBuf,
     #[serde(default = "default_true")]
@@ -42,6 +46,8 @@ impl AppConfig {
             active_game: GameId::default(),
             confirm_profile_delete: true,
             confirm_mod_delete: true,
+            enable_mods_after_import: true,
+            delete_mod_files_on_remove: false,
             downloads_dir: default_downloads_dir(),
             offer_dependency_downloads: true,
             warn_missing_dependencies: true,
@@ -122,6 +128,10 @@ pub fn data_dir_for_game(game: GameId) -> Result<PathBuf> {
 
 fn default_true() -> bool {
     true
+}
+
+fn default_false() -> bool {
+    false
 }
 
 fn default_downloads_dir() -> PathBuf {

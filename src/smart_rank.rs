@@ -5,6 +5,7 @@ use crate::{
     metadata, native_pak,
 };
 use anyhow::{Context, Result};
+use blake3::Hasher;
 use lz4_flex::block::decompress;
 use serde::{Deserialize, Serialize};
 use std::{
@@ -15,7 +16,6 @@ use std::{
     time::Instant,
 };
 use walkdir::WalkDir;
-use blake3::Hasher;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SmartRankReport {

@@ -240,7 +240,6 @@ impl DependencyLookup {
         out.dedup();
         out
     }
-
 }
 
 #[derive(Debug, Clone)]
@@ -318,7 +317,9 @@ enum MetadataMessage {
         total: usize,
     },
     Completed,
-    Failed { error: String },
+    Failed {
+        error: String,
+    },
 }
 
 enum ConflictMessage {
@@ -1212,6 +1213,30 @@ impl App {
         Ok(())
     }
 
+    pub fn toggle_enable_mods_after_import(&mut self) -> Result<()> {
+        self.app_config.enable_mods_after_import = !self.app_config.enable_mods_after_import;
+        self.app_config.save()?;
+        let state = if self.app_config.enable_mods_after_import {
+            "enabled"
+        } else {
+            "disabled"
+        };
+        self.status = format!("Enable mods after import {state}");
+        Ok(())
+    }
+
+    pub fn toggle_delete_mod_files_on_remove(&mut self) -> Result<()> {
+        self.app_config.delete_mod_files_on_remove = !self.app_config.delete_mod_files_on_remove;
+        self.app_config.save()?;
+        let state = if self.app_config.delete_mod_files_on_remove {
+            "enabled"
+        } else {
+            "disabled"
+        };
+        self.status = format!("Delete mod files on remove {state}");
+        Ok(())
+    }
+
     pub fn toggle_dependency_downloads(&mut self) -> Result<()> {
         self.app_config.offer_dependency_downloads = !self.app_config.offer_dependency_downloads;
         self.app_config.save()?;
@@ -1247,6 +1272,28 @@ impl App {
         };
         self.status = format!("Startup dependency notice {state}");
         Ok(())
+    }
+
+    pub fn clear_system_caches(&mut self) {
+        self.dependency_cache.clear();
+        self.dependency_cache_ready = false;
+        self.library.metadata_cache_version = 0;
+        self.library.metadata_cache_key = None;
+        self.smart_rank_cache = None;
+        self.smart_rank_cache_last_saved = None;
+        self.clear_smart_rank_cache_file();
+        if let Err(err) = self.library.save(&self.config.data_dir) {
+            self.log_warn(format!("System cache clear save failed: {err}"));
+        }
+        if !self.metadata_active {
+            self.maybe_start_metadata_refresh();
+        }
+        self.status = "System caches cleared".to_string();
+        self.set_toast(
+            "System caches cleared",
+            ToastLevel::Info,
+            Duration::from_secs(2),
+        );
     }
 
     pub fn open_smart_rank_preview(&mut self) {
@@ -1544,8 +1591,9 @@ impl App {
             (SmartRankRefreshMode::Full, _) | (_, SmartRankRefreshMode::Full) => {
                 SmartRankRefreshMode::Full
             }
-            (SmartRankRefreshMode::Incremental, _)
-            | (_, SmartRankRefreshMode::Incremental) => SmartRankRefreshMode::Incremental,
+            (SmartRankRefreshMode::Incremental, _) | (_, SmartRankRefreshMode::Incremental) => {
+                SmartRankRefreshMode::Incremental
+            }
             _ => SmartRankRefreshMode::ReorderOnly,
         }
     }
@@ -1723,7 +1771,10 @@ impl App {
 
         let config = self.config.clone();
         let library = self.library.clone();
-        let cache_data = self.smart_rank_cache.as_ref().map(|cache| cache.mod_cache.clone());
+        let cache_data = self
+            .smart_rank_cache
+            .as_ref()
+            .map(|cache| cache.mod_cache.clone());
         let tx = self.smart_rank_tx.clone();
         thread::spawn(move || {
             let result = smart_rank::smart_rank_profile_cached_with_progress(
@@ -2251,13 +2302,13 @@ impl App {
     pub fn enter_import_profile(&mut self) {
         self.move_mode = false;
         self.input_mode = InputMode::Editing {
-            prompt: "Import profile list".to_string(),
+            prompt: "Import mod list".to_string(),
             buffer: String::new(),
             purpose: InputPurpose::ImportProfile,
             auto_submit: false,
             last_edit_at: Instant::now(),
         };
-        self.status = "Import profile list: enter path".to_string();
+        self.status = "Import mod list: enter path".to_string();
     }
 
     fn normalize_profile_name(name: &str) -> String {
@@ -3446,12 +3497,14 @@ impl App {
         let (title, message) = if self.dependency_queue_enable_pending() {
             (
                 "Override Dependencies".to_string(),
-                "Enable mods without resolving dependencies?\nThis can break your load order.".to_string(),
+                "Enable mods without resolving dependencies?\nThis can break your load order."
+                    .to_string(),
             )
         } else {
             (
                 "Override Dependencies".to_string(),
-                "Continue import without resolving dependencies?\nThis can break your load order.".to_string(),
+                "Continue import without resolving dependencies?\nThis can break your load order."
+                    .to_string(),
             )
         };
         self.open_dialog(Dialog {
@@ -3590,8 +3643,12 @@ impl App {
         }
         if !self.native_sync_active {
             if self.smart_rank_active {
-                let allow_during_warmup = matches!(self.smart_rank_mode, Some(SmartRankMode::Warmup))
-                    && matches!(action, "toggle" | "enable" | "disable" | "reorder" | "remove");
+                let allow_during_warmup =
+                    matches!(self.smart_rank_mode, Some(SmartRankMode::Warmup))
+                        && matches!(
+                            action,
+                            "toggle" | "enable" | "disable" | "reorder" | "remove"
+                        );
                 if !allow_during_warmup {
                     let label = match self.smart_rank_mode {
                         Some(SmartRankMode::Warmup) => "Smart rank warmup",
@@ -3643,8 +3700,12 @@ impl App {
         }
         if !self.native_sync_active {
             if self.smart_rank_active {
-                let allow_during_warmup = matches!(self.smart_rank_mode, Some(SmartRankMode::Warmup))
-                    && matches!(action, "toggle" | "enable" | "disable" | "reorder" | "remove");
+                let allow_during_warmup =
+                    matches!(self.smart_rank_mode, Some(SmartRankMode::Warmup))
+                        && matches!(
+                            action,
+                            "toggle" | "enable" | "disable" | "reorder" | "remove"
+                        );
                 if !allow_during_warmup {
                     return true;
                 }
@@ -4355,7 +4416,9 @@ impl App {
                         self.log_warn("Smart rank cache empty".to_string());
                         return;
                     }
-                    self.log_warn("Smart rank cache missing result; using cached mod data".to_string());
+                    self.log_warn(
+                        "Smart rank cache missing result; using cached mod data".to_string(),
+                    );
                 }
                 self.smart_rank_cache = Some(cache);
                 self.log_info("Smart rank cache loaded".to_string());
@@ -4389,9 +4452,7 @@ impl App {
     fn maybe_save_smart_rank_cache(&mut self, force: bool) {
         if !force {
             if let Some(last_saved) = self.smart_rank_cache_last_saved {
-                if last_saved.elapsed()
-                    < Duration::from_millis(SMART_RANK_CACHE_SAVE_DEBOUNCE_MS)
-                {
+                if last_saved.elapsed() < Duration::from_millis(SMART_RANK_CACHE_SAVE_DEBOUNCE_MS) {
                     return;
                 }
             }
@@ -5380,7 +5441,9 @@ impl App {
         if self.metadata_active {
             return !self.metadata_processed_ids.contains(mod_id);
         }
-        if self.native_sync_active || self.startup_dependency_check_pending || !self.dependency_cache_ready
+        if self.native_sync_active
+            || self.startup_dependency_check_pending
+            || !self.dependency_cache_ready
         {
             return true;
         }
@@ -5511,15 +5574,16 @@ impl App {
         lines.push(format!("Smart rank cache path: {}", cache_path.display()));
         lines.push(format!(
             "Cache loaded: {}",
-            if self.smart_rank_cache.is_some() { "yes" } else { "no" }
+            if self.smart_rank_cache.is_some() {
+                "yes"
+            } else {
+                "no"
+            }
         ));
         if let Some(cache) = &self.smart_rank_cache {
             lines.push(format!("Cache version: {}", cache.version));
             lines.push(format!("Cache profile key: {}", cache.profile_key));
-            lines.push(format!(
-                "Cache result present: {}",
-                cache.result.is_some()
-            ));
+            lines.push(format!("Cache result present: {}", cache.result.is_some()));
             let missing = self.smart_rank_cache_missing_ids(cache);
             lines.push(format!(
                 "Cache ready for enabled: {}",
@@ -5637,7 +5701,10 @@ impl App {
             lines.push(format!("First toggled: {}", toggled[0]));
         }
 
-        let cache_data = self.smart_rank_cache.as_ref().map(|cache| cache.mod_cache.clone());
+        let cache_data = self
+            .smart_rank_cache
+            .as_ref()
+            .map(|cache| cache.mod_cache.clone());
         let result = smart_rank::smart_rank_profile_cached_with_progress(
             &self.config,
             &library,
@@ -5853,8 +5920,10 @@ impl App {
         let mut remove_profile_entry = None;
         if let Some(profile) = library.active_profile() {
             for entry in &profile.order {
-                let Some(mod_entry) =
-                    library.mods.iter().find(|mod_entry| mod_entry.id == entry.id)
+                let Some(mod_entry) = library
+                    .mods
+                    .iter()
+                    .find(|mod_entry| mod_entry.id == entry.id)
                 else {
                     continue;
                 };
@@ -5988,7 +6057,10 @@ impl App {
         self.update_active = false;
 
         self.start_smart_rank_scan(SmartRankMode::Warmup, SmartRankRefreshMode::Full);
-        lines.push(format!("warmup active: {}", self.smart_rank_warmup_active()));
+        lines.push(format!(
+            "warmup active: {}",
+            self.smart_rank_warmup_active()
+        ));
         lines.push(format!(
             "start scan id={:?} kind={:?}",
             self.smart_rank_scan_active, self.smart_rank_refresh_kind
@@ -6132,8 +6204,8 @@ impl App {
         let original_scan_profile = self.smart_rank_scan_profile_key.clone();
         let original_status = self.status.clone();
 
-        let temp_data_dir = std::env::temp_dir()
-            .join(format!("sigilsmith-debug-import-{}", now_timestamp()));
+        let temp_data_dir =
+            std::env::temp_dir().join(format!("sigilsmith-debug-import-{}", now_timestamp()));
         if let Err(err) = fs::create_dir_all(&temp_data_dir) {
             lines.push(format!("Create temp dir failed: {err}"));
             return lines.join("\n");
@@ -6218,14 +6290,14 @@ impl App {
 
         for (index, path) in archives.iter().enumerate() {
             lines.push(format!("import {}: {}", index + 1, path.display()));
-            let result = match importer::import_path_with_progress(path, &self.config.data_dir, None)
-            {
-                Ok(result) => result,
-                Err(err) => {
-                    lines.push(format!("  import failed: {err}"));
-                    continue;
-                }
-            };
+            let result =
+                match importer::import_path_with_progress(path, &self.config.data_dir, None) {
+                    Ok(result) => result,
+                    Err(err) => {
+                        lines.push(format!("  import failed: {err}"));
+                        continue;
+                    }
+                };
             if result.batches.is_empty() {
                 lines.push("  no mods found".to_string());
                 continue;
@@ -6277,10 +6349,7 @@ impl App {
         let mut lines = Vec::new();
         lines.push(format!(
             "Metadata cache key (stored): {}",
-            self.library
-                .metadata_cache_key
-                .as_deref()
-                .unwrap_or("none")
+            self.library.metadata_cache_key.as_deref().unwrap_or("none")
         ));
         lines.push(format!(
             "Metadata cache key (current): {}",
@@ -6295,7 +6364,11 @@ impl App {
             self.library.modsettings_sync_enabled
         ));
 
-        match game::detect_paths(self.game_id, Some(&self.config.game_root), Some(&self.config.larian_dir)) {
+        match game::detect_paths(
+            self.game_id,
+            Some(&self.config.game_root),
+            Some(&self.config.larian_dir),
+        ) {
             Ok(paths) => {
                 if paths.modsettings_path.exists() {
                     match deploy::read_modsettings_snapshot(&paths.modsettings_path) {
@@ -7064,8 +7137,7 @@ impl App {
         let mut dependencies_changed = false;
         let updated_native_files = delta.updated_native_files;
         let adopted_native = delta.adopted_native;
-        let modsettings_hash_changed =
-            delta.modsettings_hash != self.library.modsettings_hash;
+        let modsettings_hash_changed = delta.modsettings_hash != self.library.modsettings_hash;
 
         for update in delta.updates {
             let Some(entry) = self
@@ -7329,8 +7401,8 @@ impl App {
                 }
             }
             if has_pak_target && !pak_exists {
-                pak_exists = !resolve_pak_paths(mod_entry, &self.config.data_dir, None, None)
-                    .is_empty();
+                pak_exists =
+                    !resolve_pak_paths(mod_entry, &self.config.data_dir, None, None).is_empty();
             }
             if has_pak_target && pak_enabled && !pak_exists {
                 missing_pak = true;
@@ -7361,9 +7433,7 @@ impl App {
                 };
                 for target in &mut mod_entry.targets {
                     if let InstallTarget::Pak { file, .. } = target {
-                        if let Some((_, new_name)) =
-                            renames.iter().find(|(old, _)| old == file)
-                        {
+                        if let Some((_, new_name)) = renames.iter().find(|(old, _)| old == file) {
                             *file = new_name.clone();
                             changed = true;
                         }
@@ -8804,7 +8874,6 @@ fn filter_ignored_dependencies(deps: &mut Vec<String>) {
         true
     });
 }
-
 
 fn encode_query(value: &str) -> String {
     let mut out = String::new();

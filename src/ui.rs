@@ -398,10 +398,12 @@ enum SettingsItemKind {
     ActionSetupDownloads,
     ToggleProfileDelete,
     ToggleModDelete,
+    ToggleEnableModsAfterImport,
+    ToggleDeleteModFilesOnRemove,
     ToggleDependencyDownloads,
     ToggleDependencyWarnings,
     ToggleStartupDependencyNotice,
-    ActionSmartRank,
+    ActionClearSystemCaches,
     ActionClearSmartRankCache,
     ActionCheckUpdates,
 }
@@ -424,6 +426,16 @@ fn settings_items(app: &App) -> Vec<SettingsItem> {
             label: "Confirm mod delete".to_string(),
             kind: SettingsItemKind::ToggleModDelete,
             checked: Some(app.app_config.confirm_mod_delete),
+        },
+        SettingsItem {
+            label: "Enable mods after import".to_string(),
+            kind: SettingsItemKind::ToggleEnableModsAfterImport,
+            checked: Some(app.app_config.enable_mods_after_import),
+        },
+        SettingsItem {
+            label: "Delete mod files on remove".to_string(),
+            kind: SettingsItemKind::ToggleDeleteModFilesOnRemove,
+            checked: Some(app.app_config.delete_mod_files_on_remove),
         },
         SettingsItem {
             label: "Auto dependency downloads".to_string(),
@@ -451,8 +463,8 @@ fn settings_items(app: &App) -> Vec<SettingsItem> {
             checked: None,
         },
         SettingsItem {
-            label: "AI Smart Ranking".to_string(),
-            kind: SettingsItemKind::ActionSmartRank,
+            label: "Clear System Caches".to_string(),
+            kind: SettingsItemKind::ActionClearSystemCaches,
             checked: None,
         },
         SettingsItem {
@@ -521,6 +533,18 @@ fn handle_settings_menu(app: &mut App, key: KeyEvent) -> Result<()> {
                             app.log_error(format!("Settings update failed: {err}"));
                         }
                     }
+                    SettingsItemKind::ToggleEnableModsAfterImport => {
+                        if let Err(err) = app.toggle_enable_mods_after_import() {
+                            app.status = format!("Settings update failed: {err}");
+                            app.log_error(format!("Settings update failed: {err}"));
+                        }
+                    }
+                    SettingsItemKind::ToggleDeleteModFilesOnRemove => {
+                        if let Err(err) = app.toggle_delete_mod_files_on_remove() {
+                            app.status = format!("Settings update failed: {err}");
+                            app.log_error(format!("Settings update failed: {err}"));
+                        }
+                    }
                     SettingsItemKind::ToggleDependencyDownloads => {
                         if let Err(err) = app.toggle_dependency_downloads() {
                             app.status = format!("Settings update failed: {err}");
@@ -539,9 +563,8 @@ fn handle_settings_menu(app: &mut App, key: KeyEvent) -> Result<()> {
                             app.log_error(format!("Settings update failed: {err}"));
                         }
                     }
-                    SettingsItemKind::ActionSmartRank => {
-                        app.close_settings_menu();
-                        app.open_smart_rank_preview();
+                    SettingsItemKind::ActionClearSystemCaches => {
+                        app.clear_system_caches();
                     }
                     SettingsItemKind::ActionClearSmartRankCache => {
                         app.clear_smart_rank_cache();
@@ -570,6 +593,19 @@ fn handle_normal_mode(app: &mut App, key: KeyEvent) -> Result<()> {
         {
             app.focus_mods();
             app.enter_mod_filter();
+            return Ok(());
+        }
+        (KeyCode::Char('e'), mods) | (KeyCode::Char('E'), mods)
+            if mods.contains(KeyModifiers::CONTROL) =>
+        {
+            let active = app.library.active_profile.clone();
+            app.enter_export_profile(&active);
+            return Ok(());
+        }
+        (KeyCode::Char('p'), mods) | (KeyCode::Char('P'), mods)
+            if mods.contains(KeyModifiers::CONTROL) =>
+        {
+            app.enter_import_profile();
             return Ok(());
         }
         (KeyCode::Char('/'), _) => {
@@ -2057,7 +2093,7 @@ fn draw(frame: &mut Frame<'_>, app: &mut App) {
     frame.render_widget(status_widget, status_inner);
 
     if app.dependency_queue_active() {
-    draw_dependency_queue(frame, app, &theme);
+        draw_dependency_queue(frame, app, &theme);
     }
     if app.dialog.is_some() {
         draw_dialog(frame, app, &theme);
@@ -2884,7 +2920,9 @@ fn delete_dependents_lines(
 }
 
 fn padded_modal(area: Rect, width: u16, height: u16, pad_x: u16, pad_y: u16) -> (Rect, Rect) {
-    let outer_width = width.saturating_add(pad_x.saturating_mul(2)).min(area.width);
+    let outer_width = width
+        .saturating_add(pad_x.saturating_mul(2))
+        .min(area.width);
     let outer_height = height
         .saturating_add(pad_y.saturating_mul(2))
         .min(area.height);
@@ -3149,12 +3187,16 @@ fn draw_dependency_queue(frame: &mut Frame<'_>, app: &mut App, theme: &Theme) {
         let label = "OVERRIDE DEPENDENCIES";
         let label_chars: Vec<char> = label.chars().collect();
         let mask_one = if label_chars.len() > 2 {
-            label_chars[1..label_chars.len() - 1].iter().collect::<String>()
+            label_chars[1..label_chars.len() - 1]
+                .iter()
+                .collect::<String>()
         } else {
             label.to_string()
         };
         let mask_two = if label_chars.len() > 4 {
-            label_chars[2..label_chars.len() - 2].iter().collect::<String>()
+            label_chars[2..label_chars.len() - 2]
+                .iter()
+                .collect::<String>()
         } else {
             mask_one.clone()
         };
@@ -3996,7 +4038,7 @@ fn build_settings_menu_lines(app: &App, theme: &Theme, selected: usize) -> Vec<L
         let row = match item.kind {
             SettingsItemKind::ActionSetupPaths
             | SettingsItemKind::ActionSetupDownloads
-            | SettingsItemKind::ActionSmartRank
+            | SettingsItemKind::ActionClearSystemCaches
             | SettingsItemKind::ActionClearSmartRankCache
             | SettingsItemKind::ActionCheckUpdates => vec![
                 Span::styled(prefix.to_string(), style),
@@ -4005,6 +4047,25 @@ fn build_settings_menu_lines(app: &App, theme: &Theme, selected: usize) -> Vec<L
                 Span::raw(" "),
                 Span::styled(item.label.to_string(), style),
             ],
+            SettingsItemKind::ToggleEnableModsAfterImport
+            | SettingsItemKind::ToggleDeleteModFilesOnRemove => {
+                let enabled = item.checked.unwrap_or(false);
+                let state_label = if enabled { "ON" } else { "OFF" };
+                let state_style = Style::default()
+                    .fg(if enabled {
+                        theme.success
+                    } else {
+                        theme.warning
+                    })
+                    .add_modifier(Modifier::BOLD);
+                vec![
+                    Span::styled(prefix.to_string(), style),
+                    Span::raw(" "),
+                    Span::styled(item.label.to_string(), style),
+                    Span::raw(": "),
+                    Span::styled(state_label, state_style),
+                ]
+            }
             SettingsItemKind::ToggleProfileDelete
             | SettingsItemKind::ToggleModDelete
             | SettingsItemKind::ToggleDependencyDownloads
@@ -4166,7 +4227,7 @@ fn mode_toast(app: &App) -> Option<(String, ToastLevel)> {
                 }
                 InputPurpose::ImportProfile => {
                     let path = value("<path>");
-                    format!("Import profile list: {path} | {hint}")
+                    format!("Import mod list: {path} | {hint}")
                 }
                 InputPurpose::ImportPath => {
                     let path = value("<path>");
@@ -4402,7 +4463,6 @@ fn draw_startup_overlay(frame: &mut Frame<'_>, app: &App, theme: &Theme) {
         .alignment(Alignment::Left);
     frame.render_widget(paragraph, inner);
 }
-
 
 fn build_explorer_items(app: &App, theme: &Theme) -> Vec<ListItem<'static>> {
     let items = app.explorer_items();
@@ -5636,6 +5696,10 @@ fn hotkey_rows_for_focus(focus: Focus) -> HotkeyRows {
         action: "Import mod".to_string(),
     });
     global.push(LegendRow {
+        key: "Ctrl+E/Ctrl+P".to_string(),
+        action: "Export/Import mod list".to_string(),
+    });
+    global.push(LegendRow {
         key: "Tab".to_string(),
         action: "Cycle focus".to_string(),
     });
@@ -5839,6 +5903,14 @@ fn help_sections() -> Vec<HelpSection> {
                 LegendRow {
                     key: "i".to_string(),
                     action: "Import mod".to_string(),
+                },
+                LegendRow {
+                    key: "Ctrl+E".to_string(),
+                    action: "Export mod list".to_string(),
+                },
+                LegendRow {
+                    key: "Ctrl+P".to_string(),
+                    action: "Import mod list".to_string(),
                 },
                 LegendRow {
                     key: "d".to_string(),
