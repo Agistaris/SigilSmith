@@ -131,6 +131,16 @@ pub enum DialogKind {
         path: PathBuf,
         label: String,
     },
+    DisableDependents {
+        ids: Vec<String>,
+        dependents: Vec<DependentMod>,
+        enable_after: Vec<String>,
+        reason: String,
+    },
+    EnableRequiredDependencies {
+        ids: Vec<String>,
+        dependencies: Vec<DependentMod>,
+    },
     DeleteProfile {
         name: String,
     },
@@ -1002,6 +1012,37 @@ impl App {
         let total = profile.order.len();
         let enabled = profile.order.iter().filter(|entry| entry.enabled).count();
         (total, enabled)
+    }
+
+    pub fn active_profile_enabled_ids(&self) -> HashSet<String> {
+        let Some(profile) = self.library.active_profile() else {
+            return HashSet::new();
+        };
+        profile
+            .order
+            .iter()
+            .filter(|entry| entry.enabled)
+            .map(|entry| entry.id.clone())
+            .collect()
+    }
+
+    fn active_profile_ids(&self) -> HashSet<String> {
+        let Some(profile) = self.library.active_profile() else {
+            return HashSet::new();
+        };
+        profile.order.iter().map(|entry| entry.id.clone()).collect()
+    }
+
+    fn enabled_mod_ids_any_profile(&self) -> HashSet<String> {
+        let mut out = HashSet::new();
+        for profile in &self.library.profiles {
+            for entry in &profile.order {
+                if entry.enabled {
+                    out.insert(entry.id.clone());
+                }
+            }
+        }
+        out
     }
 
     pub fn visible_profile_indices(&self) -> Vec<usize> {
@@ -2516,7 +2557,7 @@ impl App {
             return;
         }
 
-        let dependents = self.find_dependents(&id);
+        let dependents = self.find_any_profile_dependents(&[id.clone()]);
         let is_native = self
             .library
             .mods
@@ -2524,18 +2565,16 @@ impl App {
             .find(|entry| entry.id == id)
             .map(|entry| entry.is_native())
             .unwrap_or(false);
-        let mut message = build_dependent_message(&dependents);
-        let (title, yes_label, toggle) = if is_native {
-            if !message.is_empty() {
-                message.push('\n');
-                message.push('\n');
-            }
-            message.push_str("This will delete the local mod file from the Larian Mods folder.");
-            ("Remove Native Mod".to_string(), "Remove".to_string(), None)
+        let default_choice = if self.app_config.delete_mod_files_on_remove {
+            DialogChoice::No
+        } else {
+            DialogChoice::Yes
+        };
+        let (title, toggle) = if is_native {
+            ("Remove Native Mod".to_string(), None)
         } else {
             (
                 "Remove Mod".to_string(),
-                "Remove".to_string(),
                 Some(DialogToggle {
                     label: "Don't ask again for this action?".to_string(),
                     checked: false,
@@ -2544,10 +2583,10 @@ impl App {
         };
         self.open_dialog(Dialog {
             title,
-            message,
-            yes_label,
-            no_label: "Cancel".to_string(),
-            choice: DialogChoice::No,
+            message: String::new(),
+            yes_label: "Remove".to_string(),
+            no_label: "Remove + delete file(s)".to_string(),
+            choice: default_choice,
             kind: DialogKind::DeleteMod {
                 id,
                 name,
@@ -2584,35 +2623,99 @@ impl App {
         }
     }
 
-    fn find_dependents(&self, target_id: &str) -> Vec<DependentMod> {
-        let target_keys: HashSet<String> = self
-            .library
-            .mods
-            .iter()
-            .find(|entry| entry.id == target_id)
-            .map(mod_dependency_keys)
-            .unwrap_or_else(|| vec![normalize_label(target_id)])
-            .into_iter()
-            .collect();
-        let mut out = Vec::new();
+    fn dependency_reverse_map(
+        &self,
+        candidate_ids: &HashSet<String>,
+    ) -> HashMap<String, Vec<String>> {
+        let lookup = DependencyLookup::new(&self.library.mods);
+        let mut reverse: HashMap<String, Vec<String>> = HashMap::new();
         for mod_entry in &self.library.mods {
-            if mod_entry.id == target_id {
+            if !candidate_ids.contains(&mod_entry.id) {
                 continue;
             }
-            let deps = self.cached_mod_dependencies(mod_entry);
-            if deps.iter().any(|dep| {
-                dependency_match_keys(dep)
-                    .iter()
-                    .any(|key| target_keys.contains(key))
-            }) {
+            for dep in self.cached_mod_dependencies(mod_entry) {
+                let ids = resolved_dependency_ids(&lookup, &dep, mod_entry);
+                for id in ids {
+                    if candidate_ids.contains(&id) {
+                        reverse.entry(id).or_default().push(mod_entry.id.clone());
+                    }
+                }
+            }
+        }
+        for ids in reverse.values_mut() {
+            ids.sort();
+            ids.dedup();
+        }
+        reverse
+    }
+
+    fn find_enabled_dependents(
+        &self,
+        target_ids: &[String],
+        candidate_ids: &HashSet<String>,
+        enabled_ids: &HashSet<String>,
+    ) -> Vec<DependentMod> {
+        if target_ids.is_empty() || candidate_ids.is_empty() {
+            return Vec::new();
+        }
+        let reverse = self.dependency_reverse_map(candidate_ids);
+        let mut visited: HashSet<String> = HashSet::new();
+        let mut queue: VecDeque<String> = VecDeque::new();
+        for id in target_ids {
+            if candidate_ids.contains(id) && visited.insert(id.clone()) {
+                queue.push_back(id.clone());
+            }
+        }
+        let mut dependent_ids: HashSet<String> = HashSet::new();
+        while let Some(current) = queue.pop_front() {
+            if let Some(children) = reverse.get(&current) {
+                for child in children {
+                    if visited.insert(child.clone()) {
+                        queue.push_back(child.clone());
+                        if enabled_ids.contains(child) {
+                            dependent_ids.insert(child.clone());
+                        }
+                    }
+                }
+            }
+        }
+        for id in target_ids {
+            dependent_ids.remove(id);
+        }
+        let mut out = Vec::new();
+        for id in dependent_ids {
+            if let Some(entry) = self.library.mods.iter().find(|entry| entry.id == id) {
                 out.push(DependentMod {
-                    id: mod_entry.id.clone(),
-                    name: mod_entry.display_name(),
+                    id,
+                    name: entry.display_name(),
                 });
             }
         }
         out.sort_by(|a, b| a.name.cmp(&b.name));
         out
+    }
+
+    fn find_active_dependents(&self, target_ids: &[String]) -> Vec<DependentMod> {
+        let candidate_ids = self.active_profile_ids();
+        if candidate_ids.is_empty() {
+            return Vec::new();
+        }
+        let enabled_ids = self.active_profile_enabled_ids();
+        self.find_enabled_dependents(target_ids, &candidate_ids, &enabled_ids)
+    }
+
+    fn find_any_profile_dependents(&self, target_ids: &[String]) -> Vec<DependentMod> {
+        let candidate_ids: HashSet<String> = self
+            .library
+            .mods
+            .iter()
+            .map(|entry| entry.id.clone())
+            .collect();
+        if candidate_ids.is_empty() {
+            return Vec::new();
+        }
+        let enabled_ids = self.enabled_mod_ids_any_profile();
+        self.find_enabled_dependents(target_ids, &candidate_ids, &enabled_ids)
     }
 
     pub fn prompt_move_blocked(&mut self, resume_move_mode: bool) {
@@ -5602,6 +5705,37 @@ impl App {
             .count()
     }
 
+    pub fn dependency_counts_for_mod(
+        &self,
+        mod_entry: &ModEntry,
+        lookup: &DependencyLookup,
+        enabled_ids: &HashSet<String>,
+    ) -> (usize, usize) {
+        if !self.dependency_cache_ready {
+            return (0, 0);
+        }
+        let deps = self.cached_mod_dependencies(mod_entry);
+        if deps.is_empty() {
+            return (0, 0);
+        }
+        let mut missing = 0usize;
+        let mut disabled = 0usize;
+        for dep in deps {
+            let ids = resolved_dependency_ids(lookup, &dep, mod_entry);
+            if ids.is_empty() {
+                if !is_unverified_dependency(&dep) {
+                    missing += 1;
+                }
+                continue;
+            }
+            let any_enabled = ids.iter().any(|id| enabled_ids.contains(id));
+            if !any_enabled {
+                disabled += 1;
+            }
+        }
+        (missing, disabled)
+    }
+
     pub fn debug_dependency_report(&self, query: &str) -> String {
         let needle = normalize_label(query);
         if needle.is_empty() {
@@ -6905,6 +7039,10 @@ impl App {
         self.input_mode = InputMode::Normal;
     }
 
+    pub fn close_dialog(&mut self) {
+        self.dialog = None;
+    }
+
     pub fn dialog_choice_left(&mut self) {
         if let Some(dialog) = &mut self.dialog {
             dialog.choice = DialogChoice::Yes;
@@ -6973,32 +7111,70 @@ impl App {
                 native,
                 dependents,
             } => {
-                if matches!(choice, DialogChoice::Yes) {
-                    let mut remove_native_files = false;
-                    if native {
-                        remove_native_files = true;
-                    } else if let Some(toggle) = dialog.toggle {
+                let delete_files = matches!(choice, DialogChoice::No);
+                if !native {
+                    if let Some(toggle) = dialog.toggle {
                         if toggle.checked {
                             self.app_config.confirm_mod_delete = false;
                             let _ = self.app_config.save();
                         }
                     }
-                    if !self.remove_mod_by_id_with_options(&id, remove_native_files) {
-                        self.status = "No mod removed".to_string();
+                }
+                if !self.remove_mod_by_id_with_options(&id, delete_files) {
+                    self.status = "No mod removed".to_string();
+                    return;
+                }
+                self.status = format!("Mod removed: {name}");
+                self.log_info(format!("Mod removed: {name}"));
+                let dependent_ids: Vec<String> =
+                    dependents.iter().map(|item| item.id.clone()).collect();
+                let disabled = self.disable_mods_by_id(&dependent_ids);
+                if disabled > 0 {
+                    self.status = format!("Disabled {disabled} dependent mod(s)");
+                    self.log_warn(format!("Disabled {disabled} dependent mod(s)"));
+                    self.queue_auto_deploy("dependency disabled");
+                }
+                self.clamp_selection();
+                self.queue_auto_deploy("mod removed");
+            }
+            DialogKind::DisableDependents {
+                ids,
+                dependents,
+                enable_after,
+                reason,
+            } => {
+                if matches!(choice, DialogChoice::No) {
+                    let mut to_disable = ids;
+                    to_disable.extend(dependents.iter().map(|entry| entry.id.clone()));
+                    to_disable.sort();
+                    to_disable.dedup();
+                    let changed = self.set_mods_enabled_in_active(&to_disable, false);
+                    if changed == 0 {
+                        self.status = "Mods already disabled".to_string();
+                    } else {
+                        self.status = format!("Disabled {changed} mod(s)");
+                        self.log_warn(format!("Disabled {changed} mod(s)"));
+                        self.queue_auto_deploy(&reason);
+                    }
+                    if !enable_after.is_empty() {
+                        self.enable_mods_with_dependencies(enable_after);
+                    }
+                } else {
+                    self.status = "Disable canceled".to_string();
+                }
+            }
+            DialogKind::EnableRequiredDependencies { ids, .. } => {
+                if matches!(choice, DialogChoice::Yes) {
+                    let changed = self.set_mods_enabled_in_active(&ids, true);
+                    if changed == 0 {
+                        self.status = "Mods already enabled".to_string();
                         return;
                     }
-                    self.status = format!("Mod removed: {name}");
-                    self.log_info(format!("Mod removed: {name}"));
-                    let dependent_ids: Vec<String> =
-                        dependents.iter().map(|item| item.id.clone()).collect();
-                    let disabled = self.disable_mods_by_id(&dependent_ids);
-                    if disabled > 0 {
-                        self.status = format!("Disabled {disabled} dependent mod(s)");
-                        self.log_warn(format!("Disabled {disabled} dependent mod(s)"));
-                        self.queue_auto_deploy("dependency disabled");
-                    }
-                    self.clamp_selection();
-                    self.queue_auto_deploy("mod removed");
+                    self.status = format!("Enabled {changed} mod(s)");
+                    self.log_info(format!("Enabled {changed} mod(s)"));
+                    self.queue_auto_deploy("enable dependencies");
+                } else {
+                    self.status = "Enable canceled".to_string();
                 }
             }
             DialogKind::MoveBlocked {
@@ -7125,7 +7301,7 @@ impl App {
         self.remove_mod_by_id_with_options(id, false)
     }
 
-    fn remove_mod_by_id_with_options(&mut self, id: &str, delete_native_files: bool) -> bool {
+    fn remove_mod_by_id_with_options(&mut self, id: &str, delete_files: bool) -> bool {
         self.schedule_smart_rank_refresh(
             smart_rank::SmartRankRefreshMode::Incremental,
             "remove",
@@ -7135,8 +7311,8 @@ impl App {
             Some(entry) => entry.clone(),
             None => return false,
         };
-        if delete_native_files && mod_entry.is_native() && self.allow_persistence() {
-            self.remove_native_mod_files(&mod_entry);
+        if delete_files && self.allow_persistence() {
+            self.delete_mod_files(&mod_entry);
         }
 
         let before = self.library.mods.len();
@@ -7153,10 +7329,13 @@ impl App {
                 .retain(|override_entry| override_entry.mod_id != id);
         }
 
-        if self.allow_persistence() {
+        if self.allow_persistence() && delete_files {
             self.queue_remove_mod_root(id);
         }
         self.dependency_cache.remove(id);
+        if self.dependency_cache_ready && self.allow_persistence() {
+            self.refresh_dependency_blocks();
+        }
         self.library.metadata_cache_key = Some(self.metadata_cache_key());
         self.library.metadata_cache_version = METADATA_CACHE_VERSION;
         if self.allow_persistence() {
@@ -7186,6 +7365,13 @@ impl App {
             }
         }
         changed
+    }
+
+    fn delete_mod_files(&mut self, mod_entry: &ModEntry) {
+        if !mod_entry.is_native() {
+            return;
+        }
+        self.remove_native_mod_files(mod_entry);
     }
 
     fn remove_native_mod_files(&mut self, mod_entry: &ModEntry) {
@@ -7225,6 +7411,13 @@ impl App {
             ));
             return;
         }
+        if !path_within_root(&pak_path, &paths.larian_mods_dir) {
+            self.log_warn(format!(
+                "Native mod file remove skipped: outside Mods dir ({})",
+                pak_path.display()
+            ));
+            return;
+        }
         if let Err(err) = fs::remove_file(&pak_path) {
             self.log_warn(format!("Native mod file remove failed: {err}"));
         } else {
@@ -7232,14 +7425,33 @@ impl App {
         }
     }
 
-    fn remove_mod_root(&self, id: &str) {
+    fn remove_mod_root(&mut self, id: &str) {
         let mod_root = self.config.data_dir.join("mods").join(id);
+        if !mod_root.exists() {
+            return;
+        }
+        let allowed_root = self.config.data_dir.join("mods");
+        if !path_within_root(&mod_root, &allowed_root) {
+            self.log_warn(format!(
+                "Remove mod files skipped: outside managed mods dir ({})",
+                mod_root.display()
+            ));
+            return;
+        }
         let _ = fs::remove_dir_all(&mod_root);
     }
 
     fn queue_remove_mod_root(&mut self, id: &str) {
         let mod_root = self.config.data_dir.join("mods").join(id);
         if !mod_root.exists() {
+            return;
+        }
+        let allowed_root = self.config.data_dir.join("mods");
+        if !path_within_root(&mod_root, &allowed_root) {
+            self.log_warn(format!(
+                "Remove mod files skipped: outside managed mods dir ({})",
+                mod_root.display()
+            ));
             return;
         }
         let trash_root = self.config.data_dir.join("trash");
@@ -7683,8 +7895,27 @@ impl App {
         let id = entry.id.clone();
         let enabled = entry.enabled;
         if enabled {
-            self.set_mods_enabled_in_active(&[id], false);
-            self.queue_auto_deploy("enable toggle");
+            let dependents = self.find_active_dependents(&[id.clone()]);
+            if dependents.is_empty() {
+                self.set_mods_enabled_in_active(&[id], false);
+                self.queue_auto_deploy("enable toggle");
+            } else {
+                self.open_dialog(Dialog {
+                    title: "Disable dependent mods".to_string(),
+                    message: String::new(),
+                    yes_label: "Cancel".to_string(),
+                    no_label: "Disable".to_string(),
+                    choice: DialogChoice::Yes,
+                    kind: DialogKind::DisableDependents {
+                        ids: vec![id],
+                        dependents,
+                        enable_after: Vec::new(),
+                        reason: "enable toggle".to_string(),
+                    },
+                    toggle: None,
+                    scroll: 0,
+                });
+            }
         } else {
             self.enable_mods_with_dependencies(vec![id]);
         }
@@ -7705,24 +7936,21 @@ impl App {
             return;
         }
 
-        let mut dependency_labels: Vec<String> = Vec::new();
-        for mod_entry in &mods {
-            dependency_labels.extend(self.cached_mod_dependencies(mod_entry));
-        }
-
         let lookup = DependencyLookup::new(&self.library.mods);
         let mut present: HashSet<String> = HashSet::new();
         let mut missing = Vec::new();
-        for dep in dependency_labels {
-            let ids = lookup.resolve_ids(&dep);
-            if ids.is_empty() {
-                if is_unverified_dependency(&dep) {
-                    continue;
-                }
-                missing.push(dep);
-            } else {
-                for id in ids {
-                    present.insert(id);
+        for mod_entry in &mods {
+            for dep in self.cached_mod_dependencies(mod_entry) {
+                let ids = resolved_dependency_ids(&lookup, &dep, mod_entry);
+                if ids.is_empty() {
+                    if is_unverified_dependency(&dep) {
+                        continue;
+                    }
+                    missing.push(dep);
+                } else {
+                    for id in ids {
+                        present.insert(id);
+                    }
                 }
             }
         }
@@ -7753,10 +7981,49 @@ impl App {
             return;
         }
 
+        let enabled_ids = self.active_profile_enabled_ids();
+        let selected_ids: HashSet<&str> = ids.iter().map(|id| id.as_str()).collect();
+        let mut disabled_required_ids: Vec<String> = present
+            .iter()
+            .filter(|id| !enabled_ids.contains(*id) && !selected_ids.contains(id.as_str()))
+            .cloned()
+            .collect();
+        disabled_required_ids.sort();
+        disabled_required_ids.dedup();
+
         let mut to_enable = ids;
         to_enable.extend(present.into_iter());
         to_enable.sort();
         to_enable.dedup();
+        if !disabled_required_ids.is_empty() {
+            let dependencies: Vec<DependentMod> = disabled_required_ids
+                .iter()
+                .filter_map(|id| {
+                    self.library
+                        .mods
+                        .iter()
+                        .find(|entry| entry.id == *id)
+                        .map(|entry| DependentMod {
+                            id: id.clone(),
+                            name: entry.display_name(),
+                        })
+                })
+                .collect();
+            self.open_dialog(Dialog {
+                title: "Enable required dependencies".to_string(),
+                message: String::new(),
+                yes_label: "Enable".to_string(),
+                no_label: "Cancel".to_string(),
+                choice: DialogChoice::Yes,
+                kind: DialogKind::EnableRequiredDependencies {
+                    ids: to_enable,
+                    dependencies,
+                },
+                toggle: None,
+                scroll: 0,
+            });
+            return;
+        }
         let changed = self.set_mods_enabled_in_active(&to_enable, true);
         if changed == 0 {
             self.status = "Mods already enabled".to_string();
@@ -7844,7 +8111,7 @@ impl App {
             self.queue_pending_delete(entry.id.clone(), entry.display_name());
             return;
         }
-        let dependents = self.find_dependents(&selected_id);
+        let dependents = self.find_any_profile_dependents(&[selected_id.clone()]);
 
         if !self.remove_mod_by_id(&selected_id) {
             self.status = "No mod removed".to_string();
@@ -7885,8 +8152,12 @@ impl App {
             return;
         }
 
-        let dependents = self.find_dependents(&entry.id);
-        if entry.is_native() || self.app_config.confirm_mod_delete || !dependents.is_empty() {
+        let dependents = self.find_any_profile_dependents(&[entry.id.clone()]);
+        if entry.is_native()
+            || self.app_config.confirm_mod_delete
+            || self.app_config.delete_mod_files_on_remove
+            || !dependents.is_empty()
+        {
             self.prompt_delete_mod(entry.id.clone(), entry.display_name());
         } else {
             self.remove_selected();
@@ -8059,6 +8330,29 @@ impl App {
                 }
             }
         }
+        if ids.is_empty() {
+            self.status = "Visible mods already disabled".to_string();
+            return;
+        }
+        let dependents = self.find_active_dependents(&ids);
+        if !dependents.is_empty() {
+            self.open_dialog(Dialog {
+                title: "Disable dependent mods".to_string(),
+                message: String::new(),
+                yes_label: "Cancel".to_string(),
+                no_label: "Disable".to_string(),
+                choice: DialogChoice::Yes,
+                kind: DialogKind::DisableDependents {
+                    ids,
+                    dependents,
+                    enable_after: Vec::new(),
+                    reason: "disable all".to_string(),
+                },
+                toggle: None,
+                scroll: 0,
+            });
+            return;
+        }
         let changed = self.set_mods_enabled_in_active(&ids, false);
         if changed == 0 {
             self.status = "Visible mods already disabled".to_string();
@@ -8091,6 +8385,25 @@ impl App {
                     to_enable.push(entry.id.clone());
                 }
             }
+        }
+        let dependents = self.find_active_dependents(&to_disable);
+        if !dependents.is_empty() {
+            self.open_dialog(Dialog {
+                title: "Disable dependent mods".to_string(),
+                message: String::new(),
+                yes_label: "Cancel".to_string(),
+                no_label: "Disable".to_string(),
+                choice: DialogChoice::Yes,
+                kind: DialogKind::DisableDependents {
+                    ids: to_disable,
+                    dependents,
+                    enable_after: to_enable,
+                    reason: "invert selection".to_string(),
+                },
+                toggle: None,
+                scroll: 0,
+            });
+            return;
         }
         let disabled = self.set_mods_enabled_in_active(&to_disable, false);
         if !to_enable.is_empty() {
@@ -8844,24 +9157,6 @@ fn summarize_error(error: &str) -> String {
     }
 
     last.to_string()
-}
-
-fn build_dependent_message(dependents: &[DependentMod]) -> String {
-    if dependents.is_empty() {
-        return String::new();
-    }
-    let mut lines = Vec::new();
-    lines.push("This mod is required by:".to_string());
-    let max_list = 6usize;
-    for dependent in dependents.iter().take(max_list) {
-        lines.push(format!("- {}", dependent.name));
-    }
-    if dependents.len() > max_list {
-        lines.push(format!("...and {} more", dependents.len() - max_list));
-    }
-    lines.push(String::new());
-    lines.push("Removing it will disable those mods.".to_string());
-    lines.join("\n")
 }
 
 fn dependency_display_label(value: &str) -> String {
@@ -9971,4 +10266,13 @@ fn scan_mod_targets_times(mod_entry: &ModEntry, mod_root: &PathBuf) -> (Option<i
         }
     }
     normalize_times(created_at, modified_at)
+}
+
+fn path_within_root(path: &Path, root: &Path) -> bool {
+    if let (Ok(path_abs), Ok(root_abs)) = (fs::canonicalize(path), fs::canonicalize(root)) {
+        if path_abs.starts_with(&root_abs) {
+            return true;
+        }
+    }
+    path.starts_with(root)
 }

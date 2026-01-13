@@ -26,6 +26,7 @@ use ratatui::{
     },
 };
 use std::{
+    collections::HashSet,
     io,
     path::{Path, PathBuf},
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
@@ -298,8 +299,21 @@ fn handle_dialog_mode(app: &mut App, key: KeyEvent) -> Result<()> {
             app.dialog_confirm();
         }
         KeyCode::Esc => {
-            app.dialog_set_choice(DialogChoice::No);
-            app.dialog_confirm();
+            if let Some(dialog) = app.dialog.as_ref() {
+                match &dialog.kind {
+                    DialogKind::DeleteMod { .. } => {
+                        app.close_dialog();
+                    }
+                    DialogKind::DisableDependents { .. } => {
+                        app.dialog_set_choice(DialogChoice::Yes);
+                        app.dialog_confirm();
+                    }
+                    _ => {
+                        app.dialog_set_choice(DialogChoice::No);
+                        app.dialog_confirm();
+                    }
+                }
+            }
         }
         _ => {}
     }
@@ -1769,7 +1783,7 @@ fn draw(frame: &mut Frame<'_>, app: &mut App) {
         let min_mod = 16u16;
         let date_width = 10u16;
         let fixed_without_target =
-            3 + 2 + 3 + 5 + 6 + date_width + date_width + min_mod + spacing * 8;
+            3 + 2 + 4 + 5 + 6 + date_width + date_width + min_mod + spacing * 8;
         let max_target = table_width.saturating_sub(fixed_without_target);
         let mut target_col = target_width as u16;
         if max_target > 0 {
@@ -1798,7 +1812,7 @@ fn draw(frame: &mut Frame<'_>, app: &mut App) {
             [
                 Constraint::Length(3),
                 Constraint::Length(2),
-                Constraint::Length(3),
+                Constraint::Length(4),
                 Constraint::Length(5),
                 Constraint::Length(6),
                 Constraint::Length(target_col),
@@ -2932,15 +2946,19 @@ fn build_dialog_message_lines(dialog: &crate::app::Dialog, theme: &Theme) -> Vec
                     Span::styled(name.clone(), Style::default().fg(theme.text)),
                     Span::styled("\"?", Style::default().fg(theme.text)),
                 ]);
-                let line2 = Line::from(vec![Span::styled(
-                    "Unsubscribe in-game to stop updates.",
-                    Style::default().fg(theme.muted),
-                )]);
+                let line2 = Line::from(Span::styled(
+                    "Remove keeps the .pak in the Larian Mods folder.",
+                    Style::default().fg(theme.text),
+                ));
                 let line3 = Line::from(Span::styled(
-                    "Local file will be deleted from the Larian Mods folder.",
+                    "Remove + delete file(s) deletes it from the Larian Mods folder.",
                     Style::default().fg(theme.warning),
                 ));
-                lines.extend([line1, line2, line3]);
+                let line4 = Line::from(Span::styled(
+                    "Unsubscribe in-game to stop updates.",
+                    Style::default().fg(theme.muted),
+                ));
+                lines.extend([line1, line2, line3, line4]);
             } else {
                 let line1 = Line::from(vec![
                     Span::styled("Remove mod \"", Style::default().fg(theme.text)),
@@ -2960,13 +2978,27 @@ fn build_dialog_message_lines(dialog: &crate::app::Dialog, theme: &Theme) -> Vec
                     ),
                     Span::styled(".", Style::default().fg(theme.text)),
                 ]);
-                lines.extend([line1, line2]);
+                let line3 = Line::from(Span::styled(
+                    "Remove keeps files in SigilSmith storage.",
+                    Style::default().fg(theme.text),
+                ));
+                let line4 = Line::from(Span::styled(
+                    "Remove + delete file(s) deletes stored files.",
+                    Style::default().fg(theme.warning),
+                ));
+                lines.extend([line1, line2, line3, line4]);
             }
             if !dependents.is_empty() {
                 lines.push(Line::from(""));
                 lines.extend(delete_dependents_lines(dependents, theme));
             }
             lines
+        }
+        DialogKind::DisableDependents { dependents, .. } => {
+            dependency_action_lines("Will disable", dependents, theme)
+        }
+        DialogKind::EnableRequiredDependencies { dependencies, .. } => {
+            dependency_action_lines("Will enable", dependencies, theme)
         }
         _ => dialog
             .message
@@ -2976,7 +3008,8 @@ fn build_dialog_message_lines(dialog: &crate::app::Dialog, theme: &Theme) -> Vec
     }
 }
 
-fn delete_dependents_lines(
+fn dependency_action_lines(
+    action: &str,
     dependents: &[crate::app::DependentMod],
     theme: &Theme,
 ) -> Vec<Line<'static>> {
@@ -2991,13 +3024,13 @@ fn delete_dependents_lines(
     let max_list = 4usize;
     if dependents.len() == 1 {
         lines.push(Line::from(Span::styled(
-            format!("Will disable: {}", dependents[0].name),
+            format!("{action}: {}", dependents[0].name),
             highlight_style,
         )));
         return lines;
     }
     lines.push(Line::from(Span::styled(
-        format!("Will disable {} mods:", dependents.len()),
+        format!("{action} {} mods:", dependents.len()),
         highlight_style,
     )));
     for dependent in dependents.iter().take(max_list) {
@@ -3013,6 +3046,13 @@ fn delete_dependents_lines(
         )));
     }
     lines
+}
+
+fn delete_dependents_lines(
+    dependents: &[crate::app::DependentMod],
+    theme: &Theme,
+) -> Vec<Line<'static>> {
+    dependency_action_lines("Will disable", dependents, theme)
 }
 
 fn padded_modal(area: Rect, width: u16, height: u16, pad_x: u16, pad_y: u16) -> (Rect, Rect) {
@@ -4693,6 +4733,7 @@ fn build_rows(app: &App, theme: &Theme) -> (Vec<Row<'static>>, ModCounts, usize)
     let profile_entries = app.visible_profile_entries();
     let mod_map = app.library.index_by_id();
     let dep_lookup = app.dependency_lookup();
+    let enabled_ids = app.active_profile_enabled_ids();
     let total_rows = profile_entries.len();
 
     for (row_index, (order_index, entry)) in profile_entries.iter().enumerate() {
@@ -4711,6 +4752,7 @@ fn build_rows(app: &App, theme: &Theme) -> (Vec<Row<'static>>, ModCounts, usize)
             mod_entry,
             theme,
             dep_lookup.as_ref(),
+            &enabled_ids,
             loading,
         );
         target_width = target_width.max(target_len);
@@ -4831,6 +4873,7 @@ fn row_for_entry(
     mod_entry: &ModEntry,
     theme: &Theme,
     dep_lookup: Option<&crate::app::DependencyLookup>,
+    enabled_ids: &HashSet<String>,
     loading: bool,
 ) -> (Row<'static>, usize) {
     let (state_label, state_style) = mod_path_label(app, mod_entry, theme, true);
@@ -4846,9 +4889,9 @@ fn row_for_entry(
         Row::new(cells)
     } else {
         let has_override = !mod_entry.target_overrides.is_empty();
-        let missing = dep_lookup
-            .map(|lookup| app.missing_dependency_count_for_mod(mod_entry, lookup))
-            .unwrap_or(0);
+        let (missing, disabled) = dep_lookup
+            .map(|lookup| app.dependency_counts_for_mod(mod_entry, lookup, enabled_ids))
+            .unwrap_or((0, 0));
         let (enabled_text, enabled_style) = if enabled {
             let color = if has_override || missing > 0 {
                 theme.warning
@@ -4873,15 +4916,13 @@ fn row_for_entry(
         };
         let created_text = format_date_cell(mod_entry.created_at);
         let added_text = format_date_cell(Some(mod_entry.added_at));
-        let dep_text = if missing == 0 {
-            String::new()
-        } else {
-            missing.to_string()
-        };
-        let dep_style = if missing == 0 {
-            Style::default().fg(theme.muted)
-        } else {
+        let dep_text = format!("{:02}{:02}", missing, disabled);
+        let dep_style = if missing > 0 {
             Style::default().fg(theme.warning)
+        } else if disabled > 0 {
+            Style::default().fg(theme.accent)
+        } else {
+            Style::default().fg(theme.muted)
         };
         Row::new(vec![
             Cell::from(enabled_text.to_string()).style(enabled_style),
@@ -5652,7 +5693,7 @@ fn legend_rows_for_focus(focus: Focus) -> Vec<LegendRow> {
             });
             legend.push(LegendRow {
                 key: "D".to_string(),
-                action: "Missing dependencies".to_string(),
+                action: "Missing/disabled dependencies".to_string(),
             });
         }
         Focus::Conflicts | Focus::Log => {}
