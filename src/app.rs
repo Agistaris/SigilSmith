@@ -7064,6 +7064,8 @@ impl App {
         let mut dependencies_changed = false;
         let updated_native_files = delta.updated_native_files;
         let adopted_native = delta.adopted_native;
+        let modsettings_hash_changed =
+            delta.modsettings_hash != self.library.modsettings_hash;
 
         for update in delta.updates {
             let Some(entry) = self
@@ -7114,7 +7116,8 @@ impl App {
         }
 
         let mut added = 0usize;
-        if !delta.added.is_empty() {
+        // Only import missing mods when modsettings changed to avoid resurrecting removals.
+        if modsettings_hash_changed && !delta.added.is_empty() {
             let mut existing_ids: HashSet<String> = self
                 .library
                 .mods
@@ -7136,8 +7139,6 @@ impl App {
             }
         }
 
-        let modsettings_hash_changed =
-            delta.modsettings_hash != self.library.modsettings_hash;
         if modsettings_hash_changed {
             self.library.modsettings_hash = delta.modsettings_hash.clone();
         }
