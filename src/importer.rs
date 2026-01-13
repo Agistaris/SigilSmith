@@ -1,6 +1,6 @@
 use crate::library::{
-    normalize_times, path_times, resolve_times, InstallTarget, ModEntry, ModSource, PakInfo,
-    TargetKind,
+    clean_source_label, normalize_times, path_times, resolve_times, InstallTarget, ModEntry,
+    ModSource, PakInfo, TargetKind,
 };
 use crate::metadata;
 use crate::sigillink::{SigilLinkEntry, SigilLinkIndex, SIGILLINK_VERSION};
@@ -1058,13 +1058,19 @@ fn import_loose(
     persist_payload_metadata(scan, &staging_root);
     let sigillink = build_sigillink_index(&staging_root, &targets, total_files, reporter)?;
 
-    let name = if let Some(label) = source_label {
-        format!("Loose Files: {label}")
+    let raw_label = source_label
+        .map(|label| label.to_string())
+        .or_else(|| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .map(|name| name.to_string())
+        })
+        .unwrap_or_else(|| "Loose Files".to_string());
+    let cleaned = clean_source_label(&raw_label);
+    let name = if cleaned.is_empty() {
+        raw_label
     } else {
-        path.file_name()
-            .and_then(|s| s.to_str())
-            .map(|s| format!("Loose Files: {s}"))
-            .unwrap_or_else(|| "Loose Files".to_string())
+        cleaned
     };
     let mut times = scan_payload_times(scan);
     if times.created_at.is_none() && times.modified_at.is_none() {
@@ -1304,6 +1310,8 @@ fn collect_import_candidates(root: &Path) -> Result<Vec<ImportCandidate>> {
     let mut mods_dir: Option<PathBuf> = None;
     let mut candidate_dirs: Vec<PathBuf> = Vec::new();
     let mut seen: HashSet<PathBuf> = HashSet::new();
+    let mut root_has_loose_dir = false;
+    let mut root_has_pak = false;
 
     for entry in fs::read_dir(root).context("read import dir")? {
         let entry = match entry {
@@ -1330,6 +1338,7 @@ fn collect_import_candidates(root: &Path) -> Result<Vec<ImportCandidate>> {
                     CandidateKind::ArchiveFile,
                 );
             } else if is_pak_file(&path) {
+                root_has_pak = true;
                 let label = display_pak_label(&path);
                 push_candidate(
                     &mut candidates,
@@ -1342,12 +1351,19 @@ fn collect_import_candidates(root: &Path) -> Result<Vec<ImportCandidate>> {
             }
         } else if file_type.is_dir() {
             let name = entry.file_name().to_string_lossy().to_lowercase();
+            if matches!(name.as_str(), "data" | "generated" | "bin" | "public") {
+                root_has_loose_dir = true;
+            }
             if name == "mods" {
                 mods_dir = Some(path);
             } else {
                 top_level_dirs.push(path);
             }
         }
+    }
+
+    if root_has_loose_dir || root_has_pak {
+        return Ok(Vec::new());
     }
 
     if let Some(mods_dir) = mods_dir {

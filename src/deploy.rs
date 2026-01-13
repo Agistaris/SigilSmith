@@ -692,6 +692,14 @@ fn read_modsettings(path: &Path) -> Result<Save> {
     Ok(parsed)
 }
 
+pub(crate) fn read_modsettings_export(path: &Path) -> Result<Save> {
+    read_modsettings(path)
+}
+
+pub(crate) fn write_modsettings_export(path: &Path, save: &Save) -> Result<()> {
+    write_modsettings(path, save)
+}
+
 fn write_modsettings(path: &Path, save: &Save) -> Result<()> {
     let mut xml = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n".to_string();
     let mut ser = quick_xml::se::Serializer::new(&mut xml);

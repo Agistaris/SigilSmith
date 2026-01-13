@@ -941,7 +941,11 @@ fn handle_browser_mode(app: &mut App, key: KeyEvent, browser: &mut PathBrowser) 
                     path_browser_set_current(app, browser, path);
                     browser.focus = PathBrowserFocus::List;
                 } else if app.path_browser_selectable(&browser.purpose, &path) {
-                    app.apply_path_browser_selection(&browser.purpose, path)?;
+                    app.apply_path_browser_selection(
+                        &browser.purpose,
+                        path,
+                        Some(browser.path_input.as_str()),
+                    )?;
                     return Ok(true);
                 } else {
                     app.status = invalid_hint.to_string();
@@ -1048,7 +1052,11 @@ fn handle_browser_mode(app: &mut App, key: KeyEvent, browser: &mut PathBrowser) 
                     .find(|entry| entry.kind == PathBrowserEntryKind::Select)
                 {
                     if select.selectable {
-                        app.apply_path_browser_selection(&browser.purpose, select.path.clone())?;
+                        app.apply_path_browser_selection(
+                            &browser.purpose,
+                            select.path.clone(),
+                            None,
+                        )?;
                         return Ok(true);
                     }
                     app.status = invalid_hint.to_string();
@@ -1063,6 +1071,7 @@ fn handle_browser_mode(app: &mut App, key: KeyEvent, browser: &mut PathBrowser) 
                                 app.apply_path_browser_selection(
                                     &browser.purpose,
                                     entry.path.clone(),
+                                    None,
                                 )?;
                                 return Ok(true);
                             }
@@ -1077,6 +1086,7 @@ fn handle_browser_mode(app: &mut App, key: KeyEvent, browser: &mut PathBrowser) 
                                 app.apply_path_browser_selection(
                                     &browser.purpose,
                                     entry.path.clone(),
+                                    None,
                                 )?;
                                 return Ok(true);
                             }
@@ -1188,7 +1198,9 @@ fn handle_input_mode(
                 InputPurpose::DuplicateProfile { source } => {
                     format!("Duplicate cancelled: {source}")
                 }
-                InputPurpose::ExportProfile { profile } => format!("Export cancelled: {profile}"),
+                InputPurpose::ExportProfile { profile, .. } => {
+                    format!("Export cancelled: {profile}")
+                }
                 InputPurpose::ImportProfile | InputPurpose::ImportPath => {
                     "Import cancelled".to_string()
                 }
@@ -4423,7 +4435,7 @@ fn mode_toast(app: &App) -> Option<(String, ToastLevel)> {
                     let name = value("<new name>");
                     format!("Duplicate \"{source}\" -> \"{name}\" | {hint}")
                 }
-                InputPurpose::ExportProfile { profile } => {
+                InputPurpose::ExportProfile { profile, .. } => {
                     let path = value("<path>");
                     format!("Export \"{profile}\": {path} | {hint}")
                 }

@@ -121,6 +121,7 @@ impl Profile {
                 self.order.push(ProfileEntry {
                     id: id.clone(),
                     enabled: false,
+                    missing_label: None,
                 });
             }
         }
@@ -147,6 +148,8 @@ impl Profile {
 pub struct ProfileEntry {
     pub id: String,
     pub enabled: bool,
+    #[serde(default)]
+    pub missing_label: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
