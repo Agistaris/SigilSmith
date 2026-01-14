@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.7.1
+
+- Nudge left-side panel widths for improved layout balance.
+
 ## 0.7.0
 
 - Treat missing .pak dependencies as missing (not disabled) to block auto-enabling ghost requirements.

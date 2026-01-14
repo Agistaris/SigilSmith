@@ -32,7 +32,7 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
-const SIDE_PANEL_WIDTH: u16 = 48;
+const SIDE_PANEL_WIDTH: u16 = 43;
 const STATUS_WIDTH: u16 = SIDE_PANEL_WIDTH;
 const STATUS_HEIGHT: u16 = 3;
 const HEADER_HEIGHT: u16 = 3;
