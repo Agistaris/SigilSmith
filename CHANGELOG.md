@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.6.10
+## 0.7.0
 
 - Treat missing .pak dependencies as missing (not disabled) to block auto-enabling ghost requirements.
 - Only auto-prompt missing .pak files for enabled mods; missing entries still render with a strike/marker.
