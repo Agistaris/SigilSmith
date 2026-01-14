@@ -7263,7 +7263,8 @@ impl App {
         }
         deps.iter()
             .filter(|dep| {
-                let ids = resolved_dependency_ids(lookup, dep, mod_entry);
+                let mut ids = resolved_dependency_ids(lookup, dep, mod_entry);
+                ids.retain(|id| !self.sigillink_missing_pak(id));
                 if ids.is_empty() {
                     return !is_unverified_dependency(dep);
                 }
@@ -7288,7 +7289,8 @@ impl App {
         let mut missing = 0usize;
         let mut disabled = 0usize;
         for dep in deps {
-            let ids = resolved_dependency_ids(lookup, &dep, mod_entry);
+            let mut ids = resolved_dependency_ids(lookup, &dep, mod_entry);
+            ids.retain(|id| !self.sigillink_missing_pak(id));
             if ids.is_empty() {
                 if !is_unverified_dependency(&dep) {
                     missing += 1;
@@ -9697,19 +9699,34 @@ impl App {
             return;
         }
 
+        self.refresh_sigillink_missing_paks();
+
         let lookup = DependencyLookup::new(&self.library.mods);
         let mut present: HashSet<String> = HashSet::new();
         let mut missing = Vec::new();
+        let mut missing_mod_ids: HashSet<String> = HashSet::new();
         for mod_entry in &mods {
             for dep in self.cached_mod_dependencies(mod_entry) {
-                let ids = resolved_dependency_ids(&lookup, &dep, mod_entry);
+                let resolved_ids = resolved_dependency_ids(&lookup, &dep, mod_entry);
+                let mut ids: Vec<String> = resolved_ids
+                    .iter()
+                    .filter(|id| !self.sigillink_missing_pak(id))
+                    .cloned()
+                    .collect();
+                if ids.is_empty() && !resolved_ids.is_empty() {
+                    for id in resolved_ids {
+                        if self.sigillink_missing_pak(&id) {
+                            missing_mod_ids.insert(id);
+                        }
+                    }
+                }
                 if ids.is_empty() {
                     if is_unverified_dependency(&dep) {
                         continue;
                     }
                     missing.push(dep);
                 } else {
-                    for id in ids {
+                    for id in ids.drain(..) {
                         present.insert(id);
                     }
                 }
@@ -9717,6 +9734,19 @@ impl App {
         }
         missing.sort();
         missing.dedup();
+
+        if !missing_mod_ids.is_empty() {
+            let mut ids: Vec<String> = missing_mod_ids.into_iter().collect();
+            ids.sort();
+            let missing_items = self.collect_sigillink_missing_items(&ids);
+            for item in &missing_items {
+                self.sigillink_missing_paks.insert(item.mod_id.clone());
+            }
+            self.open_sigillink_missing_queue(SigilLinkMissingTrigger::Enable, missing_items);
+            self.status = "Missing mod files; enable blocked".to_string();
+            self.log_warn("Missing mod files; enable blocked".to_string());
+            return;
+        }
 
         if !missing.is_empty() {
             if !self.app_config.offer_dependency_downloads
@@ -9846,9 +9876,6 @@ impl App {
         if !mod_entry.has_target_kind(TargetKind::Pak) {
             return false;
         }
-        if !mod_entry.is_target_enabled(TargetKind::Pak) {
-            return false;
-        }
         resolve_pak_paths(
             mod_entry,
             &self.config.sigillink_cache_root(),
@@ -9932,6 +9959,24 @@ impl App {
         }
         if self.sigillink_missing_queue.is_some() {
             return;
+        }
+        if matches!(trigger, SigilLinkMissingTrigger::Auto) {
+            let enabled_ids: HashSet<String> = self
+                .library
+                .active_profile()
+                .map(|profile| {
+                    profile
+                        .order
+                        .iter()
+                        .filter(|entry| entry.enabled)
+                        .map(|entry| entry.id.clone())
+                        .collect()
+                })
+                .unwrap_or_default();
+            items.retain(|item| enabled_ids.contains(&item.mod_id));
+            if items.is_empty() {
+                return;
+            }
         }
         if matches!(trigger, SigilLinkMissingTrigger::Auto) {
             items.retain(|item| !self.sigillink_missing_paks_ignored.contains(&item.mod_id));

@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.6.10
+
+- Treat missing .pak dependencies as missing (not disabled) to block auto-enabling ghost requirements.
+- Only auto-prompt missing .pak files for enabled mods; missing entries still render with a strike/marker.
+
 ## 0.6.9
 
 - Treat missing .pak mods as disabled in the mod stack (toggles + counts) and surface a missing-files queue with Nexus links.
