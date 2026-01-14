@@ -874,7 +874,7 @@ fn debug_smart_rank(_app: &App) -> Result<()> {
 #[cfg(debug_assertions)]
 fn debug_smart_rank_warmup(app: &mut App) -> Result<()> {
     app.debug_smart_rank_warmup()?;
-    println!("Smart rank warmup cached");
+    println!("SigilLink ranking warmup cached");
     Ok(())
 }
 
@@ -1173,12 +1173,14 @@ fn print_help() {
         "  sigilsmith deps resolved        List dependency aliases resolved to installed mods"
     );
     println!("  sigilsmith deps debug <mod>     Show dependency matching details");
-    println!("  sigilsmith debug smart-rank     Debug smart rank cache (debug builds)");
-    println!("  sigilsmith debug warmup         Build smart rank cache (debug builds)");
+    println!("  sigilsmith debug smart-rank     Debug SigilLink ranking cache (debug builds)");
+    println!("  sigilsmith debug warmup         Build SigilLink ranking cache (debug builds)");
     println!("  sigilsmith debug cache          Debug cache + modsettings state (debug builds)");
-    println!("  sigilsmith debug cache-validate Validate smart rank cache (debug builds)");
-    println!("  sigilsmith debug cache-sim      Simulate smart rank edits (debug builds)");
-    println!("  sigilsmith debug scenario       Run smart-rank edit scenario (debug builds)");
+    println!("  sigilsmith debug cache-validate Validate SigilLink ranking cache (debug builds)");
+    println!("  sigilsmith debug cache-sim      Simulate SigilLink ranking edits (debug builds)");
+    println!(
+        "  sigilsmith debug scenario       Run SigilLink ranking edit scenario (debug builds)"
+    );
     println!("  sigilsmith debug warmup-block   Report warmup edit gating (debug builds)");
     println!("  sigilsmith debug restart-check  Validate cache hit on restart (debug builds)");
     println!("  sigilsmith debug warmup-flow    Run warmup + edits flow (debug builds)");

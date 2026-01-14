@@ -459,6 +459,10 @@ enum SettingsItemKind {
     ActionMoveSigilLinkCache,
     ActionClearFrameworkCaches,
     ActionClearSigilLinkCaches,
+    SigilLinkHeader,
+    SigilLinkToggle,
+    SigilLinkInfo,
+    ActionClearSigilLinkPins,
     ToggleModDelete,
     ToggleProfileDelete,
     ToggleEnableModsAfterImport,
@@ -481,6 +485,7 @@ struct SettingsItem {
     label: String,
     kind: SettingsItemKind,
     checked: Option<bool>,
+    selectable: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -490,66 +495,120 @@ struct ExportMenuItem {
 }
 
 fn settings_items(app: &App) -> Vec<SettingsItem> {
+    let sigillink_meta = app.sigillink_rank_meta();
+    let last_rank = format_rank_timestamp(sigillink_meta.last_ranked_at);
+    let last_diff = format!(
+        "{} moves, {} pins",
+        sigillink_meta.last_moves, sigillink_meta.last_pins
+    );
     vec![
         SettingsItem {
             label: "Configure Game Paths".to_string(),
             kind: SettingsItemKind::ActionSetupPaths,
             checked: None,
+            selectable: true,
         },
         SettingsItem {
             label: "Move SigilLink Cache".to_string(),
             kind: SettingsItemKind::ActionMoveSigilLinkCache,
             checked: None,
+            selectable: true,
         },
         SettingsItem {
             label: "Clear Framework Caches".to_string(),
             kind: SettingsItemKind::ActionClearFrameworkCaches,
             checked: None,
+            selectable: true,
         },
         SettingsItem {
             label: "Clear SigilLink Caches".to_string(),
             kind: SettingsItemKind::ActionClearSigilLinkCaches,
             checked: None,
+            selectable: true,
+        },
+        SettingsItem {
+            label: "SigilLink".to_string(),
+            kind: SettingsItemKind::SigilLinkHeader,
+            checked: None,
+            selectable: false,
+        },
+        SettingsItem {
+            label: "Enable SigilLink Ranking".to_string(),
+            kind: SettingsItemKind::SigilLinkToggle,
+            checked: Some(app.sigillink_ranking_enabled()),
+            selectable: true,
+        },
+        SettingsItem {
+            label: format!("Last rank: {last_rank}"),
+            kind: SettingsItemKind::SigilLinkInfo,
+            checked: None,
+            selectable: false,
+        },
+        SettingsItem {
+            label: format!("Last diff: {last_diff}"),
+            kind: SettingsItemKind::SigilLinkInfo,
+            checked: None,
+            selectable: false,
+        },
+        SettingsItem {
+            label: "Auto-rank: import + enable".to_string(),
+            kind: SettingsItemKind::SigilLinkInfo,
+            checked: None,
+            selectable: false,
+        },
+        SettingsItem {
+            label: "Clear all SigilLink pins".to_string(),
+            kind: SettingsItemKind::ActionClearSigilLinkPins,
+            checked: None,
+            selectable: true,
         },
         SettingsItem {
             label: "Confirm mod delete".to_string(),
             kind: SettingsItemKind::ToggleModDelete,
             checked: Some(app.app_config.confirm_mod_delete),
+            selectable: true,
         },
         SettingsItem {
             label: "Confirm profile delete".to_string(),
             kind: SettingsItemKind::ToggleProfileDelete,
             checked: Some(app.app_config.confirm_profile_delete),
+            selectable: true,
         },
         SettingsItem {
             label: "Auto dependency downloads".to_string(),
             kind: SettingsItemKind::ToggleDependencyDownloads,
             checked: Some(app.app_config.offer_dependency_downloads),
+            selectable: true,
         },
         SettingsItem {
             label: "Startup dependency notice".to_string(),
             kind: SettingsItemKind::ToggleStartupDependencyNotice,
             checked: Some(app.app_config.show_startup_dependency_notice),
+            selectable: true,
         },
         SettingsItem {
             label: "Warn on missing dependencies".to_string(),
             kind: SettingsItemKind::ToggleDependencyWarnings,
             checked: Some(app.app_config.warn_missing_dependencies),
+            selectable: true,
         },
         SettingsItem {
             label: "Enable mods after import".to_string(),
             kind: SettingsItemKind::ToggleEnableModsAfterImport,
             checked: Some(app.app_config.enable_mods_after_import),
+            selectable: true,
         },
         SettingsItem {
             label: "Delete mod files on remove".to_string(),
             kind: SettingsItemKind::ToggleDeleteModFilesOnRemove,
             checked: Some(app.app_config.delete_mod_files_on_remove),
+            selectable: true,
         },
         SettingsItem {
             label: update_menu_label(app),
             kind: SettingsItemKind::ActionCheckUpdates,
             checked: None,
+            selectable: true,
         },
     ]
 }
@@ -646,13 +705,36 @@ fn handle_settings_menu(app: &mut App, key: KeyEvent) -> Result<()> {
     let items_len = items.len();
     match key.code {
         KeyCode::Up | KeyCode::Char('k') | KeyCode::Char('K') => {
-            menu.selected = menu.selected.saturating_sub(1);
+            if items_len == 0 {
+                return Ok(());
+            }
+            let mut next = menu.selected;
+            for _ in 0..items_len {
+                next = if next == 0 { items_len - 1 } else { next - 1 };
+                if items[next].selectable {
+                    break;
+                }
+            }
+            menu.selected = next;
         }
         KeyCode::Down | KeyCode::Char('j') | KeyCode::Char('J') => {
-            menu.selected = (menu.selected + 1).min(items_len.saturating_sub(1));
+            if items_len == 0 {
+                return Ok(());
+            }
+            let mut next = menu.selected;
+            for _ in 0..items_len {
+                next = (next + 1) % items_len;
+                if items[next].selectable {
+                    break;
+                }
+            }
+            menu.selected = next;
         }
         KeyCode::Enter | KeyCode::Char(' ') => {
             if let Some(item) = items.get(menu.selected) {
+                if !item.selectable {
+                    return Ok(());
+                }
                 match item.kind {
                     SettingsItemKind::ActionSetupPaths => {
                         app.close_settings_menu();
@@ -678,6 +760,12 @@ fn handle_settings_menu(app: &mut App, key: KeyEvent) -> Result<()> {
                     }
                     SettingsItemKind::ToggleDeleteModFilesOnRemove => {
                         if let Err(err) = app.toggle_delete_mod_files_on_remove() {
+                            app.status = format!("Settings update failed: {err}");
+                            app.log_error(format!("Settings update failed: {err}"));
+                        }
+                    }
+                    SettingsItemKind::SigilLinkToggle => {
+                        if let Err(err) = app.toggle_sigillink_ranking() {
                             app.status = format!("Settings update failed: {err}");
                             app.log_error(format!("Settings update failed: {err}"));
                         }
@@ -710,6 +798,9 @@ fn handle_settings_menu(app: &mut App, key: KeyEvent) -> Result<()> {
                     SettingsItemKind::ActionClearSigilLinkCaches => {
                         app.clear_sigillink_caches();
                     }
+                    SettingsItemKind::ActionClearSigilLinkPins => {
+                        app.prompt_clear_sigillink_pins();
+                    }
                     SettingsItemKind::ActionCheckUpdates => {
                         if matches!(app.update_status, UpdateStatus::Available { .. }) {
                             app.apply_ready_update();
@@ -717,6 +808,7 @@ fn handle_settings_menu(app: &mut App, key: KeyEvent) -> Result<()> {
                             app.request_update_check();
                         }
                     }
+                    SettingsItemKind::SigilLinkHeader | SettingsItemKind::SigilLinkInfo => {}
                 }
             }
         }
@@ -903,6 +995,11 @@ fn handle_mods_mode(app: &mut App, key: KeyEvent) -> Result<()> {
             if mods.contains(KeyModifiers::CONTROL) =>
         {
             app.enter_mod_filter();
+        }
+        (KeyCode::Char('r'), mods) | (KeyCode::Char('R'), mods)
+            if mods.contains(KeyModifiers::CONTROL) =>
+        {
+            app.restore_sigillink_rank_for_selected();
         }
         (KeyCode::Char('/'), _) => app.enter_mod_filter(),
         (KeyCode::Char('l'), mods) | (KeyCode::Char('L'), mods)
@@ -1681,6 +1778,14 @@ fn draw(frame: &mut Frame<'_>, app: &mut App) {
         label_style,
         value_style: Style::default().fg(theme.muted),
     });
+    if app.sigillink_ranking_enabled() {
+        context_rows.push(KvRow {
+            label: "SigilLink".to_string(),
+            value: format!("ON  Pins: {}", app.sigillink_pin_count()),
+            label_style,
+            value_style: Style::default().fg(theme.success),
+        });
+    }
     context_rows.push(KvRow {
         label: "Help".to_string(),
         value: "? shortcuts".to_string(),
@@ -4021,6 +4126,9 @@ fn draw_smart_rank_preview(frame: &mut Frame<'_>, app: &mut App, theme: &Theme) 
 
     let inner_width = preview_area.width.saturating_sub(3) as usize;
     let inner_height = preview_area.height.saturating_sub(2) as usize;
+    let notice = app
+        .sigillink_preview_notice()
+        .map(|value| value.to_string());
     let render = build_smart_rank_preview_render(
         preview,
         theme,
@@ -4028,6 +4136,7 @@ fn draw_smart_rank_preview(frame: &mut Frame<'_>, app: &mut App, theme: &Theme) 
         inner_height,
         app.smart_rank_scroll,
         app.smart_rank_view,
+        notice,
     );
 
     render_modal_backdrop(frame, outer_area, theme);
@@ -4037,7 +4146,7 @@ fn draw_smart_rank_preview(frame: &mut Frame<'_>, app: &mut App, theme: &Theme) 
         .border_style(Style::default().fg(theme.accent_soft))
         .style(Style::default().bg(theme.header_bg))
         .title(Span::styled(
-            "AI Smart Ranking",
+            "SigilLink Intelligent Ranking",
             Style::default()
                 .fg(theme.accent)
                 .add_modifier(Modifier::BOLD),
@@ -4155,6 +4264,7 @@ fn build_smart_rank_preview_render(
     height: usize,
     scroll: usize,
     view: crate::app::SmartRankView,
+    notice: Option<String>,
 ) -> SmartRankPreviewRender {
     if width == 0 || height == 0 {
         return SmartRankPreviewRender {
@@ -4164,6 +4274,16 @@ fn build_smart_rank_preview_render(
     }
 
     let mut lines = Vec::new();
+    let has_notice = notice.is_some();
+    if let Some(notice) = notice {
+        lines.push(Line::from(Span::styled(
+            notice,
+            Style::default()
+                .fg(theme.success)
+                .add_modifier(Modifier::BOLD),
+        )));
+        lines.push(Line::from(""));
+    }
     let report = &preview.report;
     lines.push(Line::from(Span::styled(
         format!("Moved: {} | Scan: {}ms", report.moved, report.elapsed_ms),
@@ -4317,8 +4437,14 @@ fn build_smart_rank_preview_render(
     let mut body_lines = Vec::new();
     if matches!(view, crate::app::SmartRankView::Changes) {
         if preview.moves.is_empty() {
+            let empty_label =
+                if has_notice && preview.warnings.is_empty() && preview.report.missing == 0 {
+                    "No changes needed."
+                } else {
+                    "No ordering changes detected."
+                };
             body_lines.push(Line::from(Span::styled(
-                "No ordering changes detected.",
+                empty_label,
                 Style::default().fg(theme.muted),
             )));
         } else {
@@ -4700,6 +4826,23 @@ fn build_settings_menu_lines(app: &App, theme: &Theme, selected: usize) -> Vec<L
 
     let items = settings_items(app);
     for (index, item) in items.iter().enumerate() {
+        if !item.selectable {
+            let (label, style) = match item.kind {
+                SettingsItemKind::SigilLinkHeader => (
+                    item.label.to_string(),
+                    Style::default()
+                        .fg(theme.accent)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                _ => (
+                    format!("  {}", item.label),
+                    Style::default().fg(theme.muted),
+                ),
+            };
+            lines.push(Line::from(Span::styled(label, style)));
+            continue;
+        }
+
         let prefix = if index == selected { ">" } else { " " };
         let style = if index == selected {
             Style::default()
@@ -4713,6 +4856,7 @@ fn build_settings_menu_lines(app: &App, theme: &Theme, selected: usize) -> Vec<L
             | SettingsItemKind::ActionMoveSigilLinkCache
             | SettingsItemKind::ActionClearFrameworkCaches
             | SettingsItemKind::ActionClearSigilLinkCaches
+            | SettingsItemKind::ActionClearSigilLinkPins
             | SettingsItemKind::ActionCheckUpdates => vec![
                 Span::styled(prefix.to_string(), style),
                 Span::raw(" "),
@@ -4721,7 +4865,8 @@ fn build_settings_menu_lines(app: &App, theme: &Theme, selected: usize) -> Vec<L
                 Span::styled(item.label.to_string(), style),
             ],
             SettingsItemKind::ToggleEnableModsAfterImport
-            | SettingsItemKind::ToggleDeleteModFilesOnRemove => {
+            | SettingsItemKind::ToggleDeleteModFilesOnRemove
+            | SettingsItemKind::SigilLinkToggle => {
                 let enabled = item.checked.unwrap_or(false);
                 let state_label = if enabled { "ON" } else { "OFF" };
                 let state_style = Style::default()
@@ -4757,6 +4902,9 @@ fn build_settings_menu_lines(app: &App, theme: &Theme, selected: usize) -> Vec<L
                     Span::styled(item.label.to_string(), style),
                 ]
             }
+            SettingsItemKind::SigilLinkHeader | SettingsItemKind::SigilLinkInfo => {
+                vec![Span::styled(item.label.to_string(), style)]
+            }
         };
         lines.push(Line::from(row));
     }
@@ -4768,7 +4916,9 @@ fn build_settings_menu_lines(app: &App, theme: &Theme, selected: usize) -> Vec<L
 
     lines.push(Line::from(Span::styled(
         "Hotkeys",
-        Style::default().fg(theme.accent).add_modifier(Modifier::BOLD),
+        Style::default()
+            .fg(theme.accent)
+            .add_modifier(Modifier::BOLD),
     )));
 
     lines.push(Line::from(Span::styled(
@@ -4780,7 +4930,6 @@ fn build_settings_menu_lines(app: &App, theme: &Theme, selected: usize) -> Vec<L
         modlist_line,
         Style::default().fg(theme.muted),
     )));
-
 
     let root = if app.config.game_root.as_os_str().is_empty() {
         "<not set>".to_string()
@@ -5137,7 +5286,7 @@ fn draw_startup_overlay(frame: &mut Frame<'_>, app: &App, theme: &Theme) {
             .add_modifier(Modifier::BOLD),
     )));
     lines.push(Line::from(Span::styled(
-        "Loading mods, metadata, and smart ranking…",
+        "Loading mods, metadata, and SigilLink ranking…",
         Style::default().fg(theme.text),
     )));
     lines.push(Line::from(Span::styled(
@@ -5540,11 +5689,20 @@ fn row_for_entry(
             Span::styled(missing_text, missing_style),
             Span::styled(disabled_text, disabled_style),
         ]));
+        let order_style = if app.sigillink_ranking_enabled() {
+            if app.sigillink_is_pinned(&mod_entry.id) {
+                Style::default().fg(theme.warning)
+            } else {
+                Style::default().fg(theme.success)
+            }
+        } else {
+            Style::default().fg(theme.text)
+        };
         Row::new(vec![
             Cell::from(enabled_text.to_string()).style(enabled_style),
             Cell::from(native_marker.to_string()).style(native_style),
             dep_cell,
-            Cell::from((order_index + 1).to_string()),
+            Cell::from((order_index + 1).to_string()).style(order_style),
             Cell::from(kind.to_string()).style(kind_style),
             Cell::from(state_label).style(state_style),
             Cell::from(created_text).style(Style::default().fg(theme.muted)),
@@ -5584,6 +5742,23 @@ fn truncate_text(value: &str, max_width: usize) -> String {
     let mut out = value.chars().take(take).collect::<String>();
     out.push_str("...");
     out
+}
+
+fn format_rank_timestamp(timestamp: Option<i64>) -> String {
+    let Some(timestamp) = timestamp else {
+        return "never".to_string();
+    };
+    if timestamp <= 0 {
+        return "never".to_string();
+    }
+    let Some(date) = format_short_date(timestamp) else {
+        return "never".to_string();
+    };
+    let time = time::OffsetDateTime::from_unix_timestamp(timestamp)
+        .ok()
+        .map(|dt| format!("{:02}:{:02}", dt.hour(), dt.minute()))
+        .unwrap_or_else(|| "--:--".to_string());
+    format!("{date} {time}")
 }
 
 fn format_short_date(timestamp: i64) -> Option<String> {
@@ -5832,6 +6007,14 @@ fn build_details(app: &App, theme: &Theme, width: usize) -> Vec<Line<'static>> {
         label_style,
         value_style,
     });
+    if app.sigillink_ranking_enabled() && app.sigillink_is_pinned(&entry.id) {
+        rows.push(KvRow {
+            label: "SigilLink pin".to_string(),
+            value: "ON (Ctrl+R to restore)".to_string(),
+            label_style,
+            value_style: Style::default().fg(theme.warning),
+        });
+    }
     let type_label = mod_entry.display_type();
     rows.push(KvRow {
         label: "Type".to_string(),
@@ -6482,6 +6665,10 @@ fn hotkey_rows_for_focus(focus: Focus) -> HotkeyRows {
                     action: "All On/Off/Invert".to_string(),
                 },
                 LegendRow {
+                    key: "Ctrl+R".to_string(),
+                    action: "Restore SigilLink ranking".to_string(),
+                },
+                LegendRow {
                     key: "c".to_string(),
                     action: "Clear overrides".to_string(),
                 },
@@ -6878,7 +7065,7 @@ fn help_sections() -> Vec<HelpSection> {
             ],
         },
         HelpSection {
-            title: "Smart Rank Preview",
+            title: "SigilLink Intelligent Ranking Preview",
             rows: vec![
                 LegendRow {
                     key: "Enter/Y".to_string(),
@@ -6907,7 +7094,7 @@ fn help_sections() -> Vec<HelpSection> {
             ],
         },
         HelpSection {
-            title: "Smart Ranking",
+            title: "SigilLink Intelligent Ranking",
             rows: vec![
                 LegendRow {
                     key: "What".to_string(),

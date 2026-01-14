@@ -7,6 +7,24 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
+pub const SIGILLINK_RANKING_PROFILE: &str = "__sigillink_ranking__";
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct SigilLinkRankMeta {
+    #[serde(default)]
+    pub last_ranked_at: Option<i64>,
+    #[serde(default)]
+    pub last_moves: usize,
+    #[serde(default)]
+    pub last_pins: usize,
+    #[serde(default)]
+    pub last_inputs_hash: Option<String>,
+}
+
+pub fn is_sigillink_ranking_profile(name: &str) -> bool {
+    name == SIGILLINK_RANKING_PROFILE
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Library {
     pub mods: Vec<ModEntry>,
@@ -82,6 +100,9 @@ impl Library {
         let mod_ids: Vec<String> = self.mods.iter().map(|m| m.id.clone()).collect();
         let mod_set: HashSet<&str> = mod_ids.iter().map(|id| id.as_str()).collect();
         for profile in &mut self.profiles {
+            if is_sigillink_ranking_profile(&profile.name) {
+                continue;
+            }
             profile.ensure_mods(&mod_ids);
         }
         self.dependency_blocks
@@ -103,6 +124,10 @@ pub struct Profile {
     pub order: Vec<ProfileEntry>,
     #[serde(default)]
     pub file_overrides: Vec<FileOverride>,
+    #[serde(default)]
+    pub sigillink_pins: HashMap<String, usize>,
+    #[serde(default)]
+    pub sigillink_meta: SigilLinkRankMeta,
 }
 
 impl Profile {
@@ -111,6 +136,8 @@ impl Profile {
             name: name.to_string(),
             order: Vec::new(),
             file_overrides: Vec::new(),
+            sigillink_pins: HashMap::new(),
+            sigillink_meta: SigilLinkRankMeta::default(),
         }
     }
 
@@ -127,6 +154,8 @@ impl Profile {
         }
         self.file_overrides
             .retain(|override_entry| mod_set.contains(&override_entry.mod_id));
+        self.sigillink_pins
+            .retain(|mod_id, _| mod_set.contains(&mod_id));
     }
 
     pub fn move_up(&mut self, index: usize) {

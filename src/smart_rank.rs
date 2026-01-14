@@ -609,7 +609,7 @@ fn topological_rank<'a>(
             if !reorder_set.contains(dep) {
                 if mod_map.contains_key(dep) {
                     warnings.push(format!(
-                        "Smart rank dependency skipped for {}: {} in different group",
+                        "SigilLink ranking dependency skipped for {}: {} in different group",
                         display_mod_name(&item.id, mod_map),
                         display_mod_name(dep, mod_map)
                     ));
@@ -652,8 +652,9 @@ fn topological_rank<'a>(
     }
 
     if remaining > 0 {
-        warnings
-            .push("Smart rank dependency cycle detected; falling back to score order".to_string());
+        warnings.push(
+            "SigilLink ranking dependency cycle detected; falling back to score order".to_string(),
+        );
         let mut fallback: Vec<&RankItem> = items
             .iter()
             .filter(|item| reorder_set.contains(&item.id))
@@ -736,7 +737,7 @@ fn scan_mod_cache_entry(
             }
             if file_paths.is_empty() {
                 warning = Some(format!(
-                    "Smart rank scan empty for {}",
+                    "SigilLink ranking scan empty for {}",
                     mod_entry.display_name()
                 ));
             } else {
@@ -745,7 +746,7 @@ fn scan_mod_cache_entry(
         }
         Err(err) => {
             warning = Some(format!(
-                "Smart rank scan failed for {}: {err}",
+                "SigilLink ranking scan failed for {}: {err}",
                 mod_entry.display_name()
             ));
         }

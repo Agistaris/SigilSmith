@@ -25,6 +25,10 @@ pub struct AppConfig {
     pub dependency_search_copy_preference: Option<bool>,
     #[serde(default = "default_true")]
     pub show_startup_dependency_notice: bool,
+    #[serde(default = "default_false")]
+    pub sigillink_onboarded: bool,
+    #[serde(default = "default_false")]
+    pub sigillink_ranking_enabled: bool,
 }
 
 impl AppConfig {
@@ -53,6 +57,8 @@ impl AppConfig {
             warn_missing_dependencies: true,
             dependency_search_copy_preference: None,
             show_startup_dependency_notice: true,
+            sigillink_onboarded: false,
+            sigillink_ranking_enabled: false,
         };
         config.save()?;
         Ok(config)
