@@ -609,7 +609,7 @@ fn topological_rank<'a>(
             if !reorder_set.contains(dep) {
                 if mod_map.contains_key(dep) {
                     warnings.push(format!(
-                        "SigilLink ranking dependency skipped for {}: {} in different group",
+                        "SigiLink ranking dependency skipped for {}: {} in different group",
                         display_mod_name(&item.id, mod_map),
                         display_mod_name(dep, mod_map)
                     ));
@@ -653,7 +653,7 @@ fn topological_rank<'a>(
 
     if remaining > 0 {
         warnings.push(
-            "SigilLink ranking dependency cycle detected; falling back to score order".to_string(),
+            "SigiLink ranking dependency cycle detected; falling back to score order".to_string(),
         );
         let mut fallback: Vec<&RankItem> = items
             .iter()
@@ -737,7 +737,7 @@ fn scan_mod_cache_entry(
             }
             if file_paths.is_empty() {
                 warning = Some(format!(
-                    "SigilLink ranking scan empty for {}",
+                    "SigiLink ranking scan empty for {}",
                     mod_entry.display_name()
                 ));
             } else {
@@ -746,7 +746,7 @@ fn scan_mod_cache_entry(
         }
         Err(err) => {
             warning = Some(format!(
-                "SigilLink ranking scan failed for {}: {err}",
+                "SigiLink ranking scan failed for {}: {err}",
                 mod_entry.display_name()
             ));
         }
@@ -1173,6 +1173,8 @@ fn is_ignored_mod_path(path: &Path) -> bool {
     path.components().any(|component| {
         let part = component.as_os_str().to_string_lossy();
         part.eq_ignore_ascii_case("__MACOSX")
+            || part.eq_ignore_ascii_case(".ds_store")
+            || part.eq_ignore_ascii_case("thumbs.db")
             || part == ".git"
             || part == ".svn"
             || part == ".vscode"

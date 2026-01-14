@@ -240,7 +240,7 @@ impl ImportStage {
             ImportStage::Extracting => "Extracting",
             ImportStage::Indexing => "Indexing",
             ImportStage::Installing => "Installing",
-            ImportStage::Linking => "Linking (SigilLink Cache)",
+            ImportStage::Linking => "Linking (SigiLink Cache)",
             ImportStage::Finalizing => "Finalizing",
         }
     }
@@ -1141,7 +1141,7 @@ fn build_sigillink_index(
             ImportStage::Linking,
             0,
             total_files.max(1),
-            Some("Building SigilLink cache".to_string()),
+            Some("Building SigiLink cache".to_string()),
         );
     }
 
@@ -1552,6 +1552,8 @@ fn is_ignored_path(path: &Path) -> bool {
     path.components().any(|component| {
         let part = component.as_os_str().to_string_lossy();
         part.eq_ignore_ascii_case("__MACOSX")
+            || part.eq_ignore_ascii_case(".ds_store")
+            || part.eq_ignore_ascii_case("thumbs.db")
             || part == ".git"
             || part == ".svn"
             || part == ".vscode"

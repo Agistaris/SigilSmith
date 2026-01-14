@@ -22,7 +22,7 @@ use ratatui::{
     text::{Line, Span},
     widgets::{
         Block, BorderType, Borders, Cell, Clear, Gauge, List, ListItem, ListState, Padding,
-        Paragraph, Row, Scrollbar, ScrollbarOrientation, ScrollbarState, Table, TableState,
+        Paragraph, Row, Scrollbar, ScrollbarOrientation, ScrollbarState, Table, TableState, Wrap,
     },
 };
 use std::{
@@ -32,7 +32,7 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
-const SIDE_PANEL_WIDTH: u16 = 44;
+const SIDE_PANEL_WIDTH: u16 = 48;
 const STATUS_WIDTH: u16 = SIDE_PANEL_WIDTH;
 const STATUS_HEIGHT: u16 = 3;
 const HEADER_HEIGHT: u16 = 3;
@@ -203,6 +203,9 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Result<()> {
     if app.dependency_queue_active() {
         return handle_dependency_queue(app, key);
     }
+    if app.paths_overlay_open {
+        return handle_paths_overlay(app, key);
+    }
     if app.help_open {
         return handle_help_mode(app, key);
     }
@@ -256,6 +259,13 @@ fn handle_dialog_mode(app: &mut App, key: KeyEvent) -> Result<()> {
             app.dialog_choice_left();
         }
         KeyCode::Right | KeyCode::Char('l') | KeyCode::Char('L') | KeyCode::Tab => {
+            if matches!(key.code, KeyCode::Tab) {
+                if let Some(dialog) = app.dialog.as_ref() {
+                    if matches!(dialog.kind, DialogKind::SigilLinkOnboarding) {
+                        return Ok(());
+                    }
+                }
+            }
             app.dialog_choice_right();
         }
         KeyCode::Up | KeyCode::Char('k') | KeyCode::Char('K') => {
@@ -347,6 +357,16 @@ fn handle_help_mode(app: &mut App, key: KeyEvent) -> Result<()> {
         }
         KeyCode::End => {
             app.help_scroll = usize::MAX;
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+fn handle_paths_overlay(app: &mut App, key: KeyEvent) -> Result<()> {
+    match key.code {
+        KeyCode::Esc | KeyCode::Enter | KeyCode::Char(' ') => {
+            app.close_paths_overlay();
         }
         _ => {}
     }
@@ -456,6 +476,7 @@ fn handle_dependency_queue(app: &mut App, key: KeyEvent) -> Result<()> {
 #[derive(Debug, Clone, Copy)]
 enum SettingsItemKind {
     ActionSetupPaths,
+    ActionShowPaths,
     ActionMoveSigilLinkCache,
     ActionClearFrameworkCaches,
     ActionClearSigilLinkCaches,
@@ -501,7 +522,7 @@ fn settings_items(app: &App) -> Vec<SettingsItem> {
         "{} moves, {} pins",
         sigillink_meta.last_moves, sigillink_meta.last_pins
     );
-    vec![
+    let mut items = vec![
         SettingsItem {
             label: "Configure Game Paths".to_string(),
             kind: SettingsItemKind::ActionSetupPaths,
@@ -509,8 +530,8 @@ fn settings_items(app: &App) -> Vec<SettingsItem> {
             selectable: true,
         },
         SettingsItem {
-            label: "Move SigilLink Cache".to_string(),
-            kind: SettingsItemKind::ActionMoveSigilLinkCache,
+            label: "Display SigilSmith Paths".to_string(),
+            kind: SettingsItemKind::ActionShowPaths,
             checked: None,
             selectable: true,
         },
@@ -521,19 +542,64 @@ fn settings_items(app: &App) -> Vec<SettingsItem> {
             selectable: true,
         },
         SettingsItem {
-            label: "Clear SigilLink Caches".to_string(),
-            kind: SettingsItemKind::ActionClearSigilLinkCaches,
-            checked: None,
+            label: "Confirm Mod Delete".to_string(),
+            kind: SettingsItemKind::ToggleModDelete,
+            checked: Some(app.app_config.confirm_mod_delete),
             selectable: true,
         },
         SettingsItem {
-            label: "SigilLink".to_string(),
+            label: "Confirm Profile Delete".to_string(),
+            kind: SettingsItemKind::ToggleProfileDelete,
+            checked: Some(app.app_config.confirm_profile_delete),
+            selectable: true,
+        },
+        SettingsItem {
+            label: "Auto Dependency Downloads".to_string(),
+            kind: SettingsItemKind::ToggleDependencyDownloads,
+            checked: Some(app.app_config.offer_dependency_downloads),
+            selectable: true,
+        },
+        SettingsItem {
+            label: "Startup Dependency Notice".to_string(),
+            kind: SettingsItemKind::ToggleStartupDependencyNotice,
+            checked: Some(app.app_config.show_startup_dependency_notice),
+            selectable: true,
+        },
+        SettingsItem {
+            label: "Warn on Missing Dependencies".to_string(),
+            kind: SettingsItemKind::ToggleDependencyWarnings,
+            checked: Some(app.app_config.warn_missing_dependencies),
+            selectable: true,
+        },
+        SettingsItem {
+            label: "Enable Mods After Import".to_string(),
+            kind: SettingsItemKind::ToggleEnableModsAfterImport,
+            checked: Some(app.app_config.enable_mods_after_import),
+            selectable: true,
+        },
+        SettingsItem {
+            label: "Delete Mod Files on Remove".to_string(),
+            kind: SettingsItemKind::ToggleDeleteModFilesOnRemove,
+            checked: Some(app.app_config.delete_mod_files_on_remove),
+            selectable: true,
+        },
+        SettingsItem {
+            label: update_menu_label(app),
+            kind: SettingsItemKind::ActionCheckUpdates,
+            checked: None,
+            selectable: true,
+        },
+    ];
+
+    items.extend(vec![
+        SettingsItem {
+            label: "SigiLink".to_string(),
             kind: SettingsItemKind::SigilLinkHeader,
             checked: None,
             selectable: false,
         },
         SettingsItem {
-            label: "Enable SigilLink Ranking".to_string(),
+            label: "Enable SigiLink Ranking".to_string(),
             kind: SettingsItemKind::SigilLinkToggle,
             checked: Some(app.sigillink_ranking_enabled()),
             selectable: true,
@@ -557,60 +623,26 @@ fn settings_items(app: &App) -> Vec<SettingsItem> {
             selectable: false,
         },
         SettingsItem {
-            label: "Clear all SigilLink pins".to_string(),
+            label: "Clear All SigiLink Pins".to_string(),
             kind: SettingsItemKind::ActionClearSigilLinkPins,
             checked: None,
             selectable: true,
         },
         SettingsItem {
-            label: "Confirm mod delete".to_string(),
-            kind: SettingsItemKind::ToggleModDelete,
-            checked: Some(app.app_config.confirm_mod_delete),
-            selectable: true,
-        },
-        SettingsItem {
-            label: "Confirm profile delete".to_string(),
-            kind: SettingsItemKind::ToggleProfileDelete,
-            checked: Some(app.app_config.confirm_profile_delete),
-            selectable: true,
-        },
-        SettingsItem {
-            label: "Auto dependency downloads".to_string(),
-            kind: SettingsItemKind::ToggleDependencyDownloads,
-            checked: Some(app.app_config.offer_dependency_downloads),
-            selectable: true,
-        },
-        SettingsItem {
-            label: "Startup dependency notice".to_string(),
-            kind: SettingsItemKind::ToggleStartupDependencyNotice,
-            checked: Some(app.app_config.show_startup_dependency_notice),
-            selectable: true,
-        },
-        SettingsItem {
-            label: "Warn on missing dependencies".to_string(),
-            kind: SettingsItemKind::ToggleDependencyWarnings,
-            checked: Some(app.app_config.warn_missing_dependencies),
-            selectable: true,
-        },
-        SettingsItem {
-            label: "Enable mods after import".to_string(),
-            kind: SettingsItemKind::ToggleEnableModsAfterImport,
-            checked: Some(app.app_config.enable_mods_after_import),
-            selectable: true,
-        },
-        SettingsItem {
-            label: "Delete mod files on remove".to_string(),
-            kind: SettingsItemKind::ToggleDeleteModFilesOnRemove,
-            checked: Some(app.app_config.delete_mod_files_on_remove),
-            selectable: true,
-        },
-        SettingsItem {
-            label: update_menu_label(app),
-            kind: SettingsItemKind::ActionCheckUpdates,
+            label: "Clear SigiLink Caches".to_string(),
+            kind: SettingsItemKind::ActionClearSigilLinkCaches,
             checked: None,
             selectable: true,
         },
-    ]
+        SettingsItem {
+            label: "Move SigiLink Cache".to_string(),
+            kind: SettingsItemKind::ActionMoveSigilLinkCache,
+            checked: None,
+            selectable: true,
+        },
+    ]);
+
+    items
 }
 
 fn export_menu_items() -> Vec<ExportMenuItem> {
@@ -632,15 +664,15 @@ fn export_menu_items() -> Vec<ExportMenuItem> {
 
 fn update_menu_label(app: &App) -> String {
     match &app.update_status {
-        UpdateStatus::Checking => "Check for updates (checking...)".to_string(),
+        UpdateStatus::Checking => "Check for Updates (Checking...)".to_string(),
         UpdateStatus::Available { info, .. } => {
-            format!("Update available: v{} (Enter to update)", info.version)
+            format!("Update Available: v{} (Enter to Update)", info.version)
         }
-        UpdateStatus::Applied { info } => format!("Update applied: v{} (restart)", info.version),
-        UpdateStatus::UpToDate { .. } => "Check for updates (latest)".to_string(),
-        UpdateStatus::Failed { .. } => "Check for updates (failed; retry)".to_string(),
-        UpdateStatus::Skipped { .. } => "Check for updates (see log)".to_string(),
-        UpdateStatus::Idle => "Check for updates".to_string(),
+        UpdateStatus::Applied { info } => format!("Update Applied: v{} (Restart)", info.version),
+        UpdateStatus::UpToDate { .. } => "Check for Updates (Latest)".to_string(),
+        UpdateStatus::Failed { .. } => "Check for Updates (Failed; Retry)".to_string(),
+        UpdateStatus::Skipped { .. } => "Check for Updates (See Log)".to_string(),
+        UpdateStatus::Idle => "Check for Updates".to_string(),
     }
 }
 
@@ -739,6 +771,10 @@ fn handle_settings_menu(app: &mut App, key: KeyEvent) -> Result<()> {
                     SettingsItemKind::ActionSetupPaths => {
                         app.close_settings_menu();
                         app.enter_setup_game_root();
+                    }
+                    SettingsItemKind::ActionShowPaths => {
+                        app.close_settings_menu();
+                        app.open_paths_overlay();
                     }
                     SettingsItemKind::ToggleProfileDelete => {
                         if let Err(err) = app.toggle_confirm_profile_delete() {
@@ -1129,9 +1165,9 @@ fn handle_browser_mode(app: &mut App, key: KeyEvent, browser: &mut PathBrowser) 
         PathBrowserPurpose::ExportProfile { .. } => "Enter a file name to export.",
         PathBrowserPurpose::SigilLinkCache { require_dev, .. } => {
             if require_dev.is_some() {
-                "Select a directory on the same drive as BG3 to use SigilLink without symlinks."
+                "Select a directory on the same drive as BG3 to use SigiLink without symlinks."
             } else {
-                "Select a folder for the SigilLink cache."
+                "Select a folder for the SigiLink cache."
             }
         }
     };
@@ -1694,10 +1730,10 @@ fn draw(frame: &mut Frame<'_>, app: &mut App) {
         .split(area);
     let lower_chunks = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+        .constraints([Constraint::Percentage(45), Constraint::Percentage(55)])
         .split(chunks[2]);
 
-    let (rows, counts, target_width) = build_rows(app, &theme);
+    let (rows, counts, target_width, mod_width) = build_rows(app, &theme);
     let profile_label = app.active_profile_label();
     let renaming_active = app.is_renaming_active_profile();
     let filter_active = app.mod_filter_active();
@@ -1726,83 +1762,24 @@ fn draw(frame: &mut Frame<'_>, app: &mut App) {
         .filter(|entry| entry.overridden)
         .count();
     let overrides_auto = overrides_total.saturating_sub(overrides_manual);
+    let total_mods = counts.total;
+    let enabled_mods = counts.enabled;
+    let disabled_mods = total_mods.saturating_sub(enabled_mods);
     let label_style = Style::default().fg(theme.muted);
-    let mut context_rows = Vec::new();
-    context_rows.push(KvRow {
-        label: "Game".to_string(),
-        value: app.game_id.display_name().to_string(),
-        label_style,
-        value_style: Style::default().fg(theme.text),
-    });
-    context_rows.push(KvRow {
-        label: "Profile".to_string(),
-        value: app.active_profile_label(),
-        label_style,
-        value_style: Style::default().fg(if app.is_renaming_active_profile() {
-            theme.warning
-        } else {
-            theme.text
-        }),
-    });
-    context_rows.push(KvRow {
-        label: "Mods".to_string(),
-        value: mods_label.clone(),
-        label_style,
-        value_style: Style::default().fg(theme.text),
-    });
-    context_rows.push(KvRow {
-        label: "Enabled".to_string(),
-        value: enabled_label.clone(),
-        label_style,
-        value_style: Style::default().fg(theme.text),
-    });
-    context_rows.push(KvRow {
-        label: "Overrides".to_string(),
-        value: format!("Auto ({overrides_auto})"),
-        label_style,
-        value_style: Style::default().fg(theme.success),
-    });
-    context_rows.push(KvRow {
-        label: "".to_string(),
-        value: format!("Manual ({overrides_manual})"),
-        label_style,
-        value_style: Style::default().fg(if overrides_manual > 0 {
-            theme.warning
-        } else {
-            theme.muted
-        }),
-    });
-    context_rows.push(KvRow {
-        label: "Auto-deploy".to_string(),
-        value: "On".to_string(),
-        label_style,
-        value_style: Style::default().fg(theme.muted),
-    });
-    if app.sigillink_ranking_enabled() {
-        context_rows.push(KvRow {
-            label: "SigilLink".to_string(),
-            value: format!("ON  Pins: {}", app.sigillink_pin_count()),
-            label_style,
-            value_style: Style::default().fg(theme.success),
-        });
-    }
-    context_rows.push(KvRow {
-        label: "Help".to_string(),
-        value: "? shortcuts".to_string(),
-        label_style,
-        value_style: Style::default().fg(theme.accent),
-    });
+    let mut context_labels = vec![
+        "Game",
+        "Profile",
+        "Overrides",
+        "Auto-deploy",
+        "SigiLink",
+        "Help",
+    ];
     if !app.paths_ready() {
-        context_rows.push(KvRow {
-            label: "Setup".to_string(),
-            value: "Open Menu (Esc) to configure".to_string(),
-            label_style,
-            value_style: Style::default().fg(theme.warning),
-        });
+        context_labels.push("Setup");
     }
     let legend_rows = legend_rows(app);
     let hotkey_rows = hotkey_rows(app);
-    let base_context_height = context_rows.len().saturating_add(1);
+    let base_context_height = context_labels.len().saturating_add(1);
     let current_context_height =
         base_context_height.saturating_add(legend_line_count(&legend_rows, &hotkey_rows));
     let mods_legend_rows = legend_rows_for_focus(Focus::Mods);
@@ -2030,10 +2007,18 @@ fn draw(frame: &mut Frame<'_>, app: &mut App) {
         }
         let table_width = table_chunks[0].width;
         let spacing = 1u16;
-        let min_mod = 16u16;
+        let link_width = 2u16;
         let date_width = 10u16;
-        let fixed_without_target =
-            3 + 2 + 4 + 5 + 6 + date_width + date_width + min_mod + spacing * 8;
+        let fixed_without_mod_target =
+            3 + 4 + 2 + 6 + link_width + 4 + date_width + date_width + spacing * 9;
+        let max_mod = table_width.saturating_sub(fixed_without_mod_target + 1);
+        let mut mod_col = mod_width as u16;
+        if max_mod > 0 {
+            mod_col = mod_col.min(max_mod);
+        } else {
+            mod_col = 1;
+        }
+        let fixed_without_target = fixed_without_mod_target + mod_col;
         let max_target = table_width.saturating_sub(fixed_without_target);
         let mut target_col = target_width as u16;
         if max_target > 0 {
@@ -2046,29 +2031,31 @@ fn draw(frame: &mut Frame<'_>, app: &mut App) {
             target_col = 1;
         }
         let header = Row::new(vec![
-            mod_header_cell("On", ModSortColumn::Enabled, app.mod_sort, &theme),
+            mod_header_cell(" On", ModSortColumn::Enabled, app.mod_sort, &theme),
+            mod_header_cell(" # ", ModSortColumn::Order, app.mod_sort, &theme),
             mod_header_cell("N", ModSortColumn::Native, app.mod_sort, &theme),
-            mod_header_cell_static("Dep", &theme),
-            mod_header_cell("Order", ModSortColumn::Order, app.mod_sort, &theme),
             mod_header_cell("Kind", ModSortColumn::Kind, app.mod_sort, &theme),
-            mod_header_cell("Target", ModSortColumn::Target, app.mod_sort, &theme),
+            mod_header_cell_static(" ", &theme),
+            mod_header_cell("Mod", ModSortColumn::Name, app.mod_sort, &theme),
+            mod_header_cell_static("Dep", &theme),
             mod_header_cell("Created", ModSortColumn::Created, app.mod_sort, &theme),
             mod_header_cell("Added", ModSortColumn::Added, app.mod_sort, &theme),
-            mod_header_cell("Mod", ModSortColumn::Name, app.mod_sort, &theme),
+            mod_header_cell("Target", ModSortColumn::Target, app.mod_sort, &theme),
         ])
         .style(Style::default().bg(theme.header_bg));
         let table = Table::new(
             rows,
             [
+                Constraint::Length(4),
                 Constraint::Length(3),
                 Constraint::Length(2),
-                Constraint::Length(4),
-                Constraint::Length(5),
                 Constraint::Length(6),
+                Constraint::Length(2),
+                Constraint::Length(mod_col),
+                Constraint::Length(4),
+                Constraint::Length(date_width),
+                Constraint::Length(date_width),
                 Constraint::Length(target_col),
-                Constraint::Length(date_width),
-                Constraint::Length(date_width),
-                Constraint::Min(min_mod),
             ],
         )
         .style(Style::default().bg(theme.mod_bg).fg(theme.text))
@@ -2222,7 +2209,7 @@ fn draw(frame: &mut Frame<'_>, app: &mut App) {
     frame.render_widget(context_block, context_area);
 
     let available_context = context_inner.height as usize;
-    let context_line_count = context_rows.len().saturating_add(1);
+    let context_line_count = base_context_height;
     let legend_required = legend_line_count(&legend_rows, &hotkey_rows);
     let mut context_slots = context_line_count.min(available_context);
     let mut legend_slots = available_context.saturating_sub(context_slots);
@@ -2248,9 +2235,9 @@ fn draw(frame: &mut Frame<'_>, app: &mut App) {
         .width
         .saturating_sub(SUBPANEL_PAD_X.saturating_mul(2)) as usize;
     let legend_content_height = legend_inner.height.saturating_sub(SUBPANEL_PAD_TOP) as usize;
-    let context_label_width = context_rows
+    let context_label_width = context_labels
         .iter()
-        .map(|row| row.label.chars().count())
+        .map(|label| label.chars().count())
         .max()
         .unwrap_or(0)
         .saturating_add(1);
@@ -2259,7 +2246,7 @@ fn draw(frame: &mut Frame<'_>, app: &mut App) {
         .iter()
         .chain(hotkey_rows.global.iter())
         .chain(hotkey_rows.context.iter())
-        .map(|row| row.key.chars().count())
+        .map(|row| display_width(&row.key))
         .max()
         .unwrap_or(context_label_width);
     let min_action_width = 12usize;
@@ -2273,11 +2260,134 @@ fn draw(frame: &mut Frame<'_>, app: &mut App) {
         "Active",
         Style::default().fg(theme.accent),
     )));
-    context_lines.extend(format_kv_lines_aligned(
-        &context_rows,
-        context_chunks[0].width as usize,
+    let context_width = context_chunks[0].width as usize;
+    let game_row = KvRow {
+        label: "Game".to_string(),
+        value: app.game_id.display_name().to_string(),
+        label_style,
+        value_style: Style::default().fg(theme.text),
+    };
+    context_lines.push(format_kv_line_aligned(
+        &game_row,
+        context_width,
         shared_label_width,
     ));
+    let profile_name = app.active_profile_label();
+    let profile_style = Style::default().fg(if app.is_renaming_active_profile() {
+        theme.warning
+    } else {
+        theme.text
+    });
+    let profile_counts = format!("{disabled_mods} / {enabled_mods} | {total_mods}");
+    let profile_spans = vec![
+        Span::styled(disabled_mods.to_string(), Style::default().fg(theme.muted)),
+        Span::styled(" / ", Style::default().fg(theme.muted)),
+        Span::styled(enabled_mods.to_string(), Style::default().fg(theme.success)),
+        Span::styled(" | ", Style::default().fg(theme.muted)),
+        Span::styled(total_mods.to_string(), Style::default().fg(theme.accent)),
+    ];
+    let overrides_left = format!("Auto ({overrides_auto})");
+    let overrides_right = format!("│ Manual ({overrides_manual})");
+    let overrides_right_spans = vec![
+        Span::styled("│ ", Style::default().fg(theme.muted)),
+        Span::styled(
+            format!("Manual ({overrides_manual})"),
+            Style::default().fg(if overrides_manual > 0 {
+                theme.warning
+            } else {
+                theme.muted
+            }),
+        ),
+    ];
+    let value_width = context_width.saturating_sub(shared_label_width + 2);
+    let desired_width = split_value_width(&profile_name, &profile_counts)
+        .max(split_value_width(&overrides_left, &overrides_right));
+    let split_width = shared_label_width + 2 + desired_width.min(value_width);
+    context_lines.push(format_kv_line_split(
+        "Profile",
+        label_style,
+        &profile_name,
+        profile_style,
+        &profile_counts,
+        profile_spans,
+        split_width,
+        shared_label_width,
+        Style::default().fg(theme.muted),
+    ));
+    context_lines.push(format_kv_line_split(
+        "Overrides",
+        label_style,
+        &overrides_left,
+        Style::default().fg(theme.success),
+        &overrides_right,
+        overrides_right_spans,
+        split_width,
+        shared_label_width,
+        Style::default().fg(theme.muted),
+    ));
+    let auto_deploy_enabled = true;
+    let auto_row = KvRow {
+        label: "Auto-deploy".to_string(),
+        value: if auto_deploy_enabled {
+            "ON".to_string()
+        } else {
+            "OFF".to_string()
+        },
+        label_style,
+        value_style: Style::default().fg(if auto_deploy_enabled {
+            theme.success
+        } else {
+            theme.muted
+        }),
+    };
+    context_lines.push(format_kv_line_aligned(
+        &auto_row,
+        context_width,
+        shared_label_width,
+    ));
+    let (sigilink_value, sigilink_style) = if app.sigillink_ranking_enabled() {
+        (
+            format!("ON  Pins: {}", app.sigillink_pin_count()),
+            Style::default().fg(theme.success),
+        )
+    } else {
+        ("OFF".to_string(), Style::default().fg(theme.muted))
+    };
+    let sigilink_row = KvRow {
+        label: "SigiLink".to_string(),
+        value: sigilink_value,
+        label_style,
+        value_style: sigilink_style,
+    };
+    context_lines.push(format_kv_line_aligned(
+        &sigilink_row,
+        context_width,
+        shared_label_width,
+    ));
+    let help_row = KvRow {
+        label: "Help".to_string(),
+        value: "? shortcuts".to_string(),
+        label_style,
+        value_style: Style::default().fg(theme.accent),
+    };
+    context_lines.push(format_kv_line_aligned(
+        &help_row,
+        context_width,
+        shared_label_width,
+    ));
+    if !app.paths_ready() {
+        let setup_row = KvRow {
+            label: "Setup".to_string(),
+            value: "Open Menu (Esc) to configure".to_string(),
+            label_style,
+            value_style: Style::default().fg(theme.warning),
+        };
+        context_lines.push(format_kv_line_aligned(
+            &setup_row,
+            context_width,
+            shared_label_width,
+        ));
+    }
     let context_widget =
         Paragraph::new(context_lines).style(Style::default().fg(theme.text).bg(theme.subpanel_bg));
     frame.render_widget(context_widget, context_chunks[0]);
@@ -2474,6 +2584,9 @@ fn draw(frame: &mut Frame<'_>, app: &mut App) {
     if app.settings_menu.is_some() {
         draw_settings_menu(frame, app, &theme);
     }
+    if app.paths_overlay_open {
+        draw_paths_overlay(frame, app, &theme);
+    }
     if app.help_open {
         draw_help_menu(frame, app, &theme);
     }
@@ -2527,7 +2640,7 @@ fn render_filter_bar(
     let counts_label = if app.mod_filter_active() {
         format!("Showing: {}/{}", counts.visible_total, counts.total)
     } else {
-        format!("Total: {}", counts.total)
+        format!(" Total: {}", counts.total)
     };
     let search_hint = if editing {
         "Enter search | Esc cancel"
@@ -2570,7 +2683,7 @@ fn render_filter_bar(
         .split(search_area);
     let left_line = Line::from(vec![
         Span::styled(
-            "Search",
+            " Search",
             Style::default()
                 .fg(theme.accent)
                 .add_modifier(Modifier::BOLD),
@@ -3170,7 +3283,8 @@ fn draw_dialog(frame: &mut Frame<'_>, app: &mut App, theme: &Theme) {
     let body_widget = Paragraph::new(message_lines)
         .scroll((dialog.scroll as u16, 0))
         .style(Style::default().fg(theme.text).bg(theme.header_bg))
-        .alignment(Alignment::Center);
+        .alignment(Alignment::Center)
+        .wrap(Wrap { trim: false });
     frame.render_widget(body_widget, body_chunks[0]);
 
     if show_scroll && body_chunks[1].width > 0 {
@@ -3369,7 +3483,7 @@ fn draw_settings_menu(frame: &mut Frame<'_>, app: &App, theme: &Theme) {
     };
 
     let area = frame.size();
-    let lines = build_settings_menu_lines(app, theme, menu.selected);
+    let mut lines = build_settings_menu_lines(app, theme, menu.selected, None);
     let mut max_line = 0usize;
     for line in &lines {
         let width = line.to_string().chars().count();
@@ -3386,7 +3500,9 @@ fn draw_settings_menu(frame: &mut Frame<'_>, app: &App, theme: &Theme) {
         height = area.height.saturating_sub(2);
     }
     let max_width = area.width.saturating_sub(2).max(1);
-    let width = (max_line as u16 + 6).clamp(34, max_width.min(58));
+    let width = (max_line as u16 + 8).clamp(40, max_width.min(70));
+    let inner_width = width.saturating_sub(2) as usize;
+    lines = build_settings_menu_lines(app, theme, menu.selected, Some(inner_width));
     let (outer_area, menu_area) = padded_modal(area, width, height, 2, 1);
 
     render_modal_backdrop(frame, outer_area, theme);
@@ -3405,6 +3521,80 @@ fn draw_settings_menu(frame: &mut Frame<'_>, app: &App, theme: &Theme) {
         .block(menu_block)
         .style(Style::default().fg(theme.text));
     frame.render_widget(menu_widget, menu_area);
+}
+
+fn draw_paths_overlay(frame: &mut Frame<'_>, app: &App, theme: &Theme) {
+    let area = frame.size();
+    let root = if app.config.game_root.as_os_str().is_empty() {
+        "<not set>".to_string()
+    } else {
+        app.config.game_root.display().to_string()
+    };
+    let user_dir = if app.config.larian_dir.as_os_str().is_empty() {
+        "<not set>".to_string()
+    } else {
+        app.config.larian_dir.display().to_string()
+    };
+    let config_path = app.config.data_dir.join("config.json");
+    let label_style = Style::default().fg(theme.muted);
+    let value_style = Style::default().fg(theme.text);
+    let lines = vec![
+        Line::from(vec![
+            Span::styled("Root: ", label_style),
+            Span::styled(root, value_style),
+        ]),
+        Line::from(vec![
+            Span::styled("User: ", label_style),
+            Span::styled(user_dir, value_style),
+        ]),
+        Line::from(vec![
+            Span::styled("Config: ", label_style),
+            Span::styled(config_path.display().to_string(), value_style),
+        ]),
+        Line::from(""),
+        Line::from(Span::styled(
+            "Enter/Esc: close",
+            Style::default().fg(theme.muted),
+        )),
+    ];
+
+    let mut max_line = 0usize;
+    for line in &lines {
+        let width = line.to_string().chars().count();
+        if width > max_line {
+            max_line = width;
+        }
+    }
+    let max_width = area.width.saturating_sub(4).max(1);
+    let width = (max_line as u16 + 6).clamp(40, max_width.min(100));
+    let content_height = lines.len().max(1) as u16;
+    let mut height = content_height + 2;
+    if height < 8 {
+        height = 8;
+    }
+    if height > area.height.saturating_sub(2) {
+        height = area.height.saturating_sub(2);
+    }
+    let (outer_area, modal) = padded_modal(area, width, height, 2, 1);
+
+    render_modal_backdrop(frame, outer_area, theme);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(theme.accent_soft))
+        .style(Style::default().bg(theme.header_bg))
+        .title(Span::styled(
+            "SigilSmith Paths",
+            Style::default()
+                .fg(theme.accent)
+                .add_modifier(Modifier::BOLD),
+        ));
+    let widget = Paragraph::new(lines)
+        .block(block)
+        .style(Style::default().fg(theme.text))
+        .wrap(Wrap { trim: false })
+        .alignment(Alignment::Left);
+    frame.render_widget(widget, modal);
 }
 
 fn draw_export_menu(frame: &mut Frame<'_>, app: &App, theme: &Theme) {
@@ -3873,8 +4063,8 @@ fn draw_path_browser(frame: &mut Frame<'_>, _app: &App, theme: &Theme, browser: 
             ExportKind::Modsettings => "Export modsettings.lsx",
         },
         PathBrowserPurpose::SigilLinkCache { action, .. } => match action {
-            SigilLinkCacheAction::Move => "Move SigilLink cache",
-            SigilLinkCacheAction::Relocate { .. } => "Select SigilLink cache folder",
+            SigilLinkCacheAction::Move => "Move SigiLink Cache",
+            SigilLinkCacheAction::Relocate { .. } => "Select SigiLink Cache Folder",
         },
     };
     let block = Block::default()
@@ -3896,6 +4086,7 @@ fn draw_path_browser(frame: &mut Frame<'_>, _app: &App, theme: &Theme, browser: 
         .constraints([
             Constraint::Length(3),
             Constraint::Min(5),
+            Constraint::Length(1),
             Constraint::Length(2),
         ])
         .split(inner);
@@ -3952,12 +4143,12 @@ fn draw_path_browser(frame: &mut Frame<'_>, _app: &App, theme: &Theme, browser: 
             if require_dev.is_some() {
                 (
                     " BG3 cache location valid ",
-                    "Select a directory on the same drive as BG3 to use SigilLink without symlinks.",
+                    "Select a directory on the same drive as BG3 to use SigiLink without symlinks.",
                 )
             } else {
                 (
                     " Folder selected ",
-                    "Select a folder for the SigilLink cache.",
+                    "Select a folder for the SigiLink cache.",
                 )
             }
         }
@@ -4061,10 +4252,14 @@ fn draw_path_browser(frame: &mut Frame<'_>, _app: &App, theme: &Theme, browser: 
         frame.render_stateful_widget(scrollbar, scroll_area, &mut scroll_state);
     }
 
+    let footer_area = chunks[3];
+    let spacer = Paragraph::new(Line::from("")).style(Style::default().bg(theme.header_bg));
+    frame.render_widget(spacer, chunks[2]);
+
     let footer_plain =
         "[Tab] Enter Path  [Enter] Open/Select  [Backspace] Parent  [S] Select  [Esc] Cancel";
-    let footer_widget = if footer_plain.chars().count() > chunks[2].width as usize {
-        let footer_line = truncate_text(footer_plain, chunks[2].width as usize);
+    let footer_widget = if footer_plain.chars().count() > footer_area.width as usize {
+        let footer_line = truncate_text(footer_plain, footer_area.width as usize);
         Paragraph::new(Line::from(Span::styled(
             footer_line,
             Style::default().fg(theme.muted),
@@ -4091,7 +4286,7 @@ fn draw_path_browser(frame: &mut Frame<'_>, _app: &App, theme: &Theme, browser: 
             .style(Style::default().fg(theme.muted))
             .alignment(Alignment::Center)
     };
-    frame.render_widget(footer_widget, chunks[2]);
+    frame.render_widget(footer_widget, footer_area);
 }
 
 struct SmartRankPreviewRender {
@@ -4146,7 +4341,7 @@ fn draw_smart_rank_preview(frame: &mut Frame<'_>, app: &mut App, theme: &Theme) 
         .border_style(Style::default().fg(theme.accent_soft))
         .style(Style::default().bg(theme.header_bg))
         .title(Span::styled(
-            "SigilLink Intelligent Ranking",
+            "SigiLink Intelligent Ranking",
             Style::default()
                 .fg(theme.accent)
                 .add_modifier(Modifier::BOLD),
@@ -4806,27 +5001,178 @@ fn format_padded_cell(value: &str, width: usize) -> String {
     format!("{text}{}", " ".repeat(pad))
 }
 
-fn build_settings_menu_lines(app: &App, theme: &Theme, selected: usize) -> Vec<Line<'static>> {
-    let mut lines = Vec::new();
-    lines.push(Line::from(Span::styled(
-        "Settings",
+#[derive(Clone, Copy)]
+enum MenuRowKind {
+    None,
+    Action,
+}
+
+impl MenuRowKind {
+    fn prefix(self) -> &'static str {
+        match self {
+            MenuRowKind::None => "    ",
+            MenuRowKind::Action => "▸   ",
+        }
+    }
+}
+
+fn menu_row(
+    selected: bool,
+    kind: MenuRowKind,
+    label: Span<'static>,
+    theme: &Theme,
+) -> Line<'static> {
+    let sel = "  ";
+    let prefix_style = if matches!(kind, MenuRowKind::Action) && selected {
         Style::default()
-            .fg(theme.accent)
-            .add_modifier(Modifier::BOLD),
-    )));
-    lines.push(Line::from(Span::styled(
-        format!("Version: v{}", env!("CARGO_PKG_VERSION")),
-        Style::default().fg(theme.muted),
-    )));
-    lines.push(Line::from(Span::styled(
-        update_status_line(app),
-        Style::default().fg(theme.muted),
-    )));
+            .fg(theme.success)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(theme.text)
+    };
+    Line::from(vec![
+        Span::raw(sel),
+        Span::styled(kind.prefix(), prefix_style),
+        label,
+    ])
+}
+
+fn centered_line(text: &str, width: Option<usize>, style: Style) -> Line<'static> {
+    let text_width = display_width(text);
+    let pad = width
+        .unwrap_or(0)
+        .saturating_sub(text_width)
+        .saturating_div(2);
+    if pad == 0 {
+        return Line::from(Span::styled(text.to_string(), style));
+    }
+    Line::from(vec![
+        Span::raw(" ".repeat(pad)),
+        Span::styled(text.to_string(), style),
+    ])
+}
+
+fn kv_row(
+    kind: MenuRowKind,
+    key: &str,
+    key_width: usize,
+    key_style: Style,
+    value_spans: Vec<Span<'static>>,
+) -> Line<'static> {
+    let key_text = pad_display_width(key, key_width);
+    let mut spans = vec![
+        Span::raw("  "),
+        Span::raw(kind.prefix()),
+        Span::styled(key_text, key_style),
+        Span::styled(" : ", key_style),
+    ];
+    spans.extend(value_spans);
+    Line::from(spans)
+}
+
+fn pad_display_width(value: &str, width: usize) -> String {
+    let len = display_width(value);
+    let pad = width.saturating_sub(len);
+    format!("{value}{}", " ".repeat(pad))
+}
+
+fn build_settings_menu_lines(
+    app: &App,
+    theme: &Theme,
+    selected: usize,
+    content_width: Option<usize>,
+) -> Vec<Line<'static>> {
+    let mut lines = Vec::new();
+    let muted = Style::default().fg(theme.muted);
+    let header_style = Style::default()
+        .fg(theme.accent)
+        .add_modifier(Modifier::BOLD);
+    let version_value = format!("v{}", env!("CARGO_PKG_VERSION"));
+    let updates_line = update_status_line(app);
+    let updates_value = updates_line
+        .split_once(": ")
+        .map(|(_, value)| value)
+        .unwrap_or(updates_line.as_str());
+    lines.push(centered_line("Settings", content_width, header_style));
+    lines.push(centered_line(
+        &format!("Version : {version_value}"),
+        content_width,
+        muted,
+    ));
+    lines.push(centered_line(
+        &format!("Updates : {updates_value}"),
+        content_width,
+        muted,
+    ));
     lines.push(Line::from(""));
 
     let items = settings_items(app);
+    let content_width = content_width.unwrap_or(0);
+    let key_limit = content_width.saturating_sub(10).max(1);
+    let clamp_key = |width: usize| {
+        if content_width == 0 {
+            width
+        } else {
+            width.min(key_limit)
+        }
+    };
+    let general_key_w = clamp_key(
+        items
+            .iter()
+            .filter(|item| {
+                matches!(
+                    item.kind,
+                    SettingsItemKind::ToggleEnableModsAfterImport
+                        | SettingsItemKind::ToggleDeleteModFilesOnRemove
+                        | SettingsItemKind::ToggleProfileDelete
+                        | SettingsItemKind::ToggleModDelete
+                        | SettingsItemKind::ToggleDependencyDownloads
+                        | SettingsItemKind::ToggleDependencyWarnings
+                        | SettingsItemKind::ToggleStartupDependencyNotice
+                )
+            })
+            .map(|item| display_width(&item.label))
+            .max()
+            .unwrap_or(0),
+    );
+    let sigilink_key_w = clamp_key(
+        items
+            .iter()
+            .filter(|item| {
+                matches!(
+                    item.kind,
+                    SettingsItemKind::SigilLinkToggle | SettingsItemKind::SigilLinkInfo
+                )
+            })
+            .map(|item| {
+                item.label
+                    .split_once(": ")
+                    .map(|(key, _)| display_width(key))
+                    .unwrap_or_else(|| display_width(&item.label))
+            })
+            .max()
+            .unwrap_or(0),
+    );
+    let hotkey_rows = [
+        ("Tab", "Cycle Focus"),
+        ("Esc", "Close"),
+        ("?", "Full Hotkeys"),
+        ("Ctrl+E", "Export Mod List"),
+        ("Ctrl+P", "Import Mod List"),
+    ];
+    let hotkey_key_w = clamp_key(
+        hotkey_rows
+            .iter()
+            .map(|(key, _)| display_width(key))
+            .max()
+            .unwrap_or(0),
+    );
+
     for (index, item) in items.iter().enumerate() {
-        if !item.selectable {
+        if matches!(item.kind, SettingsItemKind::SigilLinkHeader) {
+            lines.push(Line::from(""));
+        }
+        if !item.selectable && !matches!(item.kind, SettingsItemKind::SigilLinkInfo) {
             let (label, style) = match item.kind {
                 SettingsItemKind::SigilLinkHeader => (
                     item.label.to_string(),
@@ -4834,39 +5180,49 @@ fn build_settings_menu_lines(app: &App, theme: &Theme, selected: usize) -> Vec<L
                         .fg(theme.accent)
                         .add_modifier(Modifier::BOLD),
                 ),
-                _ => (
-                    format!("  {}", item.label),
-                    Style::default().fg(theme.muted),
-                ),
+                _ => (item.label.to_string(), Style::default().fg(theme.muted)),
             };
-            lines.push(Line::from(Span::styled(label, style)));
+            lines.push(menu_row(
+                false,
+                MenuRowKind::None,
+                Span::styled(label, style),
+                theme,
+            ));
             continue;
         }
 
-        let prefix = if index == selected { ">" } else { " " };
         let style = if index == selected {
             Style::default()
-                .fg(theme.accent)
+                .fg(theme.success)
                 .add_modifier(Modifier::BOLD)
+        } else if !item.selectable {
+            Style::default().fg(theme.muted)
         } else {
             Style::default().fg(theme.text)
         };
-        let row = match item.kind {
+        match item.kind {
             SettingsItemKind::ActionSetupPaths
+            | SettingsItemKind::ActionShowPaths
             | SettingsItemKind::ActionMoveSigilLinkCache
             | SettingsItemKind::ActionClearFrameworkCaches
             | SettingsItemKind::ActionClearSigilLinkCaches
             | SettingsItemKind::ActionClearSigilLinkPins
-            | SettingsItemKind::ActionCheckUpdates => vec![
-                Span::styled(prefix.to_string(), style),
-                Span::raw(" "),
-                Span::styled("▶", Style::default().fg(theme.accent)),
-                Span::raw(" "),
-                Span::styled(item.label.to_string(), style),
-            ],
+            | SettingsItemKind::ActionCheckUpdates => {
+                lines.push(menu_row(
+                    index == selected,
+                    MenuRowKind::Action,
+                    Span::styled(item.label.to_string(), style),
+                    theme,
+                ));
+            }
             SettingsItemKind::ToggleEnableModsAfterImport
             | SettingsItemKind::ToggleDeleteModFilesOnRemove
-            | SettingsItemKind::SigilLinkToggle => {
+            | SettingsItemKind::SigilLinkToggle
+            | SettingsItemKind::ToggleProfileDelete
+            | SettingsItemKind::ToggleModDelete
+            | SettingsItemKind::ToggleDependencyDownloads
+            | SettingsItemKind::ToggleDependencyWarnings
+            | SettingsItemKind::ToggleStartupDependencyNotice => {
                 let enabled = item.checked.unwrap_or(false);
                 let state_label = if enabled { "ON" } else { "OFF" };
                 let state_style = Style::default()
@@ -4876,102 +5232,74 @@ fn build_settings_menu_lines(app: &App, theme: &Theme, selected: usize) -> Vec<L
                         theme.warning
                     })
                     .add_modifier(Modifier::BOLD);
-                vec![
-                    Span::styled(prefix.to_string(), style),
-                    Span::raw(" "),
-                    Span::styled(item.label.to_string(), style),
-                    Span::raw(": "),
-                    Span::styled(state_label, state_style),
-                ]
-            }
-            SettingsItemKind::ToggleProfileDelete
-            | SettingsItemKind::ToggleModDelete
-            | SettingsItemKind::ToggleDependencyDownloads
-            | SettingsItemKind::ToggleDependencyWarnings
-            | SettingsItemKind::ToggleStartupDependencyNotice => {
-                let marker = if item.checked.unwrap_or(false) {
-                    "[x]"
+                let key_width = if matches!(item.kind, SettingsItemKind::SigilLinkToggle) {
+                    sigilink_key_w
                 } else {
-                    "[ ]"
+                    general_key_w
                 };
-                vec![
-                    Span::styled(prefix.to_string(), style),
-                    Span::raw(" "),
-                    Span::styled(marker, Style::default().fg(theme.accent)),
-                    Span::raw(" "),
-                    Span::styled(item.label.to_string(), style),
-                ]
+                lines.push(kv_row(
+                    MenuRowKind::None,
+                    &item.label,
+                    key_width,
+                    style,
+                    vec![Span::styled(state_label, state_style)],
+                ));
             }
             SettingsItemKind::SigilLinkHeader | SettingsItemKind::SigilLinkInfo => {
-                vec![Span::styled(item.label.to_string(), style)]
+                let (key, value) = item
+                    .label
+                    .split_once(": ")
+                    .map(|(key, value)| (key.to_string(), value.to_string()))
+                    .unwrap_or_else(|| (item.label.clone(), String::new()));
+                let value_spans = if value.is_empty() {
+                    vec![Span::styled("", Style::default().fg(theme.muted))]
+                } else {
+                    vec![Span::styled(value, Style::default().fg(theme.muted))]
+                };
+                lines.push(kv_row(
+                    MenuRowKind::None,
+                    &key,
+                    sigilink_key_w,
+                    Style::default().fg(theme.muted),
+                    value_spans,
+                ));
             }
         };
-        lines.push(Line::from(row));
     }
 
     lines.push(Line::from(""));
 
-    let hotkeys_line = "Tab: cycle focus  Esc: close  ?: full hotkeys";
-    let modlist_line = "Ctrl+E: export mod list  Ctrl+P: import mod list";
-
-    lines.push(Line::from(Span::styled(
-        "Hotkeys",
-        Style::default()
-            .fg(theme.accent)
-            .add_modifier(Modifier::BOLD),
-    )));
-
-    lines.push(Line::from(Span::styled(
-        hotkeys_line,
-        Style::default().fg(theme.muted),
-    )));
-
-    lines.push(Line::from(Span::styled(
-        modlist_line,
-        Style::default().fg(theme.muted),
-    )));
-
-    let root = if app.config.game_root.as_os_str().is_empty() {
-        "<not set>".to_string()
-    } else {
-        app.config.game_root.display().to_string()
-    };
-    let user_dir = if app.config.larian_dir.as_os_str().is_empty() {
-        "<not set>".to_string()
-    } else {
-        app.config.larian_dir.display().to_string()
-    };
-    let config_path = app.config.data_dir.join("config.json");
-    let path_width = 50usize;
-
-    lines.push(Line::from(""));
-    lines.push(Line::from(Span::styled(
-        "Paths",
-        Style::default()
-            .fg(theme.accent)
-            .add_modifier(Modifier::BOLD),
-    )));
-    lines.push(Line::from(Span::styled(
-        format!("Root: {}", truncate_text(&root, path_width)),
-        Style::default().fg(theme.muted),
-    )));
-    lines.push(Line::from(Span::styled(
-        format!("User: {}", truncate_text(&user_dir, path_width)),
-        Style::default().fg(theme.muted),
-    )));
-    lines.push(Line::from(Span::styled(
-        format!(
-            "Config: {}",
-            truncate_text(&config_path.display().to_string(), path_width)
+    lines.push(menu_row(
+        false,
+        MenuRowKind::None,
+        Span::styled(
+            "Hotkeys",
+            Style::default()
+                .fg(theme.accent)
+                .add_modifier(Modifier::BOLD),
         ),
-        Style::default().fg(theme.muted),
-    )));
+        theme,
+    ));
+    for (key, value) in hotkey_rows {
+        lines.push(kv_row(
+            MenuRowKind::None,
+            key,
+            hotkey_key_w,
+            Style::default().fg(theme.muted),
+            vec![Span::styled(value, Style::default().fg(theme.muted))],
+        ));
+    }
 
     lines.push(Line::from(""));
-    lines.push(Line::from(Span::styled(
-        "Enter: toggle/run | Esc: close",
-        Style::default().fg(theme.muted),
-    )));
+    lines.push(menu_row(
+        false,
+        MenuRowKind::None,
+        Span::styled(
+            "Enter: toggle/run | Esc: close",
+            Style::default().fg(theme.muted),
+        ),
+        theme,
+    ));
 
     lines
 }
@@ -5286,7 +5614,7 @@ fn draw_startup_overlay(frame: &mut Frame<'_>, app: &App, theme: &Theme) {
             .add_modifier(Modifier::BOLD),
     )));
     lines.push(Line::from(Span::styled(
-        "Loading mods, metadata, and SigilLink ranking…",
+        "Loading mods, metadata, and SigiLink ranking…",
         Style::default().fg(theme.text),
     )));
     lines.push(Line::from(Span::styled(
@@ -5438,10 +5766,11 @@ struct ModCounts {
     visible_enabled: usize,
 }
 
-fn build_rows(app: &App, theme: &Theme) -> (Vec<Row<'static>>, ModCounts, usize) {
+fn build_rows(app: &App, theme: &Theme) -> (Vec<Row<'static>>, ModCounts, usize, usize) {
     let mut rows = Vec::new();
     let mut visible_enabled = 0;
     let mut target_width = "Target".chars().count();
+    let mut mod_width = "Mod".chars().count();
     let (total, enabled) = app.profile_counts();
     let profile_entries = app.visible_profile_entries();
     let mod_map = app.library.index_by_id();
@@ -5454,17 +5783,34 @@ fn build_rows(app: &App, theme: &Theme) -> (Vec<Row<'static>>, ModCounts, usize)
             visible_enabled += 1;
         }
         if entry.missing_label.is_some() {
-            let (row, target_len) = row_for_missing_entry(row_index, *order_index, entry, theme);
+            let label = entry
+                .missing_label
+                .as_deref()
+                .filter(|label| !label.trim().is_empty())
+                .unwrap_or(&entry.id);
+            let display = format!("{} (missing)", label.trim());
+            mod_width = mod_width.max(display.chars().count());
+            let (row, target_len) =
+                row_for_missing_entry(app, row_index, *order_index, entry, theme);
             target_width = target_width.max(target_len);
             rows.push(row);
             continue;
         }
         let Some(mod_entry) = mod_map.get(&entry.id) else {
-            let (row, target_len) = row_for_missing_entry(row_index, *order_index, entry, theme);
+            let label = entry
+                .missing_label
+                .as_deref()
+                .filter(|label| !label.trim().is_empty())
+                .unwrap_or(&entry.id);
+            let display = format!("{} (missing)", label.trim());
+            mod_width = mod_width.max(display.chars().count());
+            let (row, target_len) =
+                row_for_missing_entry(app, row_index, *order_index, entry, theme);
             target_width = target_width.max(target_len);
             rows.push(row);
             continue;
         };
+        mod_width = mod_width.max(mod_entry.display_name().chars().count());
         let loading = app.mod_row_loading(&entry.id, row_index, total_rows);
         let (row, target_len) = row_for_entry(
             app,
@@ -5491,6 +5837,7 @@ fn build_rows(app: &App, theme: &Theme) -> (Vec<Row<'static>>, ModCounts, usize)
             visible_enabled,
         },
         target_width,
+        mod_width,
     )
 }
 
@@ -5525,7 +5872,7 @@ fn mod_header_cell_static(label: &str, theme: &Theme) -> Cell<'static> {
 }
 
 fn loading_frame(row_index: usize, column_index: usize) -> &'static str {
-    const COLUMN_COUNT: i64 = 8;
+    const COLUMN_COUNT: i64 = 10;
     let now_ms = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
@@ -5588,6 +5935,7 @@ fn lerp_u64(min: u64, max: u64, t: f32) -> u64 {
 }
 
 fn row_for_missing_entry(
+    app: &App,
     row_index: usize,
     order_index: usize,
     entry: &crate::library::ProfileEntry,
@@ -5599,22 +5947,25 @@ fn row_for_missing_entry(
         .filter(|label| !label.trim().is_empty())
         .unwrap_or(&entry.id);
     let display = format!("{} (missing)", label.trim());
-    let enabled_text = if entry.enabled { "[x]" } else { "[ ]" };
+    let enabled_text = if entry.enabled { " [x]" } else { " [ ]" };
     let muted = Style::default().fg(theme.muted);
+    let order_text = format_order_cell(order_index);
+    let link_cell = sigillink_link_cell(app, &entry.id, theme);
     let dep_cell = Cell::from(Line::from(vec![
         Span::styled("  ", muted),
         Span::styled("  ", muted),
     ]));
     let mut row = Row::new(vec![
         Cell::from(enabled_text.to_string()).style(muted),
-        Cell::from(" ".to_string()).style(muted),
-        dep_cell,
-        Cell::from((order_index + 1).to_string()).style(muted),
+        Cell::from(order_text).style(muted),
         Cell::from(" ".to_string()).style(muted),
         Cell::from(" ".to_string()).style(muted),
-        Cell::from(" ".to_string()).style(muted),
-        Cell::from(" ".to_string()).style(muted),
+        link_cell,
         Cell::from(display).style(muted),
+        dep_cell,
+        Cell::from(" ".to_string()).style(muted),
+        Cell::from(" ".to_string()).style(muted),
+        Cell::from(" ".to_string()).style(muted),
     ]);
     if row_index % 2 == 1 {
         row = row.style(Style::default().bg(theme.row_alt_bg));
@@ -5637,12 +5988,23 @@ fn row_for_entry(
     let target_len = state_label.chars().count();
     let mut row = if loading {
         let loading_style = Style::default().fg(theme.muted);
-        let mut cells = Vec::with_capacity(9);
-        for column_index in 0..8 {
-            let frame = loading_frame(row_index, column_index);
+        let mut cells = Vec::with_capacity(10);
+        let mut loading_index = 0usize;
+        let push_loading = |cells: &mut Vec<Cell<'static>>, index: &mut usize| {
+            let frame = loading_frame(row_index, *index);
+            *index = index.saturating_add(1);
             cells.push(Cell::from(frame.to_string()).style(loading_style));
-        }
+        };
+        push_loading(&mut cells, &mut loading_index); // On
+        push_loading(&mut cells, &mut loading_index); // #
+        push_loading(&mut cells, &mut loading_index); // N
+        push_loading(&mut cells, &mut loading_index); // Kind
+        push_loading(&mut cells, &mut loading_index); // 🔗
         cells.push(Cell::from(mod_entry.display_name()));
+        push_loading(&mut cells, &mut loading_index); // Dep
+        push_loading(&mut cells, &mut loading_index); // Created
+        push_loading(&mut cells, &mut loading_index); // Added
+        push_loading(&mut cells, &mut loading_index); // Target
         Row::new(cells)
     } else {
         let has_override = !mod_entry.target_overrides.is_empty();
@@ -5655,9 +6017,9 @@ fn row_for_entry(
             } else {
                 theme.success
             };
-            ("[x]", Style::default().fg(color))
+            (" [x]", Style::default().fg(color))
         } else {
-            ("[ ]", Style::default().fg(theme.muted))
+            (" [ ]", Style::default().fg(theme.muted))
         };
         let kind = mod_kind_label(mod_entry);
         let kind_style = match kind {
@@ -5689,31 +6051,42 @@ fn row_for_entry(
             Span::styled(missing_text, missing_style),
             Span::styled(disabled_text, disabled_style),
         ]));
-        let order_style = if app.sigillink_ranking_enabled() {
-            if app.sigillink_is_pinned(&mod_entry.id) {
-                Style::default().fg(theme.warning)
-            } else {
-                Style::default().fg(theme.success)
-            }
-        } else {
-            Style::default().fg(theme.text)
-        };
+        let order_style = Style::default().fg(theme.text);
+        let link_cell = sigillink_link_cell(app, &mod_entry.id, theme);
+        let order_text = format_order_cell(order_index);
         Row::new(vec![
             Cell::from(enabled_text.to_string()).style(enabled_style),
+            Cell::from(order_text).style(order_style),
             Cell::from(native_marker.to_string()).style(native_style),
-            dep_cell,
-            Cell::from((order_index + 1).to_string()).style(order_style),
             Cell::from(kind.to_string()).style(kind_style),
-            Cell::from(state_label).style(state_style),
+            link_cell,
+            Cell::from(mod_entry.display_name()),
+            dep_cell,
             Cell::from(created_text).style(Style::default().fg(theme.muted)),
             Cell::from(added_text).style(Style::default().fg(theme.muted)),
-            Cell::from(mod_entry.display_name()),
+            Cell::from(state_label).style(state_style),
         ])
     };
     if row_index % 2 == 1 {
         row = row.style(Style::default().bg(theme.row_alt_bg));
     }
     (row, target_len)
+}
+
+fn sigillink_link_cell(app: &App, mod_id: &str, theme: &Theme) -> Cell<'static> {
+    if !app.sigillink_ranking_enabled() {
+        return Cell::from(" ".to_string()).style(Style::default().fg(theme.muted));
+    }
+    let style = if app.sigillink_is_pinned(mod_id) {
+        Style::default().fg(theme.warning)
+    } else {
+        Style::default().fg(theme.success)
+    };
+    Cell::from("🔗".to_string()).style(style)
+}
+
+fn format_order_cell(order_index: usize) -> String {
+    format!("{:^3}", order_index.saturating_add(1))
 }
 
 fn dep_count_segment(count: usize) -> String {
@@ -5742,6 +6115,21 @@ fn truncate_text(value: &str, max_width: usize) -> String {
     let mut out = value.chars().take(take).collect::<String>();
     out.push_str("...");
     out
+}
+
+fn display_width(value: &str) -> usize {
+    value.chars().count()
+}
+
+fn split_value_width(left: &str, right: &str) -> usize {
+    let left_len = display_width(left);
+    let right_len = display_width(right);
+    let gap = if left.is_empty() || right.is_empty() {
+        0
+    } else {
+        1
+    };
+    left_len + gap + right_len
 }
 
 fn format_rank_timestamp(timestamp: Option<i64>) -> String {
@@ -6009,7 +6397,7 @@ fn build_details(app: &App, theme: &Theme, width: usize) -> Vec<Line<'static>> {
     });
     if app.sigillink_ranking_enabled() && app.sigillink_is_pinned(&entry.id) {
         rows.push(KvRow {
-            label: "SigilLink pin".to_string(),
+            label: "SigiLink Pin".to_string(),
             value: "ON (Ctrl+R to restore)".to_string(),
             label_style,
             value_style: Style::default().fg(theme.warning),
@@ -6547,6 +6935,10 @@ fn legend_rows_for_focus(focus: Focus) -> Vec<LegendRow> {
                 key: "Dep".to_string(),
                 action: "Dependencies Missing/Off".to_string(),
             });
+            legend.push(LegendRow {
+                key: "🔗".to_string(),
+                action: "SigiLink ranking".to_string(),
+            });
         }
         Focus::Conflicts | Focus::Log => {}
     }
@@ -6629,28 +7021,16 @@ fn hotkey_rows_for_focus(focus: Focus) -> HotkeyRows {
                     action: "Move order".to_string(),
                 },
                 LegendRow {
-                    key: "PgUp/PgDn".to_string(),
-                    action: "Page scroll".to_string(),
-                },
-                LegendRow {
-                    key: "Shift+↑/↓".to_string(),
-                    action: "Jump 10".to_string(),
+                    key: "Ctrl+←/→".to_string(),
+                    action: "Sort column".to_string(),
                 },
                 LegendRow {
                     key: "/ or Ctrl+F".to_string(),
                     action: "Search".to_string(),
                 },
                 LegendRow {
-                    key: "Ctrl+←/→".to_string(),
-                    action: "Sort column".to_string(),
-                },
-                LegendRow {
-                    key: "Ctrl+↑/↓".to_string(),
-                    action: "Invert sort".to_string(),
-                },
-                LegendRow {
-                    key: "Ctrl+L".to_string(),
-                    action: "Clear search".to_string(),
+                    key: "PgUp/PgDn".to_string(),
+                    action: "Page scroll".to_string(),
                 },
                 LegendRow {
                     key: "Del".to_string(),
@@ -6666,11 +7046,7 @@ fn hotkey_rows_for_focus(focus: Focus) -> HotkeyRows {
                 },
                 LegendRow {
                     key: "Ctrl+R".to_string(),
-                    action: "Restore SigilLink ranking".to_string(),
-                },
-                LegendRow {
-                    key: "c".to_string(),
-                    action: "Clear overrides".to_string(),
+                    action: "Restore SigiLink ranking".to_string(),
                 },
             ]);
         }
@@ -6836,7 +7212,7 @@ fn format_context_rows(
     rows.iter()
         .map(|row| {
             let key_text = truncate_text(&row.key, key_width);
-            let key_len = key_text.chars().count();
+            let key_len = display_width(&key_text);
             let pad = " ".repeat(key_width.saturating_sub(key_len) + spacing);
             let action_text = truncate_text(&row.action, action_width);
             Line::from(vec![
@@ -6864,7 +7240,7 @@ fn format_legend_rows(
     rows.iter()
         .map(|row| {
             let key_text = truncate_text(&row.key, key_width);
-            let key_len = key_text.chars().count();
+            let key_len = display_width(&key_text);
             let pad = " ".repeat(key_width.saturating_sub(key_len) + spacing);
             let action_text = truncate_text(&row.action, action_width);
             Line::from(vec![
@@ -7065,7 +7441,7 @@ fn help_sections() -> Vec<HelpSection> {
             ],
         },
         HelpSection {
-            title: "SigilLink Intelligent Ranking Preview",
+            title: "SigiLink Intelligent Ranking Preview",
             rows: vec![
                 LegendRow {
                     key: "Enter/Y".to_string(),
@@ -7094,7 +7470,7 @@ fn help_sections() -> Vec<HelpSection> {
             ],
         },
         HelpSection {
-            title: "SigilLink Intelligent Ranking",
+            title: "SigiLink Intelligent Ranking",
             rows: vec![
                 LegendRow {
                     key: "What".to_string(),
@@ -7229,7 +7605,7 @@ fn help_key_width(sections: &[HelpSection], width: usize) -> usize {
     sections
         .iter()
         .flat_map(|section| section.rows.iter())
-        .map(|row| row.key.chars().count())
+        .map(|row| display_width(&row.key))
         .max()
         .unwrap_or(0)
         .min(width)
@@ -7316,50 +7692,97 @@ fn format_kv_lines(rows: &[KvRow], width: usize) -> Vec<Line<'static>> {
         .collect()
 }
 
-fn format_kv_lines_aligned(rows: &[KvRow], width: usize, label_width: usize) -> Vec<Line<'static>> {
-    if width == 0 || rows.is_empty() {
-        return Vec::new();
+fn format_kv_line_aligned(row: &KvRow, width: usize, label_width: usize) -> Line<'static> {
+    if width == 0 {
+        return Line::from("");
     }
     if width <= 2 {
-        return rows
-            .iter()
-            .map(|row| {
-                Line::from(Span::styled(
-                    truncate_text(&row.label, width),
-                    row.label_style,
-                ))
-            })
-            .collect();
+        return Line::from(Span::styled(
+            truncate_text(&row.label, width),
+            row.label_style,
+        ));
     }
-
     let label_width = label_width.min(width.saturating_sub(2));
     let value_width = width.saturating_sub(label_width + 2);
+    if value_width == 0 {
+        return Line::from(Span::styled(
+            truncate_text(&row.label, width),
+            row.label_style,
+        ));
+    }
+    let label_text = truncate_text(&row.label, label_width);
+    let label_len = label_text.chars().count();
+    let pad = " ".repeat(label_width.saturating_sub(label_len));
+    let value_text = truncate_text(&row.value, value_width);
+    if row.label.trim().is_empty() {
+        let indent = " ".repeat(label_width + 2);
+        return Line::from(vec![
+            Span::raw(indent),
+            Span::styled(value_text, row.value_style),
+        ]);
+    }
+    Line::from(vec![
+        Span::styled(label_text, row.label_style),
+        Span::raw(pad),
+        Span::styled(": ", row.label_style),
+        Span::styled(value_text, row.value_style),
+    ])
+}
 
-    rows.iter()
-        .map(|row| {
-            if value_width == 0 {
-                return Line::from(Span::styled(
-                    truncate_text(&row.label, width),
-                    row.label_style,
-                ));
-            }
-            let label_text = truncate_text(&row.label, label_width);
-            let label_len = label_text.chars().count();
-            let pad = " ".repeat(label_width.saturating_sub(label_len));
-            let value_text = truncate_text(&row.value, value_width);
-            if row.label.trim().is_empty() {
-                let indent = " ".repeat(label_width + 2);
-                return Line::from(vec![
-                    Span::raw(indent),
-                    Span::styled(value_text, row.value_style),
-                ]);
-            }
-            Line::from(vec![
-                Span::styled(label_text, row.label_style),
-                Span::raw(pad),
-                Span::styled(": ", row.label_style),
-                Span::styled(value_text, row.value_style),
-            ])
-        })
-        .collect()
+fn format_kv_line_split(
+    label: &str,
+    label_style: Style,
+    left_text: &str,
+    left_style: Style,
+    right_text: &str,
+    right_spans: Vec<Span<'static>>,
+    width: usize,
+    label_width: usize,
+    fallback_style: Style,
+) -> Line<'static> {
+    if width == 0 {
+        return Line::from("");
+    }
+    if width <= 2 {
+        return Line::from(Span::styled(truncate_text(label, width), label_style));
+    }
+    let label_width = label_width.min(width.saturating_sub(2));
+    let value_width = width.saturating_sub(label_width + 2);
+    if value_width == 0 {
+        return Line::from(Span::styled(truncate_text(label, width), label_style));
+    }
+    let label_text = truncate_text(label, label_width);
+    let label_len = label_text.chars().count();
+    let pad = " ".repeat(label_width.saturating_sub(label_len));
+    let right_len = right_text.chars().count();
+    if right_len >= value_width {
+        let truncated = truncate_text(right_text, value_width);
+        return Line::from(vec![
+            Span::styled(label_text, label_style),
+            Span::raw(pad),
+            Span::styled(": ", label_style),
+            Span::styled(truncated, fallback_style),
+        ]);
+    }
+    let mut left_available = value_width.saturating_sub(right_len);
+    let mut gap = 0usize;
+    if !left_text.is_empty() && right_len > 0 {
+        gap = 1;
+        left_available = left_available.saturating_sub(1);
+    }
+    let left_trunc = truncate_text(left_text, left_available);
+    let left_len = left_trunc.chars().count();
+    let pad_len = value_width.saturating_sub(left_len + gap + right_len);
+    let spacer = " ".repeat(pad_len + gap);
+    let mut spans = vec![
+        Span::styled(label_text, label_style),
+        Span::raw(pad),
+        Span::styled(": ", label_style),
+    ];
+    if !left_trunc.is_empty() {
+        spans.push(Span::styled(left_trunc, left_style));
+    }
+    spans.push(Span::raw(spacer));
+    spans.extend(right_spans);
+    Line::from(spans)
 }

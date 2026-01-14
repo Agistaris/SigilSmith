@@ -209,7 +209,13 @@ fn link_with_mode(
     target_root: &Path,
     mode: SigilLinkMode,
 ) -> Result<()> {
-    if dest.exists() {
+    if let Ok(meta) = fs::symlink_metadata(dest) {
+        if meta.file_type().is_dir() {
+            return Err(anyhow::anyhow!(
+                "destination exists as directory: {:?}",
+                dest
+            ));
+        }
         fs::remove_file(dest).with_context(|| format!("remove existing file {:?}", dest))?;
     }
     match mode {
@@ -982,6 +988,9 @@ fn collect_target_files_from_index(
             continue;
         }
         let rel = PathBuf::from(&entry.relative_path);
+        if is_ignored_deploy_path(&rel) {
+            continue;
+        }
         let source = source_root.join(&rel);
         if !source.exists() {
             continue;
@@ -1022,6 +1031,8 @@ fn is_ignored_deploy_path(path: &Path) -> bool {
     path.components().any(|component| {
         let part = component.as_os_str().to_string_lossy();
         part.eq_ignore_ascii_case("__MACOSX")
+            || part.eq_ignore_ascii_case(".ds_store")
+            || part.eq_ignore_ascii_case("thumbs.db")
             || part == ".git"
             || part == ".svn"
             || part == ".vscode"

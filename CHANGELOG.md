@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.6.8
+
+- Polish the settings menu layout (centered header, ON/OFF toggles, selected action highlight).
+- Keep SigiLink status visible in the context panel and reduce spurious SigiLink relocation prompts.
+
 ## 0.6.7
 
 - Add SigilLink Intelligent Ranking toggle with onboarding, per-mod pins, and diagnostics, plus ranking UI cues and hotkeys.
