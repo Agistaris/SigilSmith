@@ -258,7 +258,28 @@ where
             RankGroup::Pak
         };
         group_by_id.insert(entry.id.clone(), group);
-        if entry.enabled {
+    }
+
+    let mut missing_pak_ids = HashSet::new();
+    for entry in &profile.order {
+        if !entry.enabled {
+            continue;
+        }
+        let Some(mod_entry) = mod_map.get(&entry.id) else {
+            continue;
+        };
+        let group = *group_by_id.get(&entry.id).unwrap_or(&RankGroup::Pak);
+        if matches!(group, RankGroup::Pak)
+            && !has_pak_files(mod_entry, config, &paths.larian_mods_dir, &native_pak_index)
+        {
+            missing_pak_ids.insert(entry.id.clone());
+        }
+    }
+
+    for entry in &profile.order {
+        let group = *group_by_id.get(&entry.id).unwrap_or(&RankGroup::Pak);
+        let enabled_for_rank = entry.enabled && !missing_pak_ids.contains(&entry.id);
+        if enabled_for_rank {
             match group {
                 RankGroup::Loose => enabled_loose += 1,
                 RankGroup::Pak => enabled_pak += 1,
@@ -270,7 +291,8 @@ where
     let mut scan_total_loose = 0usize;
     let mut scan_total_pak = 0usize;
     for entry in &profile.order {
-        if !entry.enabled {
+        let enabled_for_rank = entry.enabled && !missing_pak_ids.contains(&entry.id);
+        if !enabled_for_rank {
             continue;
         }
         let Some(mod_entry) = mod_map.get(&entry.id) else {
@@ -300,6 +322,7 @@ where
         let Some(mod_entry) = mod_map.get(&entry.id) else {
             continue;
         };
+        let enabled_for_rank = entry.enabled && !missing_pak_ids.contains(&entry.id);
         let group = *group_by_id.get(&entry.id).unwrap_or(&RankGroup::Pak);
         let key = mod_cache_key(mod_entry);
         let mut cache_entry = cache
@@ -307,7 +330,7 @@ where
             .filter(|entry| entry.key == key)
             .cloned();
         let mut warning = None;
-        if entry.enabled {
+        if enabled_for_rank {
             let need_scan = *scan_needed.get(&entry.id).unwrap_or(&false);
             if need_scan {
                 let scanned = scan_mod_cache_entry(
@@ -361,7 +384,7 @@ where
             .or(mod_entry.modified_at)
             .unwrap_or(mod_entry.added_at);
 
-        if entry.enabled {
+        if enabled_for_rank {
             if let Some(entry_cache) = cache_entry.as_ref() {
                 for path in &entry_cache.file_paths {
                     file_paths.insert(path.clone());
@@ -380,7 +403,7 @@ where
             patch_notes = notes;
         }
 
-        if entry.enabled {
+        if enabled_for_rank {
             if let Some(message) = warning {
                 warnings.push(message);
             }
@@ -401,7 +424,7 @@ where
         let file_count = file_paths.len();
         items.push(RankItem {
             id: entry.id.clone(),
-            enabled: entry.enabled,
+            enabled: enabled_for_rank,
             group,
             file_paths,
             file_count,
@@ -911,6 +934,18 @@ fn collect_pak_paths(
     }
 
     pak_paths
+}
+
+fn has_pak_files(
+    mod_entry: &ModEntry,
+    config: &GameConfig,
+    larian_mods_dir: &Path,
+    native_pak_index: &[native_pak::NativePakEntry],
+) -> bool {
+    let cache_root = config.sigillink_cache_root();
+    collect_pak_paths(mod_entry, &cache_root, larian_mods_dir, native_pak_index)
+        .iter()
+        .any(|path| path.exists())
 }
 
 fn scan_pak_index(path: &Path) -> Result<Vec<FileEntry>> {

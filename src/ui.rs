@@ -493,6 +493,10 @@ fn handle_sigillink_missing_queue(app: &mut App, key: KeyEvent) -> Result<()> {
         KeyCode::Home => app.sigillink_missing_queue_home(),
         KeyCode::End => app.sigillink_missing_queue_end(),
         KeyCode::Enter => app.sigillink_missing_queue_open_selected(),
+        KeyCode::Char('c') if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+            app.sigillink_missing_queue_copy_uuid();
+        }
+        KeyCode::Char('C') => app.sigillink_missing_queue_copy_uuid(),
         KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
             app.sigillink_missing_queue_copy_link();
         }
@@ -511,7 +515,9 @@ enum SettingsItemKind {
     ActionClearSigilLinkCaches,
     SigilLinkHeader,
     SigilLinkToggle,
+    SigilLinkAutoPreview,
     SigilLinkInfo,
+    ActionSigilLinkSoloRank,
     ActionClearSigilLinkPins,
     ToggleModDelete,
     ToggleProfileDelete,
@@ -650,6 +656,18 @@ fn settings_items(app: &App) -> Vec<SettingsItem> {
             kind: SettingsItemKind::SigilLinkInfo,
             checked: None,
             selectable: false,
+        },
+        SettingsItem {
+            label: "Auto-preview ranking".to_string(),
+            kind: SettingsItemKind::SigilLinkAutoPreview,
+            checked: Some(app.app_config.sigillink_auto_preview),
+            selectable: true,
+        },
+        SettingsItem {
+            label: "SigiLink Ranking Solo Run".to_string(),
+            kind: SettingsItemKind::ActionSigilLinkSoloRank,
+            checked: None,
+            selectable: true,
         },
         SettingsItem {
             label: "Clear All SigiLink Pins".to_string(),
@@ -835,6 +853,12 @@ fn handle_settings_menu(app: &mut App, key: KeyEvent) -> Result<()> {
                             app.log_error(format!("Settings update failed: {err}"));
                         }
                     }
+                    SettingsItemKind::SigilLinkAutoPreview => {
+                        if let Err(err) = app.toggle_sigillink_auto_preview() {
+                            app.status = format!("Settings update failed: {err}");
+                            app.log_error(format!("Settings update failed: {err}"));
+                        }
+                    }
                     SettingsItemKind::ToggleDependencyDownloads => {
                         if let Err(err) = app.toggle_dependency_downloads() {
                             app.status = format!("Settings update failed: {err}");
@@ -865,6 +889,10 @@ fn handle_settings_menu(app: &mut App, key: KeyEvent) -> Result<()> {
                     }
                     SettingsItemKind::ActionClearSigilLinkPins => {
                         app.prompt_clear_sigillink_pins();
+                    }
+                    SettingsItemKind::ActionSigilLinkSoloRank => {
+                        app.close_settings_menu();
+                        app.run_sigillink_ranking_solo();
                     }
                     SettingsItemKind::ActionCheckUpdates => {
                         if matches!(app.update_status, UpdateStatus::Available { .. }) {
@@ -1757,10 +1785,14 @@ fn draw(frame: &mut Frame<'_>, app: &mut App) {
             Constraint::Length(bottom_height),
         ])
         .split(area);
+    let details_chunks = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Length(SIDE_PANEL_WIDTH), Constraint::Min(20)])
+        .split(chunks[2]);
     let lower_chunks = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(45), Constraint::Percentage(55)])
-        .split(chunks[2]);
+        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+        .split(details_chunks[1]);
 
     let (rows, counts, target_width, mod_width) = build_rows(app, &theme);
     let profile_label = app.active_profile_label();
@@ -1809,16 +1841,7 @@ fn draw(frame: &mut Frame<'_>, app: &mut App) {
     let legend_rows = legend_rows(app);
     let hotkey_rows = hotkey_rows(app);
     let base_context_height = context_labels.len().saturating_add(1);
-    let current_context_height =
-        base_context_height.saturating_add(legend_line_count(&legend_rows, &hotkey_rows));
-    let mods_legend_rows = legend_rows_for_focus(Focus::Mods);
-    let mods_hotkeys = hotkey_rows_for_focus(Focus::Mods);
-    let mods_context_height =
-        base_context_height.saturating_add(legend_line_count(&mods_legend_rows, &mods_hotkeys));
-    let inner_context_height = current_context_height
-        .max(mods_context_height)
-        .max(CONTEXT_HEIGHT as usize);
-    let desired_context_height = inner_context_height.saturating_add(2) as u16;
+    let desired_context_height = CONTEXT_HEIGHT.saturating_add(2);
     frame.render_widget(
         Block::default().style(Style::default().bg(theme.header_bg)),
         chunks[0],
@@ -1936,19 +1959,15 @@ fn draw(frame: &mut Frame<'_>, app: &mut App) {
         .constraints([Constraint::Length(SIDE_PANEL_WIDTH), Constraint::Min(20)])
         .split(chunks[1]);
     let left_area = body_chunks[0];
-    let context_height = desired_context_height.min(left_area.height);
-    let explorer_height = left_area.height.saturating_sub(context_height);
-    let explorer_area = Rect {
-        x: left_area.x,
-        y: left_area.y,
-        width: left_area.width,
-        height: explorer_height,
-    };
+    let explorer_area = left_area;
+    let context_height = desired_context_height.min(details_chunks[0].height);
     let context_area = Rect {
-        x: left_area.x,
-        y: left_area.y.saturating_add(explorer_height),
-        width: left_area.width,
-        height: left_area.height.saturating_sub(explorer_height),
+        x: details_chunks[0].x,
+        y: details_chunks[0]
+            .y
+            .saturating_add(details_chunks[0].height.saturating_sub(context_height)),
+        width: details_chunks[0].width,
+        height: context_height,
     };
 
     if explorer_area.height > 0 {
@@ -4165,13 +4184,13 @@ fn draw_sigillink_missing_queue(frame: &mut Frame<'_>, app: &mut App, theme: &Th
                 Span::styled(index_label, Style::default().fg(theme.muted)),
                 Span::styled(label_text, Style::default().fg(theme.text)),
             ]);
-            let link_label = if item.search_link.is_some() {
-                "Nexus search available"
+            let detail_text = if item.search_link.is_some() {
+                format!("UUID: {} | Nexus search", item.uuid)
             } else {
-                "No download link available"
+                format!("UUID: {}", item.uuid)
             };
             let detail_line = Line::from(Span::styled(
-                truncate_text(link_label, list_width),
+                truncate_text(&detail_text, list_width),
                 Style::default().fg(theme.muted),
             ));
             items.push(ListItem::new(vec![label_line, detail_line]));
@@ -4246,6 +4265,8 @@ fn draw_sigillink_missing_queue(frame: &mut Frame<'_>, app: &mut App, theme: &Th
         Span::styled(" Move  ", text_style),
         Span::styled("[Enter]", key_style),
         Span::styled(" Open link  ", text_style),
+        Span::styled("[c/C]", key_style),
+        Span::styled(" Copy UUID  ", text_style),
         Span::styled("[Ctrl+C]", key_style),
         Span::styled(" Copy link  ", text_style),
     ]);
@@ -5355,7 +5376,9 @@ fn build_settings_menu_lines(
             .filter(|item| {
                 matches!(
                     item.kind,
-                    SettingsItemKind::SigilLinkToggle | SettingsItemKind::SigilLinkInfo
+                    SettingsItemKind::SigilLinkToggle
+                        | SettingsItemKind::SigilLinkInfo
+                        | SettingsItemKind::SigilLinkAutoPreview
                 )
             })
             .map(|item| {
@@ -5421,6 +5444,7 @@ fn build_settings_menu_lines(
             | SettingsItemKind::ActionClearFrameworkCaches
             | SettingsItemKind::ActionClearSigilLinkCaches
             | SettingsItemKind::ActionClearSigilLinkPins
+            | SettingsItemKind::ActionSigilLinkSoloRank
             | SettingsItemKind::ActionCheckUpdates => {
                 lines.push(menu_row(
                     index == selected,
@@ -5432,6 +5456,7 @@ fn build_settings_menu_lines(
             SettingsItemKind::ToggleEnableModsAfterImport
             | SettingsItemKind::ToggleDeleteModFilesOnRemove
             | SettingsItemKind::SigilLinkToggle
+            | SettingsItemKind::SigilLinkAutoPreview
             | SettingsItemKind::ToggleProfileDelete
             | SettingsItemKind::ToggleModDelete
             | SettingsItemKind::ToggleDependencyDownloads
@@ -5446,7 +5471,10 @@ fn build_settings_menu_lines(
                         theme.warning
                     })
                     .add_modifier(Modifier::BOLD);
-                let key_width = if matches!(item.kind, SettingsItemKind::SigilLinkToggle) {
+                let key_width = if matches!(
+                    item.kind,
+                    SettingsItemKind::SigilLinkToggle | SettingsItemKind::SigilLinkAutoPreview
+                ) {
                     sigilink_key_w
                 } else {
                     general_key_w

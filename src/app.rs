@@ -40,6 +40,7 @@ use std::os::unix::fs::MetadataExt;
 const SEARCH_DEBOUNCE_MS: u64 = 250;
 const HOTKEY_DEBOUNCE_MS: u64 = 200;
 const HOTKEY_FADE_MS: u64 = 200;
+const SIGILLINK_AUTO_RANK_DEBOUNCE_SECS: u64 = 5;
 const METADATA_CACHE_VERSION: u32 = 2;
 const SMART_RANK_DEBOUNCE_MS: u64 = 600;
 const SMART_RANK_CACHE_SAVE_DEBOUNCE_MS: u64 = 400;
@@ -246,6 +247,7 @@ pub struct DependencyQueue {
 pub struct SigilLinkMissingItem {
     pub mod_id: String,
     pub name: String,
+    pub uuid: String,
     pub search_link: Option<String>,
 }
 
@@ -626,6 +628,7 @@ pub struct App {
     sigillink_force_preview: bool,
     sigillink_preview_notice: Option<String>,
     sigillink_rank_pending_import: bool,
+    sigillink_rank_debounce_until: Option<Instant>,
     sigillink_onboarding_pending: bool,
     pub smart_rank_progress: Option<smart_rank::SmartRankProgress>,
     smart_rank_cache: Option<SmartRankCache>,
@@ -757,6 +760,7 @@ pub enum SmartRankView {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SmartRankMode {
+    Auto,
     Preview,
     Warmup,
 }
@@ -1050,6 +1054,7 @@ impl App {
             sigillink_force_preview: false,
             sigillink_preview_notice: None,
             sigillink_rank_pending_import: false,
+            sigillink_rank_debounce_until: None,
             sigillink_onboarding_pending,
             smart_rank_progress: None,
             smart_rank_active: false,
@@ -1557,9 +1562,11 @@ impl App {
             self.sigillink_preview_notice =
                 Some("SigiLink Intelligent Ranking: Enabled".to_string());
             self.sigillink_rank_pending_import = true;
+            self.sigillink_rank_debounce_until = None;
             self.maybe_start_sigillink_rank_pending();
         } else {
             self.sigillink_rank_pending_import = false;
+            self.sigillink_rank_debounce_until = None;
             self.status = "SigiLink Intelligent Ranking: Disabled".to_string();
             self.set_toast(
                 "SigiLink Intelligent Ranking: Disabled",
@@ -1568,6 +1575,27 @@ impl App {
             );
         }
         Ok(())
+    }
+
+    pub fn toggle_sigillink_auto_preview(&mut self) -> Result<()> {
+        self.app_config.sigillink_auto_preview = !self.app_config.sigillink_auto_preview;
+        self.app_config.save()?;
+        let state = if self.app_config.sigillink_auto_preview {
+            "enabled"
+        } else {
+            "disabled"
+        };
+        self.status = format!("SigiLink auto-preview {state}");
+        Ok(())
+    }
+
+    pub fn run_sigillink_ranking_solo(&mut self) {
+        self.sigillink_rank_pending_import = false;
+        self.sigillink_rank_debounce_until = None;
+        self.sigillink_force_preview = true;
+        self.sigillink_preview_notice =
+            Some("SigiLink Intelligent Ranking: Manual run".to_string());
+        self.open_smart_rank_preview();
     }
 
     pub(crate) fn clear_system_caches(&mut self) {
@@ -1652,6 +1680,47 @@ impl App {
             SmartRankMode::Preview,
             smart_rank::SmartRankRefreshMode::Incremental,
         );
+    }
+
+    fn start_sigillink_auto_rank(&mut self) {
+        if self.smart_rank_active {
+            self.status = "SigiLink Intelligent Ranking already running".to_string();
+            return;
+        }
+        if self.is_busy() {
+            self.status = "SigiLink Intelligent Ranking blocked: busy".to_string();
+            self.log_warn("SigiLink Intelligent Ranking blocked: busy".to_string());
+            return;
+        }
+        if !self.paths_ready() {
+            self.status = "SigiLink Intelligent Ranking blocked: paths not set".to_string();
+            self.log_warn("SigiLink Intelligent Ranking blocked: paths not set".to_string());
+            return;
+        }
+
+        if self.app_config.sigillink_ranking_enabled {
+            let inputs_hash = self.sigillink_inputs_hash();
+            if let (Some(next), Some(prev)) =
+                (inputs_hash.as_deref(), self.sigillink_last_inputs_hash())
+            {
+                if next == prev {
+                    self.status = "SigiLink Intelligent Ranking: up to date".to_string();
+                    return;
+                }
+            }
+        }
+
+        self.sigillink_force_preview = false;
+        let mode = if self.app_config.sigillink_auto_preview {
+            self.sigillink_preview_notice =
+                Some("SigiLink Intelligent Ranking: Auto-rank".to_string());
+            SmartRankMode::Preview
+        } else {
+            self.sigillink_preview_notice = None;
+            SmartRankMode::Auto
+        };
+
+        self.start_smart_rank_scan(mode, smart_rank::SmartRankRefreshMode::Incremental);
     }
 
     pub fn clear_smart_rank_cache(&mut self) {
@@ -1848,6 +1917,8 @@ impl App {
             return;
         }
         self.sigillink_rank_pending_import = true;
+        self.sigillink_rank_debounce_until =
+            Some(Instant::now() + Duration::from_secs(SIGILLINK_AUTO_RANK_DEBOUNCE_SECS));
         self.maybe_start_sigillink_rank_pending();
     }
 
@@ -2249,8 +2320,8 @@ impl App {
                 if let Some(result) = cache.result.clone() {
                     self.clear_smart_rank_scan_state();
                     match mode {
-                        SmartRankMode::Preview => {
-                            self.finalize_smart_rank_preview(result);
+                        SmartRankMode::Auto | SmartRankMode::Preview => {
+                            self.finalize_smart_rank_preview(result, mode);
                         }
                         SmartRankMode::Warmup => {
                             self.log_info("SigiLink ranking warmup: cache hit".to_string());
@@ -2273,7 +2344,9 @@ impl App {
         self.smart_rank_view = SmartRankView::Changes;
         self.smart_rank_scroll = 0;
         self.status = match mode {
-            SmartRankMode::Preview => "SigiLink Intelligent Ranking: scanning...".to_string(),
+            SmartRankMode::Auto | SmartRankMode::Preview => {
+                "SigiLink Intelligent Ranking: scanning...".to_string()
+            }
             SmartRankMode::Warmup => "SigiLink Intelligent Ranking: warmup scan...".to_string(),
         };
         self.log_info("SigiLink ranking scan started".to_string());
@@ -2312,7 +2385,11 @@ impl App {
         });
     }
 
-    fn finalize_smart_rank_preview(&mut self, result: smart_rank::SmartRankResult) {
+    fn finalize_smart_rank_preview(
+        &mut self,
+        result: smart_rank::SmartRankResult,
+        mode: SmartRankMode,
+    ) {
         self.smart_rank_active = false;
         self.smart_rank_progress = None;
         self.smart_rank_mode = None;
@@ -2400,30 +2477,43 @@ impl App {
         report.moved = moves.len();
         self.update_sigillink_inputs_hash();
         let missing_items = self.refresh_sigillink_missing_paks();
-        let missing = report.missing;
-        if moves.is_empty()
-            && missing == 0
-            && result.warnings.is_empty()
-            && !self.sigillink_force_preview
-        {
-            self.status = "SigiLink Intelligent Ranking: no changes".to_string();
+
+        if moves.is_empty() {
+            for warning in result.warnings {
+                self.log_warn(warning);
+            }
+            let notice = self.sigillink_preview_notice.take();
             self.sigillink_force_preview = false;
-            self.sigillink_preview_notice = None;
+            if let Some(notice) = notice {
+                self.status = format!("{notice} (no changes)");
+            } else {
+                self.status = "SigiLink Intelligent Ranking: no changes".to_string();
+            }
             self.open_sigillink_missing_queue(SigilLinkMissingTrigger::Auto, missing_items);
             return;
         }
 
-        self.smart_rank_preview = Some(SmartRankPreview {
+        let preview = SmartRankPreview {
             proposed,
             report,
             moves,
             warnings: result.warnings,
             explain: result.explain,
-        });
+        };
         self.smart_rank_scroll = 0;
         self.smart_rank_view = SmartRankView::Changes;
-        self.status = "SigiLink Intelligent Ranking preview ready".to_string();
         self.sigillink_force_preview = false;
+        match mode {
+            SmartRankMode::Auto => {
+                self.smart_rank_preview = Some(preview);
+                self.apply_smart_rank_preview();
+            }
+            SmartRankMode::Preview => {
+                self.smart_rank_preview = Some(preview);
+                self.status = "SigiLink Intelligent Ranking preview ready".to_string();
+            }
+            SmartRankMode::Warmup => {}
+        }
     }
 
     pub fn apply_smart_rank_preview(&mut self) {
@@ -4324,10 +4414,10 @@ impl App {
         self.sigillink_onboarding_pending = false;
         self.open_dialog(Dialog {
             title: "SigiLink Intelligent Ranking".to_string(),
-            message: "SigilSmith can manage your mod order using SigiLink heuristics that analyze file relevance and conflicts.\n\nWhen enabled, SigilSmith will automatically rank your mods after you import or enable them. You can disable this anytime."
+            message: "SigilSmith can manage your mod order using SigiLink heuristics that analyze file relevance and conflicts.\n\nWhen enabled, SigiLink automatically reorders mods after imports or enables, and uses a link-based cache (hardlinks/symlinks) to keep deploys fast. You can disable this anytime."
                 .to_string(),
-            yes_label: "Enable".to_string(),
-            no_label: "Not now".to_string(),
+            yes_label: "Use SigiLink".to_string(),
+            no_label: "I like managing mods".to_string(),
             choice: DialogChoice::Yes,
             kind: DialogKind::SigilLinkOnboarding,
             toggle: None,
@@ -4341,7 +4431,14 @@ impl App {
         }
         if !self.app_config.sigillink_ranking_enabled {
             self.sigillink_rank_pending_import = false;
+            self.sigillink_rank_debounce_until = None;
             return;
+        }
+        if let Some(until) = self.sigillink_rank_debounce_until {
+            if Instant::now() < until {
+                return;
+            }
+            self.sigillink_rank_debounce_until = None;
         }
         if self.dialog.is_some()
             || !matches!(self.input_mode, InputMode::Normal)
@@ -4362,7 +4459,11 @@ impl App {
             return;
         }
         self.sigillink_rank_pending_import = false;
-        self.open_smart_rank_preview();
+        if self.sigillink_force_preview {
+            self.open_smart_rank_preview();
+            return;
+        }
+        self.start_sigillink_auto_rank();
     }
 
     fn maybe_debounce_mod_filter(&mut self) {
@@ -5147,6 +5248,24 @@ impl App {
         }
     }
 
+    pub fn sigillink_missing_queue_copy_uuid(&mut self) {
+        let Some(uuid) = self
+            .sigillink_missing_queue_selected()
+            .map(|item| item.uuid.clone())
+        else {
+            self.status = "No UUID available".to_string();
+            self.set_toast(
+                "No UUID available",
+                ToastLevel::Warn,
+                Duration::from_secs(2),
+            );
+            return;
+        };
+        if self.copy_to_clipboard(&uuid) {
+            self.status = "UUID copied".to_string();
+        }
+    }
+
     pub fn sigillink_missing_queue_cancel(&mut self) {
         let Some(queue) = self.sigillink_missing_queue.take() else {
             return;
@@ -5425,6 +5544,7 @@ impl App {
                 if !allow_during_warmup {
                     let label = match self.smart_rank_mode {
                         Some(SmartRankMode::Warmup) => "SigiLink ranking warmup",
+                        Some(SmartRankMode::Auto) => "SigiLink ranking",
                         Some(SmartRankMode::Preview) => "SigiLink ranking preview",
                         None => "SigiLink Intelligent Ranking",
                     };
@@ -6095,8 +6215,9 @@ impl App {
                         });
                         self.maybe_save_smart_rank_cache(true);
                         match self.smart_rank_mode.unwrap_or(SmartRankMode::Preview) {
-                            SmartRankMode::Preview => {
-                                self.finalize_smart_rank_preview(result);
+                            SmartRankMode::Auto | SmartRankMode::Preview => {
+                                let mode = self.smart_rank_mode.unwrap_or(SmartRankMode::Preview);
+                                self.finalize_smart_rank_preview(result, mode);
                             }
                             SmartRankMode::Warmup => {
                                 self.clear_smart_rank_scan_state();
@@ -7179,6 +7300,9 @@ impl App {
         if let Some(line) = self.smart_rank_status_line() {
             return line;
         }
+        if let Some(line) = self.sigillink_debounce_status_line() {
+            return line;
+        }
         self.status.clone()
     }
 
@@ -7234,6 +7358,16 @@ impl App {
             ));
         }
         Some("SigiLink Intelligent Ranking: warmup...".to_string())
+    }
+
+    fn sigillink_debounce_status_line(&self) -> Option<String> {
+        if !self.sigillink_rank_pending_import {
+            return None;
+        }
+        let until = self.sigillink_rank_debounce_until?;
+        let remaining = until.checked_duration_since(Instant::now())?;
+        let seconds = remaining.as_secs().max(1);
+        Some(format!("SigiLink ranking in {seconds}s"))
     }
 
     pub fn mod_row_loading(&self, mod_id: &str, _row_index: usize, _total_rows: usize) -> bool {
@@ -9908,11 +10042,32 @@ impl App {
             ) {
                 continue;
             }
-            let name = mod_entry.display_name();
-            let search_link = dependency_search_link(&name);
+            let uuid = mod_entry
+                .targets
+                .iter()
+                .find_map(|target| match target {
+                    InstallTarget::Pak { info, .. } => Some(info.uuid.clone()),
+                    _ => None,
+                })
+                .unwrap_or_else(|| mod_entry.id.clone());
+            let mut name = mod_entry.display_name();
+            let name_trim = name.trim();
+            if name_trim.is_empty()
+                || is_uuid_like(name_trim)
+                || name_trim.eq_ignore_ascii_case(&uuid)
+            {
+                name = "Missing Mod Name".to_string();
+            }
+            let search_query = if name == "Missing Mod Name" {
+                uuid.clone()
+            } else {
+                name.clone()
+            };
+            let search_link = dependency_search_link(&search_query);
             items.push(SigilLinkMissingItem {
                 mod_id: mod_entry.id.clone(),
                 name,
+                uuid,
                 search_link,
             });
         }
