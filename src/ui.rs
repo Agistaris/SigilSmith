@@ -652,7 +652,7 @@ fn settings_items(app: &App) -> Vec<SettingsItem> {
             selectable: false,
         },
         SettingsItem {
-            label: "Enable SigiLink Ranking".to_string(),
+            label: "SigiLink Auto Ranking".to_string(),
             kind: SettingsItemKind::SigilLinkToggle,
             checked: Some(app.sigillink_ranking_enabled()),
             selectable: true,
@@ -676,7 +676,7 @@ fn settings_items(app: &App) -> Vec<SettingsItem> {
             selectable: false,
         },
         SettingsItem {
-            label: "Auto-preview ranking".to_string(),
+            label: "Auto Accept Diffs".to_string(),
             kind: SettingsItemKind::SigilLinkAutoPreview,
             checked: Some(app.app_config.sigillink_auto_preview),
             selectable: true,
@@ -6234,11 +6234,7 @@ fn build_rows(app: &App, theme: &Theme) -> (Vec<Row<'static>>, ModCounts, usize,
             continue;
         };
         let display_name = mod_entry.display_name();
-        let display_len = if app.sigillink_missing_pak(&mod_entry.id) {
-            display_name.chars().count().saturating_add(2)
-        } else {
-            display_name.chars().count()
-        };
+        let display_len = display_name.chars().count();
         mod_width = mod_width.max(display_len);
         let loading = app.mod_row_loading(&entry.id, row_index, total_rows);
         let effective_enabled = entry.enabled && !app.sigillink_missing_pak(&entry.id);
@@ -6505,6 +6501,9 @@ fn row_for_entry(
 }
 
 fn sigillink_link_cell(app: &App, mod_id: &str, theme: &Theme) -> Cell<'static> {
+    if app.sigillink_missing_pak(mod_id) {
+        return Cell::from("!".to_string()).style(Style::default().fg(theme.warning));
+    }
     if !app.sigillink_ranking_enabled() {
         return Cell::from(" ".to_string()).style(Style::default().fg(theme.muted));
     }
@@ -6521,13 +6520,10 @@ fn mod_name_cell(app: &App, mod_entry: &ModEntry, theme: &Theme) -> Cell<'static
         let name_style = Style::default()
             .fg(theme.text)
             .add_modifier(Modifier::CROSSED_OUT);
-        let marker_style = Style::default().fg(theme.warning);
-        let line = Line::from(vec![
-            Span::styled(mod_entry.display_name(), name_style),
-            Span::raw(" "),
-            Span::styled("!", marker_style),
-        ]);
-        Cell::from(line)
+        Cell::from(Line::from(Span::styled(
+            mod_entry.display_name(),
+            name_style,
+        )))
     } else {
         Cell::from(mod_entry.display_name())
     }
@@ -7139,7 +7135,7 @@ fn build_conflict_details(
     )));
 
     footer_lines.push(Line::from(Span::styled(
-        truncate_text("←/→ cycle  1-9 pick  Enter apply  C clear  P pick", width),
+        truncate_text("←/→ cycle  1-9 pick  Auto apply 5s  C clear  P pick", width),
         Style::default().fg(theme.muted),
     )));
 

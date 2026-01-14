@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.7.3
+
+- Default SigiLink auto-accept diffs and keep auto ranking running after enable/disable and reorder changes.
+- Auto-apply override winner selection after a 5s debounce.
+- Move missing-mod markers to the link column and keep names clean.
+
 ## 0.7.2
 
 - Redesign overrides panel with fast scrolling, inline winner selection, and a candidate picker.

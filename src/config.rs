@@ -29,7 +29,7 @@ pub struct AppConfig {
     pub sigillink_onboarded: bool,
     #[serde(default = "default_false")]
     pub sigillink_ranking_enabled: bool,
-    #[serde(default = "default_false")]
+    #[serde(default = "default_true")]
     pub sigillink_auto_preview: bool,
 }
 
@@ -61,7 +61,7 @@ impl AppConfig {
             show_startup_dependency_notice: true,
             sigillink_onboarded: false,
             sigillink_ranking_enabled: false,
-            sigillink_auto_preview: false,
+            sigillink_auto_preview: true,
         };
         config.save()?;
         Ok(config)

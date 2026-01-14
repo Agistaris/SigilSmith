@@ -1576,17 +1576,16 @@ impl App {
         self.app_config.save()?;
         if enabled {
             self.sigillink_force_preview = true;
-            self.sigillink_preview_notice =
-                Some("SigiLink Intelligent Ranking: Enabled".to_string());
+            self.sigillink_preview_notice = Some("SigiLink Auto Ranking: Enabled".to_string());
             self.sigillink_rank_pending_import = true;
             self.sigillink_rank_debounce_until = None;
             self.maybe_start_sigillink_rank_pending();
         } else {
             self.sigillink_rank_pending_import = false;
             self.sigillink_rank_debounce_until = None;
-            self.status = "SigiLink Intelligent Ranking: Disabled".to_string();
+            self.status = "SigiLink Auto Ranking: Disabled".to_string();
             self.set_toast(
-                "SigiLink Intelligent Ranking: Disabled",
+                "SigiLink Auto Ranking: Disabled",
                 ToastLevel::Warn,
                 Duration::from_secs(3),
             );
@@ -1598,11 +1597,11 @@ impl App {
         self.app_config.sigillink_auto_preview = !self.app_config.sigillink_auto_preview;
         self.app_config.save()?;
         let state = if self.app_config.sigillink_auto_preview {
-            "enabled"
+            "ON"
         } else {
-            "disabled"
+            "OFF"
         };
-        self.status = format!("SigiLink auto-preview {state}");
+        self.status = format!("SigiLink auto accept diffs {state}");
         Ok(())
     }
 
@@ -1731,10 +1730,11 @@ impl App {
         let mode = if self.app_config.sigillink_auto_preview {
             self.sigillink_preview_notice =
                 Some("SigiLink Intelligent Ranking: Auto-rank".to_string());
-            SmartRankMode::Preview
-        } else {
-            self.sigillink_preview_notice = None;
             SmartRankMode::Auto
+        } else {
+            self.sigillink_preview_notice =
+                Some("SigiLink Intelligent Ranking: Auto-rank".to_string());
+            SmartRankMode::Preview
         };
 
         self.start_smart_rank_scan(mode, smart_rank::SmartRankRefreshMode::Incremental);
@@ -4422,6 +4422,18 @@ impl App {
             }
         }
 
+        let override_ready = self
+            .pending_override
+            .as_ref()
+            .map(|pending| {
+                pending.last_input.elapsed()
+                    >= Duration::from_secs(SIGILLINK_AUTO_RANK_DEBOUNCE_SECS)
+            })
+            .unwrap_or(false);
+        if override_ready {
+            self.apply_pending_override();
+        }
+
         self.maybe_debounce_mod_filter();
         self.update_hotkey_transition();
         self.maybe_show_sigillink_onboarding();
@@ -4472,7 +4484,7 @@ impl App {
             message: "SigilSmith can manage your mod order using SigiLink heuristics that analyze file relevance and conflicts.\n\nWhen enabled, SigiLink automatically reorders mods after imports or enables, and uses a link-based cache (hardlinks/symlinks) to keep deploys fast. You can disable this anytime."
                 .to_string(),
             yes_label: "Use SigiLink".to_string(),
-            no_label: "I like managing mods".to_string(),
+            no_label: "I like mod chaos".to_string(),
             choice: DialogChoice::Yes,
             kind: DialogKind::SigilLinkOnboarding,
             toggle: None,
@@ -9228,11 +9240,11 @@ impl App {
                     let _ = self.app_config.save();
                     self.sigillink_force_preview = true;
                     self.sigillink_preview_notice =
-                        Some("SigiLink Intelligent Ranking: Enabled".to_string());
+                        Some("SigiLink Auto Ranking: Enabled".to_string());
                     self.open_smart_rank_preview();
                 } else {
                     let _ = self.app_config.save();
-                    self.status = "SigiLink Intelligent Ranking: Disabled".to_string();
+                    self.status = "SigiLink Auto Ranking: Disabled".to_string();
                 }
             }
             DialogKind::SigilLinkRankPrompt => {
@@ -10153,6 +10165,9 @@ impl App {
             if self.allow_persistence() {
                 let _ = self.library.save(&self.config.data_dir);
             }
+            if self.app_config.sigillink_ranking_enabled {
+                self.request_sigillink_auto_rank();
+            }
         }
         changed
     }
@@ -10316,6 +10331,9 @@ impl App {
                     true,
                 );
                 self.queue_auto_deploy("order changed");
+                if self.app_config.sigillink_ranking_enabled {
+                    self.request_sigillink_auto_rank();
+                }
             }
         } else {
             self.move_mode = true;
@@ -10481,6 +10499,9 @@ impl App {
                 true,
             );
             self.queue_auto_deploy("order changed");
+            if self.app_config.sigillink_ranking_enabled {
+                self.request_sigillink_auto_rank();
+            }
         }
     }
 
@@ -10526,6 +10547,9 @@ impl App {
                 true,
             );
             self.queue_auto_deploy("order changed");
+            if self.app_config.sigillink_ranking_enabled {
+                self.request_sigillink_auto_rank();
+            }
         }
     }
 
