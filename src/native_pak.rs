@@ -53,6 +53,8 @@ pub fn resolve_native_pak_path(
     }
 
     let folder_key = normalize_pak_key(&info.folder);
+    let folder_base = info.folder.split('_').next().unwrap_or(&info.folder);
+    let folder_base_key = normalize_pak_key(folder_base);
     let name_key = normalize_pak_key(&info.name);
     let uuid_key = normalize_pak_key(&info.uuid);
     let uuid_prefix = uuid_key
@@ -60,6 +62,7 @@ pub fn resolve_native_pak_path(
         .or_else(|| uuid_key.get(0..12))
         .unwrap_or("")
         .to_string();
+    let uuid_short = uuid_key.get(0..8).unwrap_or("").to_string();
 
     let mut best: Option<&NativePakEntry> = None;
     let mut best_score = 0i32;
@@ -79,9 +82,21 @@ pub fn resolve_native_pak_path(
                 len_diff = len_diff.min(detail.len_diff);
             }
         }
+        if !uuid_short.is_empty() {
+            if let Some(detail) = match_detail(&entry.normalized, &uuid_short, 55, 40, 25) {
+                score = score.saturating_add(detail.score);
+                len_diff = len_diff.min(detail.len_diff);
+            }
+        }
         if let Some(detail) = match_detail(&entry.normalized, &folder_key, 90, 70, 50) {
             score = score.saturating_add(detail.score);
             len_diff = len_diff.min(detail.len_diff);
+        }
+        if !folder_base_key.is_empty() && folder_base_key != folder_key {
+            if let Some(detail) = match_detail(&entry.normalized, &folder_base_key, 75, 55, 35) {
+                score = score.saturating_add(detail.score);
+                len_diff = len_diff.min(detail.len_diff);
+            }
         }
         if let Some(detail) = match_detail(&entry.normalized, &name_key, 85, 65, 45) {
             score = score.saturating_add(detail.score);
