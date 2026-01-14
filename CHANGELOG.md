@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.6.9
+
+- Treat missing .pak mods as disabled in the mod stack (toggles + counts) and surface a missing-files queue with Nexus links.
+- Improve native .pak filename matching to resolve truncated Mod.io filenames.
+
 ## 0.6.8
 
 - Polish the settings menu layout (centered header, ON/OFF toggles, selected action highlight).

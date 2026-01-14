@@ -1199,7 +1199,11 @@ impl App {
         let enabled = profile
             .order
             .iter()
-            .filter(|entry| entry.enabled && entry.missing_label.is_none())
+            .filter(|entry| {
+                entry.enabled
+                    && entry.missing_label.is_none()
+                    && !self.sigillink_missing_pak(&entry.id)
+            })
             .count();
         (total, enabled)
     }
@@ -1211,7 +1215,11 @@ impl App {
         profile
             .order
             .iter()
-            .filter(|entry| entry.enabled && entry.missing_label.is_none())
+            .filter(|entry| {
+                entry.enabled
+                    && entry.missing_label.is_none()
+                    && !self.sigillink_missing_pak(&entry.id)
+            })
             .map(|entry| entry.id.clone())
             .collect()
     }
@@ -9615,7 +9623,8 @@ impl App {
             return;
         };
         let id = entry.id.clone();
-        let enabled = entry.enabled;
+        let missing = self.sigillink_missing_pak(&id);
+        let enabled = entry.enabled && !missing;
         if enabled {
             let dependents = self.find_active_dependents(&[id.clone()]);
             if dependents.is_empty() {

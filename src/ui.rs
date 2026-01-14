@@ -5993,7 +5993,7 @@ fn build_rows(app: &App, theme: &Theme) -> (Vec<Row<'static>>, ModCounts, usize,
     let total_rows = profile_entries.len();
 
     for (row_index, (order_index, entry)) in profile_entries.iter().enumerate() {
-        if entry.enabled && entry.missing_label.is_none() {
+        if entry.enabled && entry.missing_label.is_none() && !app.sigillink_missing_pak(&entry.id) {
             visible_enabled += 1;
         }
         if entry.missing_label.is_some() {
@@ -6032,11 +6032,12 @@ fn build_rows(app: &App, theme: &Theme) -> (Vec<Row<'static>>, ModCounts, usize,
         };
         mod_width = mod_width.max(display_len);
         let loading = app.mod_row_loading(&entry.id, row_index, total_rows);
+        let effective_enabled = entry.enabled && !app.sigillink_missing_pak(&entry.id);
         let (row, target_len) = row_for_entry(
             app,
             row_index,
             *order_index,
-            entry.enabled,
+            effective_enabled,
             mod_entry,
             theme,
             dep_lookup.as_ref(),
@@ -6614,8 +6615,9 @@ fn build_details(app: &App, theme: &Theme, width: usize) -> Vec<Line<'static>> {
             });
         }
     }
-    let enabled_label = if entry.enabled { "Yes" } else { "No" };
-    let enabled_style = Style::default().fg(if entry.enabled {
+    let effective_enabled = entry.enabled && !app.sigillink_missing_pak(&entry.id);
+    let enabled_label = if effective_enabled { "Yes" } else { "No" };
+    let enabled_style = Style::default().fg(if effective_enabled {
         theme.success
     } else {
         theme.muted
