@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.6.7
+
+- Add SigilLink Intelligent Ranking toggle with onboarding, per-mod pins, and diagnostics, plus ranking UI cues and hotkeys.
+
 ## 0.6.6
 
 - Add mod list preview with destination/mode options plus missing/ambiguous summaries; unresolved entries render as grey "(missing)" placeholders that are ignored by deploy and auto-resolve on sync.
