@@ -264,6 +264,19 @@ pub struct SigilLinkMissingQueue {
     pub trigger: SigilLinkMissingTrigger,
 }
 
+#[derive(Debug, Clone)]
+pub struct OverrideCandidateItem {
+    pub mod_id: String,
+    pub name: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct OverrideCandidatePicker {
+    pub conflict_index: usize,
+    pub items: Vec<OverrideCandidateItem>,
+    pub selected: usize,
+}
+
 impl DependencyItem {
     pub fn is_override_action(&self) -> bool {
         matches!(self.kind, DependencyItemKind::OverrideAction)
@@ -679,6 +692,8 @@ pub struct App {
     dependency_queue_view: usize,
     sigillink_missing_queue: Option<SigilLinkMissingQueue>,
     sigillink_missing_queue_view: usize,
+    override_picker: Option<OverrideCandidatePicker>,
+    override_picker_view: usize,
     sigillink_missing_paks: HashSet<String>,
     sigillink_missing_paks_ignored: HashSet<String>,
     dependency_cache: HashMap<String, Vec<String>>,
@@ -1105,6 +1120,8 @@ impl App {
             dependency_queue_view: 1,
             sigillink_missing_queue: None,
             sigillink_missing_queue_view: 1,
+            override_picker: None,
+            override_picker_view: 1,
             sigillink_missing_paks: HashSet::new(),
             sigillink_missing_paks_ignored: HashSet::new(),
             dependency_cache: HashMap::new(),
@@ -2602,6 +2619,21 @@ impl App {
         self.conflict_pending
     }
 
+    pub fn deploy_active(&self) -> bool {
+        self.deploy_active
+    }
+
+    pub fn deploy_pending(&self) -> bool {
+        self.deploy_pending
+    }
+
+    pub fn deploy_reason_contains(&self, needle: &str) -> bool {
+        self.deploy_reason
+            .as_deref()
+            .map(|reason| reason.contains(needle))
+            .unwrap_or(false)
+    }
+
     pub fn is_busy(&self) -> bool {
         self.startup_pending
             || self.native_sync_active
@@ -3520,11 +3552,40 @@ impl App {
         self.schedule_conflict_winner(winner_id);
     }
 
+    pub fn select_conflict_candidate(&mut self, index: usize) {
+        let Some(conflict) = self.conflicts.get(self.conflict_selected) else {
+            return;
+        };
+        let Some(candidate) = conflict.candidates.get(index) else {
+            return;
+        };
+        self.schedule_conflict_winner(candidate.mod_id.clone());
+    }
+
+    pub fn apply_pending_override(&mut self) {
+        let Some(pending) = self.pending_override.take() else {
+            return;
+        };
+        if pending.conflict_index >= self.conflicts.len() {
+            return;
+        }
+        if let Err(err) = self.set_conflict_winner(pending.conflict_index, pending.winner_id) {
+            self.status = format!("Override failed: {err}");
+            self.log_error(format!("Override failed: {err}"));
+        }
+    }
+
     pub fn clear_conflict_override(&mut self) {
         let Some(conflict) = self.conflicts.get(self.conflict_selected).cloned() else {
             return;
         };
-        self.schedule_conflict_winner(conflict.default_winner_id);
+        self.pending_override = None;
+        if let Err(err) =
+            self.set_conflict_winner(self.conflict_selected, conflict.default_winner_id)
+        {
+            self.status = format!("Override failed: {err}");
+            self.log_error(format!("Override failed: {err}"));
+        }
     }
 
     fn schedule_conflict_winner(&mut self, winner_id: String) {
@@ -4358,21 +4419,6 @@ impl App {
         if let Some(toast) = &self.toast {
             if toast.expires_at <= Instant::now() {
                 self.toast = None;
-            }
-        }
-
-        if let Some(pending) = &self.pending_override {
-            if pending.last_input.elapsed() >= Duration::from_millis(250) {
-                let pending = self.pending_override.take().unwrap();
-                if pending.conflict_index >= self.conflicts.len() {
-                    return;
-                }
-                if let Err(err) =
-                    self.set_conflict_winner(pending.conflict_index, pending.winner_id)
-                {
-                    self.status = format!("Override failed: {err}");
-                    self.log_error(format!("Override failed: {err}"));
-                }
             }
         }
 
@@ -5287,6 +5333,107 @@ impl App {
         } else {
             self.status = "Missing mod files; enable blocked".to_string();
         }
+    }
+
+    pub fn override_picker_active(&self) -> bool {
+        self.override_picker.is_some()
+    }
+
+    pub fn override_picker(&self) -> Option<&OverrideCandidatePicker> {
+        self.override_picker.as_ref()
+    }
+
+    pub fn set_override_picker_view(&mut self, view_items: usize) {
+        self.override_picker_view = view_items.max(1);
+    }
+
+    pub fn override_picker_page_step(&self) -> isize {
+        let step = self.override_picker_view.saturating_sub(1).max(1);
+        step as isize
+    }
+
+    pub fn override_picker_move(&mut self, delta: isize) {
+        let Some(picker) = &mut self.override_picker else {
+            return;
+        };
+        if picker.items.is_empty() {
+            picker.selected = 0;
+            return;
+        }
+        let len = picker.items.len() as isize;
+        let mut next = picker.selected as isize + delta;
+        if next < 0 {
+            next = 0;
+        }
+        if next >= len {
+            next = len - 1;
+        }
+        picker.selected = next as usize;
+    }
+
+    pub fn override_picker_home(&mut self) {
+        if let Some(picker) = &mut self.override_picker {
+            picker.selected = 0;
+        }
+    }
+
+    pub fn override_picker_end(&mut self) {
+        if let Some(picker) = &mut self.override_picker {
+            if !picker.items.is_empty() {
+                picker.selected = picker.items.len() - 1;
+            }
+        }
+    }
+
+    pub fn open_override_picker(&mut self) {
+        let Some(conflict) = self.conflicts.get(self.conflict_selected) else {
+            return;
+        };
+        if conflict.candidates.is_empty() {
+            return;
+        }
+        let pending_id = self
+            .pending_override
+            .as_ref()
+            .filter(|pending| pending.conflict_index == self.conflict_selected)
+            .map(|pending| pending.winner_id.clone());
+        let selected_id = pending_id.unwrap_or_else(|| conflict.winner_id.clone());
+        let selected = conflict
+            .candidates
+            .iter()
+            .position(|candidate| candidate.mod_id == selected_id)
+            .unwrap_or(0);
+        let items = conflict
+            .candidates
+            .iter()
+            .map(|candidate| OverrideCandidateItem {
+                mod_id: candidate.mod_id.clone(),
+                name: candidate.mod_name.clone(),
+            })
+            .collect();
+        self.override_picker = Some(OverrideCandidatePicker {
+            conflict_index: self.conflict_selected,
+            items,
+            selected,
+        });
+    }
+
+    pub fn override_picker_cancel(&mut self) {
+        self.override_picker = None;
+    }
+
+    pub fn override_picker_select(&mut self) {
+        let Some(picker) = self.override_picker.take() else {
+            return;
+        };
+        let Some(item) = picker.items.get(picker.selected) else {
+            return;
+        };
+        if picker.conflict_index >= self.conflicts.len() {
+            return;
+        }
+        self.conflict_selected = picker.conflict_index;
+        self.schedule_conflict_winner(item.mod_id.clone());
     }
 
     pub fn sigillink_missing_pak(&self, mod_id: &str) -> bool {

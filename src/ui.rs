@@ -26,7 +26,7 @@ use ratatui::{
     },
 };
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     io,
     path::{Path, PathBuf},
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
@@ -199,6 +199,9 @@ fn run_loop(terminal: &mut Terminal<impl Backend>, app: &mut App) -> Result<()> 
 fn handle_key(app: &mut App, key: KeyEvent) -> Result<()> {
     if app.dialog.is_some() {
         return handle_dialog_mode(app, key);
+    }
+    if app.override_picker_active() {
+        return handle_override_picker(app, key);
     }
     if app.sigillink_missing_queue_active() {
         return handle_sigillink_missing_queue(app, key);
@@ -501,6 +504,21 @@ fn handle_sigillink_missing_queue(app: &mut App, key: KeyEvent) -> Result<()> {
             app.sigillink_missing_queue_copy_link();
         }
         KeyCode::Esc => app.sigillink_missing_queue_cancel(),
+        _ => {}
+    }
+    Ok(())
+}
+
+fn handle_override_picker(app: &mut App, key: KeyEvent) -> Result<()> {
+    match key.code {
+        KeyCode::Up | KeyCode::Char('k') | KeyCode::Char('K') => app.override_picker_move(-1),
+        KeyCode::Down | KeyCode::Char('j') | KeyCode::Char('J') => app.override_picker_move(1),
+        KeyCode::PageUp => app.override_picker_move(-app.override_picker_page_step()),
+        KeyCode::PageDown => app.override_picker_move(app.override_picker_page_step()),
+        KeyCode::Home => app.override_picker_home(),
+        KeyCode::End => app.override_picker_end(),
+        KeyCode::Enter => app.override_picker_select(),
+        KeyCode::Esc => app.override_picker_cancel(),
         _ => {}
     }
     Ok(())
@@ -1186,12 +1204,26 @@ fn handle_mods_mode(app: &mut App, key: KeyEvent) -> Result<()> {
 
 fn handle_conflicts_mode(app: &mut App, key: KeyEvent) -> Result<()> {
     match key.code {
-        KeyCode::Left | KeyCode::Char('h') | KeyCode::Char('H') => app.conflict_move_up(),
-        KeyCode::Right | KeyCode::Char('l') | KeyCode::Char('L') => app.conflict_move_down(),
-        KeyCode::Up | KeyCode::Char('k') | KeyCode::Char('K') => app.cycle_conflict_winner(-1),
-        KeyCode::Down | KeyCode::Char('j') | KeyCode::Char('J') | KeyCode::Enter => {
-            app.cycle_conflict_winner(1)
+        KeyCode::Up | KeyCode::Char('k') | KeyCode::Char('K') => app.conflict_move_up(),
+        KeyCode::Down | KeyCode::Char('j') | KeyCode::Char('J') => app.conflict_move_down(),
+        KeyCode::Left | KeyCode::Char('h') | KeyCode::Char('H') => app.cycle_conflict_winner(-1),
+        KeyCode::Right | KeyCode::Char('l') | KeyCode::Char('L') => app.cycle_conflict_winner(1),
+        KeyCode::Char('1') => app.select_conflict_candidate(0),
+        KeyCode::Char('2') => app.select_conflict_candidate(1),
+        KeyCode::Char('3') => app.select_conflict_candidate(2),
+        KeyCode::Char('4') => app.select_conflict_candidate(3),
+        KeyCode::Char('5') => app.select_conflict_candidate(4),
+        KeyCode::Char('6') => app.select_conflict_candidate(5),
+        KeyCode::Char('7') => app.select_conflict_candidate(6),
+        KeyCode::Char('8') => app.select_conflict_candidate(7),
+        KeyCode::Char('9') => app.select_conflict_candidate(8),
+        KeyCode::Char('p') | KeyCode::Char('P') => app.open_override_picker(),
+        KeyCode::Char('c') | KeyCode::Char('C') => {
+            if !key.modifiers.contains(KeyModifiers::CONTROL) {
+                app.clear_conflict_override();
+            }
         }
+        KeyCode::Enter => app.apply_pending_override(),
         KeyCode::Backspace | KeyCode::Delete => app.clear_conflict_override(),
         _ => {}
     }
@@ -2188,7 +2220,7 @@ fn draw(frame: &mut Frame<'_>, app: &mut App) {
 
     let details_focus = app.focus == Focus::Conflicts;
     let details_title = if details_focus {
-        "Override Actions"
+        "Overrides"
     } else {
         "Details"
     };
@@ -2197,8 +2229,8 @@ fn draw(frame: &mut Frame<'_>, app: &mut App) {
     } else {
         theme.border
     };
-    let swap_info = app.override_swap_info();
-    let details_bg = if swap_info.is_some() {
+    let swap_active = app.override_swap.is_some();
+    let details_bg = if swap_active {
         theme.swap_bg
     } else {
         theme.log_bg
@@ -2221,7 +2253,8 @@ fn draw(frame: &mut Frame<'_>, app: &mut App) {
     let details_content_width = details_inner
         .width
         .saturating_sub(SUBPANEL_PAD_X.saturating_mul(2)) as usize;
-    let details_lines = build_details(app, &theme, details_content_width);
+    let details_content_height = details_inner.height.saturating_sub(SUBPANEL_PAD_TOP) as usize;
+    let details_lines = build_details(app, &theme, details_content_width, details_content_height);
     let details_lines = pad_lines(
         details_lines,
         SUBPANEL_PAD_X as usize,
@@ -2231,39 +2264,6 @@ fn draw(frame: &mut Frame<'_>, app: &mut App) {
         .style(Style::default().fg(theme.text).bg(details_bg))
         .block(details_block);
     frame.render_widget(details, details_area);
-    if let Some(swap) = swap_info {
-        if details_inner.height > 0 && details_inner.width > 0 {
-            let overlay_height = details_inner.height.min(2);
-            let overlay_area = Rect {
-                x: details_inner.x,
-                y: details_inner.y + details_inner.height.saturating_sub(overlay_height),
-                width: details_inner.width,
-                height: overlay_height,
-            };
-            let swap_text = format!("Swap: {} → {}", swap.from, swap.to);
-            let mut overlay_lines = Vec::new();
-            let overlay_width = overlay_area.width as usize;
-            if overlay_height >= 1 {
-                overlay_lines.push(Line::from(Span::styled(
-                    truncate_text(&swap_text, overlay_width),
-                    Style::default().fg(theme.header_bg),
-                )));
-            }
-            if overlay_height >= 2 {
-                overlay_lines.push(Line::from(Span::styled(
-                    "Loading swap...",
-                    Style::default()
-                        .fg(theme.header_bg)
-                        .add_modifier(Modifier::BOLD),
-                )));
-            }
-            let overlay = Paragraph::new(overlay_lines)
-                .style(Style::default().bg(details_bg))
-                .alignment(Alignment::Center);
-            frame.render_widget(overlay, overlay_area);
-        }
-    }
-
     let context_block = theme
         .block("Context")
         .style(Style::default().bg(theme.subpanel_bg));
@@ -2626,6 +2626,9 @@ fn draw(frame: &mut Frame<'_>, app: &mut App) {
 
     if app.dependency_queue_active() {
         draw_dependency_queue(frame, app, &theme);
+    }
+    if app.override_picker_active() {
+        draw_override_picker(frame, app, &theme);
     }
     if app.sigillink_missing_queue_active() {
         draw_sigillink_missing_queue(frame, app, &theme);
@@ -4105,6 +4108,170 @@ fn draw_dependency_queue(frame: &mut Frame<'_>, app: &mut App, theme: &Theme) {
     ];
     let footer_line_two = Line::from(footer_line_two);
     let footer_widget = Paragraph::new(vec![footer_line_one, footer_line_two])
+        .style(Style::default().bg(theme.overlay_panel_bg))
+        .alignment(Alignment::Left);
+    frame.render_widget(footer_widget, chunks[2]);
+}
+
+fn draw_override_picker(frame: &mut Frame<'_>, app: &mut App, theme: &Theme) {
+    let (items, selected, conflict_index) = {
+        let Some(picker) = app.override_picker() else {
+            return;
+        };
+        (picker.items.clone(), picker.selected, picker.conflict_index)
+    };
+    let (conflict_path, conflict_winner_id) = {
+        let Some(conflict) = app.conflicts.get(conflict_index) else {
+            return;
+        };
+        (conflict.relative_path.clone(), conflict.winner_id.clone())
+    };
+
+    let area = frame.size();
+    let max_width = area.width.saturating_sub(6).max(1);
+    let width = max_width.clamp(52, 96);
+    let max_height = area.height.saturating_sub(6).max(1);
+    let height = max_height.clamp(10, 20);
+    let (outer_area, modal) = padded_modal(area, width, height, 2, 1);
+
+    render_modal_backdrop(frame, outer_area, theme);
+    let panel_block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(theme.overlay_border))
+        .style(Style::default().bg(theme.overlay_panel_bg))
+        .title(Span::styled(
+            "Override candidates",
+            Style::default()
+                .fg(theme.accent)
+                .add_modifier(Modifier::BOLD),
+        ));
+    let inner = panel_block.inner(modal);
+    frame.render_widget(panel_block, modal);
+
+    let file_name = conflict_path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .map(|name| name.to_string())
+        .unwrap_or_else(|| conflict_path.to_string_lossy().to_string());
+    let header_lines = vec![
+        Line::from(Span::styled(
+            truncate_text(&format!("File: {file_name}"), inner.width as usize),
+            Style::default().fg(theme.text),
+        )),
+        Line::from(Span::styled(
+            "Select the winner for this file.",
+            Style::default().fg(theme.muted),
+        )),
+    ];
+    let header_height = header_lines.len() as u16 + 1;
+    let footer_height = 2u16;
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(header_height),
+            Constraint::Min(4),
+            Constraint::Length(footer_height),
+        ])
+        .split(inner);
+    let header_widget =
+        Paragraph::new(header_lines).style(Style::default().bg(theme.overlay_panel_bg));
+    frame.render_widget(header_widget, chunks[0]);
+
+    let list_area = chunks[1];
+    let list_width = list_area.width as usize;
+    let view_items = list_area.height as usize;
+    app.set_override_picker_view(view_items.max(1));
+
+    let pending_winner = app
+        .pending_override
+        .as_ref()
+        .filter(|pending| pending.conflict_index == conflict_index)
+        .map(|pending| pending.winner_id.as_str());
+    let winner_id = pending_winner.unwrap_or(conflict_winner_id.as_str());
+
+    let list_items: Vec<ListItem<'_>> = items
+        .iter()
+        .map(|item| {
+            let selected = item.mod_id == winner_id;
+            let marker = if selected { "[x]" } else { "[ ]" };
+            let label_width = list_width.saturating_sub(marker.len() + 1);
+            let label = truncate_text(&item.name, label_width);
+            ListItem::new(Line::from(vec![
+                Span::styled(marker.to_string(), Style::default().fg(theme.muted)),
+                Span::raw(" "),
+                Span::styled(label, Style::default().fg(theme.text)),
+            ]))
+        })
+        .collect();
+
+    let highlight_style = Style::default()
+        .bg(theme.accent_soft)
+        .fg(Color::Black)
+        .add_modifier(Modifier::BOLD);
+    let list = List::new(list_items)
+        .style(Style::default().bg(theme.overlay_panel_bg))
+        .highlight_style(highlight_style)
+        .highlight_symbol("");
+
+    let total_items = items.len();
+    let mut state = ListState::default();
+    let mut offset = 0usize;
+    if total_items > view_items {
+        if selected >= view_items {
+            offset = selected + 1 - view_items;
+        }
+        let max_offset = total_items.saturating_sub(view_items);
+        if offset > max_offset {
+            offset = max_offset;
+        }
+    }
+    if total_items > 0 {
+        state.select(Some(selected));
+        *state.offset_mut() = offset;
+    }
+
+    let show_scroll = total_items > view_items;
+    let list_chunks = if show_scroll {
+        Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Min(1), Constraint::Length(1)])
+            .split(list_area)
+    } else {
+        Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Min(1), Constraint::Length(0)])
+            .split(list_area)
+    };
+    frame.render_stateful_widget(list, list_chunks[0], &mut state);
+    if show_scroll && list_chunks[1].width > 0 {
+        let scroll_len = total_items.saturating_sub(view_items).saturating_add(1);
+        let mut scroll_state = ScrollbarState::new(scroll_len)
+            .position(offset)
+            .viewport_content_length(view_items);
+        let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
+            .track_symbol(Some("░"))
+            .thumb_symbol("▓")
+            .begin_symbol(Some("▲"))
+            .end_symbol(Some("▼"))
+            .track_style(Style::default().fg(theme.border))
+            .thumb_style(Style::default().fg(theme.accent));
+        frame.render_stateful_widget(scrollbar, list_chunks[1], &mut scroll_state);
+    }
+
+    let key_style = Style::default()
+        .fg(theme.accent)
+        .add_modifier(Modifier::BOLD);
+    let text_style = Style::default().fg(theme.muted);
+    let footer_line_one = Line::from(vec![
+        Span::styled("↑/↓", key_style),
+        Span::styled(" Move  ", text_style),
+        Span::styled("[Enter]", key_style),
+        Span::styled(" Select  ", text_style),
+        Span::styled("[Esc]", key_style),
+        Span::styled(" Cancel", text_style),
+    ]);
+    let footer_widget = Paragraph::new(vec![footer_line_one])
         .style(Style::default().bg(theme.overlay_panel_bg))
         .alignment(Alignment::Left);
     frame.render_widget(footer_widget, chunks[2]);
@@ -6534,12 +6701,12 @@ fn push_truncated_prefixed(
     ]));
 }
 
-fn build_details(app: &App, theme: &Theme, width: usize) -> Vec<Line<'static>> {
+fn build_details(app: &App, theme: &Theme, width: usize, height: usize) -> Vec<Line<'static>> {
     if app.focus == Focus::Explorer {
         return build_explorer_details(app, theme, width);
     }
     if app.focus == Focus::Conflicts {
-        return build_conflict_details(app, theme, width);
+        return build_conflict_details(app, theme, width, height);
     }
 
     let profile_entries = app.visible_profile_entries();
@@ -6888,82 +7055,273 @@ fn build_explorer_details(app: &App, theme: &Theme, width: usize) -> Vec<Line<'s
     }
 }
 
-fn build_conflict_details(app: &App, theme: &Theme, width: usize) -> Vec<Line<'static>> {
-    let swap_active = app.override_swap_info().is_some();
-    if !swap_active {
-        if app.conflicts_scanning() {
-            return vec![Line::from(Span::styled(
-                "Scanning overrides...",
-                Style::default().fg(theme.muted),
-            ))];
-        }
-        if app.conflicts_pending() {
-            return vec![Line::from(Span::styled(
-                "Override scan queued...",
-                Style::default().fg(theme.muted),
-            ))];
-        }
+fn build_conflict_details(
+    app: &App,
+    theme: &Theme,
+    width: usize,
+    height: usize,
+) -> Vec<Line<'static>> {
+    if width == 0 || height == 0 {
+        return Vec::new();
     }
-    let Some(conflict) = app.conflicts.get(app.conflict_selected) else {
-        return vec![Line::from(Span::styled(
-            "No overrides detected.",
-            Style::default().fg(theme.muted),
-        ))];
+
+    let center_line = |text: &str, style: Style| -> Line<'static> {
+        let trimmed = truncate_text(text, width);
+        let len = display_width(&trimmed);
+        if len >= width {
+            return Line::from(Span::styled(trimmed, style));
+        }
+        let pad = width.saturating_sub(len) / 2;
+        Line::from(Span::styled(
+            format!("{}{}", " ".repeat(pad), trimmed),
+            style,
+        ))
     };
 
-    let label_style = Style::default().fg(theme.muted);
-    let value_style = Style::default().fg(theme.text);
-    let mut rows = Vec::new();
-    rows.push(KvRow {
-        label: "Target".to_string(),
-        value: target_kind_label(conflict.target).to_string(),
-        label_style,
-        value_style,
-    });
-    let path_label = conflict.relative_path.to_string_lossy().to_string();
-    rows.push(KvRow {
-        label: "Path".to_string(),
-        value: path_label,
-        label_style,
-        value_style,
-    });
-    let winner_style = Style::default().fg(theme.success);
-    rows.push(KvRow {
-        label: "Winner".to_string(),
-        value: conflict.winner_name.clone(),
-        label_style,
-        value_style: winner_style,
-    });
-    let mut lines = format_kv_lines(&rows, width);
-    if conflict.overridden {
-        lines.push(Line::from(Span::styled(
-            "Manual override active",
-            Style::default().fg(theme.warning),
-        )));
+    if app.conflicts_scanning() {
+        return vec![center_line(
+            "Scanning overrides...",
+            Style::default().fg(theme.muted),
+        )];
     }
-    lines.push(Line::from(Span::styled(
-        "Candidates:",
-        Style::default().fg(theme.accent),
-    )));
-    for candidate in &conflict.candidates {
-        let selected = candidate.mod_id == conflict.winner_id;
-        let marker = if selected { "[x]" } else { "[ ]" };
-        let style = if selected {
-            Style::default().fg(theme.success)
-        } else {
-            Style::default().fg(theme.muted)
-        };
-        let prefix = format!("{marker} ");
-        push_truncated_prefixed(
-            &mut lines,
-            &prefix,
-            style,
-            &candidate.mod_name,
-            style,
-            width,
-        );
+    if app.conflicts_pending() {
+        return vec![center_line(
+            "Override scan queued...",
+            Style::default().fg(theme.muted),
+        )];
+    }
+    if app.conflicts.is_empty() {
+        return vec![center_line(
+            "No Overrides Available",
+            Style::default().fg(theme.muted),
+        )];
     }
 
+    let total = app.conflicts.len();
+    let selected = app.conflict_selected.min(total.saturating_sub(1));
+    let conflict = &app.conflicts[selected];
+
+    let header = format!(
+        "Overrides — Target: {}   ({} files)   ({}/{})",
+        target_kind_label(conflict.target),
+        total,
+        selected + 1,
+        total
+    );
+    let mut lines = Vec::new();
+    lines.push(Line::from(Span::styled(
+        truncate_text(&header, width),
+        Style::default().fg(theme.accent),
+    )));
+
+    let mut footer_lines = Vec::new();
+    let path_label = conflict.relative_path.to_string_lossy();
+    footer_lines.push(Line::from(Span::styled(
+        truncate_text(&format!("Path: {path_label}"), width),
+        Style::default().fg(theme.muted),
+    )));
+
+    let pending_winner = app
+        .pending_override
+        .as_ref()
+        .filter(|pending| pending.conflict_index == selected)
+        .map(|pending| pending.winner_id.as_str());
+    let winner_id = pending_winner.unwrap_or(conflict.winner_id.as_str());
+    let winner_name = conflict
+        .candidates
+        .iter()
+        .find(|candidate| candidate.mod_id == winner_id)
+        .map(|candidate| candidate.mod_name.clone())
+        .unwrap_or_else(|| conflict.winner_name.clone());
+    footer_lines.push(Line::from(Span::styled(
+        truncate_text(&format!("Winner: {winner_name}"), width),
+        Style::default().fg(theme.text),
+    )));
+
+    footer_lines.push(Line::from(Span::styled(
+        truncate_text("←/→ cycle  1-9 pick  Enter apply  C clear  P pick", width),
+        Style::default().fg(theme.muted),
+    )));
+
+    let status_line = {
+        let override_reason = app.deploy_reason_contains("conflict override");
+        if app.deploy_active() && override_reason {
+            Some("Loading...".to_string())
+        } else if app.deploy_pending() && override_reason {
+            Some("Queued...".to_string())
+        } else if app.override_swap.is_some() {
+            Some("Applied".to_string())
+        } else {
+            None
+        }
+    };
+    if let Some(status) = status_line {
+        footer_lines.push(Line::from(Span::styled(
+            truncate_text(&status, width),
+            Style::default().fg(theme.muted),
+        )));
+    }
+
+    let header_height = 1usize;
+    let mut list_height = height.saturating_sub(header_height + footer_lines.len());
+    while list_height == 0 && !footer_lines.is_empty() {
+        footer_lines.pop();
+        list_height = height.saturating_sub(header_height + footer_lines.len());
+    }
+    if list_height == 0 {
+        list_height = 1;
+    }
+
+    let view_height = list_height;
+    let mut offset = 0usize;
+    if total > view_height {
+        if selected >= view_height {
+            offset = selected + 1 - view_height;
+        }
+        let max_offset = total.saturating_sub(view_height);
+        if offset > max_offset {
+            offset = max_offset;
+        }
+    }
+
+    let max_label_len = 10usize;
+    let mut label_counts: HashMap<String, usize> = HashMap::new();
+    let short_label = |name: &str| -> String {
+        let trimmed = name.trim();
+        if trimmed.is_empty() {
+            return "Mod".to_string();
+        }
+        truncate_text(trimmed, max_label_len)
+    };
+
+    for index in offset..offset.saturating_add(view_height) {
+        let Some(entry) = app.conflicts.get(index) else {
+            break;
+        };
+        let pending_winner = app
+            .pending_override
+            .as_ref()
+            .filter(|pending| pending.conflict_index == index)
+            .map(|pending| pending.winner_id.as_str());
+        let winner_id = pending_winner.unwrap_or(entry.winner_id.as_str());
+
+        label_counts.clear();
+        let mut labels: Vec<String> = entry
+            .candidates
+            .iter()
+            .map(|candidate| short_label(&candidate.mod_name))
+            .collect();
+        for label in &labels {
+            *label_counts.entry(label.clone()).or_insert(0) += 1;
+        }
+        if label_counts.values().any(|count| *count > 1) {
+            let mut seen: HashMap<String, usize> = HashMap::new();
+            for label in labels.iter_mut() {
+                let total = label_counts.get(label).copied().unwrap_or(1);
+                if total <= 1 {
+                    continue;
+                }
+                let counter = seen.entry(label.clone()).or_insert(0);
+                *counter += 1;
+                let suffix = counter.to_string();
+                let available = max_label_len.saturating_sub(suffix.len());
+                let base = truncate_text(label, available);
+                *label = format!("{base}{suffix}");
+            }
+        }
+
+        let selected_row = index == selected;
+        let row_bg = if selected_row {
+            Some(theme.accent_soft)
+        } else {
+            None
+        };
+        let apply_bg = |style: Style| -> Style {
+            if let Some(bg) = row_bg {
+                style.bg(bg)
+            } else {
+                style
+            }
+        };
+
+        let mut right_spans = Vec::new();
+        let mut right_width = 0usize;
+        let mut shown = 0usize;
+        let min_left = 12usize.min(width);
+        let max_right_width = width.saturating_sub(min_left).saturating_sub(1);
+        for (candidate, label) in entry.candidates.iter().zip(labels.iter()) {
+            let marker = if candidate.mod_id == winner_id {
+                "x"
+            } else {
+                " "
+            };
+            let chunk = format!("[{marker}]{label}");
+            let chunk_width = display_width(&chunk);
+            let sep = if right_spans.is_empty() { 0 } else { 2 };
+            if right_width + sep + chunk_width > max_right_width {
+                break;
+            }
+            if sep > 0 {
+                right_spans.push(Span::styled(" ".repeat(sep), apply_bg(Style::default())));
+                right_width += sep;
+            }
+            let style = if candidate.mod_id == winner_id {
+                Style::default().fg(theme.success)
+            } else {
+                Style::default().fg(theme.muted)
+            };
+            right_spans.push(Span::styled(chunk, apply_bg(style)));
+            right_width += chunk_width;
+            shown += 1;
+        }
+
+        let hidden = entry.candidates.len().saturating_sub(shown);
+        if hidden > 0 && right_width < max_right_width {
+            let suffix = format!("+{hidden}");
+            let suffix_width = display_width(&suffix);
+            let sep = if right_spans.is_empty() { 0 } else { 1 };
+            if right_width + sep + suffix_width <= max_right_width {
+                if sep > 0 {
+                    right_spans.push(Span::styled(" ", apply_bg(Style::default())));
+                    right_width += 1;
+                }
+                right_spans.push(Span::styled(
+                    suffix,
+                    apply_bg(Style::default().fg(theme.muted)),
+                ));
+                right_width += suffix_width;
+            }
+        }
+
+        let gap = if right_width == 0 { 0 } else { 1 };
+        let left_width = width.saturating_sub(right_width + gap);
+        let file_name = entry
+            .relative_path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .map(|name| name.to_string())
+            .unwrap_or_else(|| entry.relative_path.to_string_lossy().to_string());
+        let left_text = truncate_text(&file_name, left_width);
+        let left_pad = left_width.saturating_sub(display_width(&left_text));
+        let mut spans = Vec::new();
+        spans.push(Span::styled(
+            left_text,
+            apply_bg(Style::default().fg(theme.text)),
+        ));
+        if left_pad > 0 {
+            spans.push(Span::styled(
+                " ".repeat(left_pad),
+                apply_bg(Style::default()),
+            ));
+        }
+        if gap > 0 {
+            spans.push(Span::styled(" ".repeat(gap), apply_bg(Style::default())));
+        }
+        spans.extend(right_spans);
+        lines.push(Line::from(spans));
+    }
+
+    lines.extend(footer_lines);
     lines
 }
 

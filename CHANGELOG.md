@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.7.2
+
+- Redesign overrides panel with fast scrolling, inline winner selection, and a candidate picker.
+
 ## 0.7.1
 
 - Nudge left-side panel widths for improved layout balance.
