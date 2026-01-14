@@ -4762,32 +4762,25 @@ fn build_settings_menu_lines(app: &App, theme: &Theme, selected: usize) -> Vec<L
     }
 
     lines.push(Line::from(""));
+
+    let hotkeys_line = "Tab: cycle focus  Esc: close  ?: full hotkeys";
+    let modlist_line = "Ctrl+E: export mod list  Ctrl+P: import mod list";
+
     lines.push(Line::from(Span::styled(
         "Hotkeys",
-        Style::default()
-            .fg(theme.accent)
-            .add_modifier(Modifier::BOLD),
+        Style::default().fg(theme.accent).add_modifier(Modifier::BOLD),
     )));
+
     lines.push(Line::from(Span::styled(
-        "Tab: cycle focus  Esc: close",
+        hotkeys_line,
         Style::default().fg(theme.muted),
     )));
+
     lines.push(Line::from(Span::styled(
-        "/ or Ctrl+F: search  Ctrl+L: clear",
+        modlist_line,
         Style::default().fg(theme.muted),
     )));
-    lines.push(Line::from(Span::styled(
-        "Del: remove mod   r/F2: rename profile",
-        Style::default().fg(theme.muted),
-    )));
-    lines.push(Line::from(Span::styled(
-        "1-5: set target override",
-        Style::default().fg(theme.muted),
-    )));
-    lines.push(Line::from(Span::styled(
-        "←/→: select override  ↑/↓: choose",
-        Style::default().fg(theme.muted),
-    )));
+
 
     let root = if app.config.game_root.as_os_str().is_empty() {
         "<not set>".to_string()
@@ -6369,7 +6362,7 @@ fn legend_rows_for_focus(focus: Focus) -> Vec<LegendRow> {
             });
             legend.push(LegendRow {
                 key: "Dep".to_string(),
-                action: "Missing/disabled dependencies".to_string(),
+                action: "Dependencies Missing/Off".to_string(),
             });
         }
         Focus::Conflicts | Focus::Log => {}
@@ -6486,7 +6479,7 @@ fn hotkey_rows_for_focus(focus: Focus) -> HotkeyRows {
                 },
                 LegendRow {
                     key: "A/S/X".to_string(),
-                    action: "Enable/Disable/Invert visible".to_string(),
+                    action: "All On/Off/Invert".to_string(),
                 },
                 LegendRow {
                     key: "c".to_string(),

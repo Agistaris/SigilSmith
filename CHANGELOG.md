@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.6.6
+
+- Add mod list preview with destination/mode options plus missing/ambiguous summaries; unresolved entries render as grey "(missing)" placeholders that are ignored by deploy and auto-resolve on sync.
+- Export mod list JSON + clipboard and add modsettings.lsx interop export with atomic writes.
+- Clean up loose-file display names by stripping common Nexus suffixes and refresh settings menu cache actions/order.
+
 ## 0.6.5
 
 - Label the Dep column in the header and legend.
