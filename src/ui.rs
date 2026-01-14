@@ -36,7 +36,7 @@ const SIDE_PANEL_WIDTH: u16 = 48;
 const STATUS_WIDTH: u16 = SIDE_PANEL_WIDTH;
 const STATUS_HEIGHT: u16 = 3;
 const HEADER_HEIGHT: u16 = 3;
-const DETAILS_HEIGHT: u16 = 10;
+const DETAILS_HEIGHT: u16 = 11;
 const CONTEXT_HEIGHT: u16 = 27;
 const LOG_MIN_HEIGHT: u16 = 5;
 const CONFLICTS_BAR_HEIGHT: u16 = STATUS_HEIGHT;
@@ -888,6 +888,7 @@ fn handle_settings_menu(app: &mut App, key: KeyEvent) -> Result<()> {
                         app.clear_sigillink_caches();
                     }
                     SettingsItemKind::ActionClearSigilLinkPins => {
+                        app.close_settings_menu();
                         app.prompt_clear_sigillink_pins();
                     }
                     SettingsItemKind::ActionSigilLinkSoloRank => {
@@ -1785,15 +1786,6 @@ fn draw(frame: &mut Frame<'_>, app: &mut App) {
             Constraint::Length(bottom_height),
         ])
         .split(area);
-    let details_chunks = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([Constraint::Length(SIDE_PANEL_WIDTH), Constraint::Min(20)])
-        .split(chunks[2]);
-    let lower_chunks = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
-        .split(details_chunks[1]);
-
     let (rows, counts, target_width, mod_width) = build_rows(app, &theme);
     let profile_label = app.active_profile_label();
     let renaming_active = app.is_renaming_active_profile();
@@ -1954,21 +1946,43 @@ fn draw(frame: &mut Frame<'_>, app: &mut App) {
         .alignment(Alignment::Right);
     frame.render_widget(stats, header_line_chunks[2]);
 
-    let body_chunks = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([Constraint::Length(SIDE_PANEL_WIDTH), Constraint::Min(20)])
-        .split(chunks[1]);
-    let left_area = body_chunks[0];
-    let explorer_area = left_area;
-    let context_height = desired_context_height.min(details_chunks[0].height);
+    let left_panel_height = chunks[1].height.saturating_add(chunks[2].height);
+    let left_panel_area = Rect {
+        x: chunks[1].x,
+        y: chunks[1].y,
+        width: SIDE_PANEL_WIDTH,
+        height: left_panel_height,
+    };
+    let context_height = desired_context_height.min(left_panel_area.height);
+    let explorer_height = left_panel_area.height.saturating_sub(context_height);
+    let explorer_area = Rect {
+        x: left_panel_area.x,
+        y: left_panel_area.y,
+        width: left_panel_area.width,
+        height: explorer_height,
+    };
     let context_area = Rect {
-        x: details_chunks[0].x,
-        y: details_chunks[0]
-            .y
-            .saturating_add(details_chunks[0].height.saturating_sub(context_height)),
-        width: details_chunks[0].width,
+        x: left_panel_area.x,
+        y: left_panel_area.y.saturating_add(explorer_height),
+        width: left_panel_area.width,
         height: context_height,
     };
+    let mod_stack_area = Rect {
+        x: chunks[1].x.saturating_add(SIDE_PANEL_WIDTH),
+        y: chunks[1].y,
+        width: chunks[1].width.saturating_sub(SIDE_PANEL_WIDTH),
+        height: chunks[1].height,
+    };
+    let details_row_area = Rect {
+        x: chunks[2].x.saturating_add(SIDE_PANEL_WIDTH),
+        y: chunks[2].y,
+        width: chunks[2].width.saturating_sub(SIDE_PANEL_WIDTH),
+        height: chunks[2].height,
+    };
+    let lower_chunks = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+        .split(details_row_area);
 
     if explorer_area.height > 0 {
         let explorer_block = theme
@@ -2014,8 +2028,8 @@ fn draw(frame: &mut Frame<'_>, app: &mut App) {
             theme.border
         }))
         .style(Style::default().bg(theme.mod_bg));
-    let mod_stack_inner = mod_stack_block.inner(body_chunks[1]);
-    frame.render_widget(mod_stack_block, body_chunks[1]);
+    let mod_stack_inner = mod_stack_block.inner(mod_stack_area);
+    frame.render_widget(mod_stack_block, mod_stack_area);
 
     let mod_chunks = Layout::default()
         .direction(Direction::Vertical)

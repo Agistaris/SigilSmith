@@ -1899,6 +1899,15 @@ impl App {
         if self.dialog.is_some() {
             return;
         }
+        if self.sigillink_pin_count() == 0 {
+            self.status = "SigiLink pins already cleared".to_string();
+            self.set_toast(
+                "SigiLink pins already cleared",
+                ToastLevel::Info,
+                Duration::from_secs(2),
+            );
+            return;
+        }
         self.open_dialog(Dialog {
             title: "Clear all SigiLink pins?".to_string(),
             message: "This will remove manual SigiLink overrides in the current profile."
