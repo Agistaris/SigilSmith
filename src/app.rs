@@ -242,6 +242,26 @@ pub struct DependencyQueue {
     pub selected: usize,
 }
 
+#[derive(Debug, Clone)]
+pub struct SigilLinkMissingItem {
+    pub mod_id: String,
+    pub name: String,
+    pub search_link: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SigilLinkMissingTrigger {
+    Auto,
+    Enable,
+}
+
+#[derive(Debug, Clone)]
+pub struct SigilLinkMissingQueue {
+    pub items: Vec<SigilLinkMissingItem>,
+    pub selected: usize,
+    pub trigger: SigilLinkMissingTrigger,
+}
+
 impl DependencyItem {
     pub fn is_override_action(&self) -> bool {
         matches!(self.kind, DependencyItemKind::OverrideAction)
@@ -654,6 +674,10 @@ pub struct App {
     dependency_queue: Option<DependencyQueue>,
     pending_dependency_enable: Option<Vec<String>>,
     dependency_queue_view: usize,
+    sigillink_missing_queue: Option<SigilLinkMissingQueue>,
+    sigillink_missing_queue_view: usize,
+    sigillink_missing_paks: HashSet<String>,
+    sigillink_missing_paks_ignored: HashSet<String>,
     dependency_cache: HashMap<String, Vec<String>>,
     dependency_cache_ready: bool,
     pending_delete_mod: Option<(String, String)>,
@@ -1074,6 +1098,10 @@ impl App {
             dependency_queue: None,
             pending_dependency_enable: None,
             dependency_queue_view: 1,
+            sigillink_missing_queue: None,
+            sigillink_missing_queue_view: 1,
+            sigillink_missing_paks: HashSet::new(),
+            sigillink_missing_paks_ignored: HashSet::new(),
             dependency_cache: HashMap::new(),
             dependency_cache_ready: false,
             pending_delete_mod: None,
@@ -1136,6 +1164,7 @@ impl App {
         if matches!(mode, StartupMode::Cli) {
             app.finish_startup();
         }
+        app.refresh_sigillink_missing_paks();
         Ok(app)
     }
 
@@ -2362,6 +2391,7 @@ impl App {
         let mut report = result.report;
         report.moved = moves.len();
         self.update_sigillink_inputs_hash();
+        let missing_items = self.refresh_sigillink_missing_paks();
         let missing = report.missing;
         if moves.is_empty()
             && missing == 0
@@ -2371,6 +2401,7 @@ impl App {
             self.status = "SigiLink Intelligent Ranking: no changes".to_string();
             self.sigillink_force_preview = false;
             self.sigillink_preview_notice = None;
+            self.open_sigillink_missing_queue(SigilLinkMissingTrigger::Auto, missing_items);
             return;
         }
 
@@ -2442,6 +2473,7 @@ impl App {
         }
         self.queue_auto_deploy("sigillink ranking");
         self.sigillink_preview_notice = None;
+        self.maybe_prompt_sigillink_missing_paks(SigilLinkMissingTrigger::Auto);
     }
 
     pub fn cancel_smart_rank_preview(&mut self) {
@@ -2452,6 +2484,7 @@ impl App {
         self.smart_rank_view = SmartRankView::Changes;
         self.sigillink_preview_notice = None;
         self.sigillink_force_preview = false;
+        self.maybe_prompt_sigillink_missing_paks(SigilLinkMissingTrigger::Auto);
     }
 
     pub fn conflicts_scanning(&self) -> bool {
@@ -3342,6 +3375,7 @@ impl App {
         self.log_info(format!("Profile loaded: {name}"));
         self.schedule_smart_rank_warmup();
         self.queue_auto_deploy("profile changed");
+        self.refresh_sigillink_missing_paks();
         Ok(())
     }
 
@@ -4120,6 +4154,7 @@ impl App {
                 scroll: 0,
             });
         }
+        self.refresh_sigillink_missing_paks();
         Ok(())
     }
 
@@ -5020,6 +5055,108 @@ impl App {
         self.status = "Dependency check canceled".to_string();
     }
 
+    pub fn sigillink_missing_queue_active(&self) -> bool {
+        self.sigillink_missing_queue.is_some()
+    }
+
+    pub fn sigillink_missing_queue(&self) -> Option<&SigilLinkMissingQueue> {
+        self.sigillink_missing_queue.as_ref()
+    }
+
+    pub fn set_sigillink_missing_queue_view(&mut self, view_items: usize) {
+        self.sigillink_missing_queue_view = view_items.max(1);
+    }
+
+    pub fn sigillink_missing_queue_page_step(&self) -> isize {
+        let step = self.sigillink_missing_queue_view.saturating_sub(1).max(1);
+        step as isize
+    }
+
+    pub fn sigillink_missing_queue_move(&mut self, delta: isize) {
+        let Some(queue) = &mut self.sigillink_missing_queue else {
+            return;
+        };
+        if queue.items.is_empty() {
+            queue.selected = 0;
+            return;
+        }
+        let len = queue.items.len() as isize;
+        let mut next = queue.selected as isize + delta;
+        if next < 0 {
+            next = 0;
+        }
+        if next >= len {
+            next = len - 1;
+        }
+        queue.selected = next as usize;
+    }
+
+    pub fn sigillink_missing_queue_home(&mut self) {
+        if let Some(queue) = &mut self.sigillink_missing_queue {
+            queue.selected = 0;
+        }
+    }
+
+    pub fn sigillink_missing_queue_end(&mut self) {
+        if let Some(queue) = &mut self.sigillink_missing_queue {
+            if !queue.items.is_empty() {
+                queue.selected = queue.items.len() - 1;
+            }
+        }
+    }
+
+    pub fn sigillink_missing_queue_open_selected(&mut self) {
+        let Some(link) = self
+            .sigillink_missing_queue_selected()
+            .and_then(|item| item.search_link.clone())
+        else {
+            self.status = "No download link available".to_string();
+            self.set_toast(
+                "No download link available",
+                ToastLevel::Warn,
+                Duration::from_secs(2),
+            );
+            return;
+        };
+        self.open_link(&link);
+    }
+
+    pub fn sigillink_missing_queue_copy_link(&mut self) {
+        let Some(link) = self
+            .sigillink_missing_queue_selected()
+            .and_then(|item| item.search_link.clone())
+        else {
+            self.status = "No download link available".to_string();
+            self.set_toast(
+                "No download link available",
+                ToastLevel::Warn,
+                Duration::from_secs(2),
+            );
+            return;
+        };
+        if self.copy_to_clipboard(&link) {
+            self.status = "Download link copied".to_string();
+        }
+    }
+
+    pub fn sigillink_missing_queue_cancel(&mut self) {
+        let Some(queue) = self.sigillink_missing_queue.take() else {
+            return;
+        };
+        if matches!(queue.trigger, SigilLinkMissingTrigger::Auto) {
+            for item in queue.items {
+                self.sigillink_missing_paks_ignored.insert(item.mod_id);
+            }
+            self.status = "SigiLink missing mods ignored".to_string();
+        } else {
+            self.status = "Missing mod files; enable blocked".to_string();
+        }
+    }
+
+    pub fn sigillink_missing_pak(&self, mod_id: &str) -> bool {
+        self.sigillink_missing_paks.contains(mod_id)
+    }
+
     pub fn dependency_queue(&self) -> Option<&DependencyQueue> {
         self.dependency_queue.as_ref()
     }
@@ -5351,6 +5488,11 @@ impl App {
 
     fn dependency_queue_selected(&self) -> Option<&DependencyItem> {
         let queue = self.dependency_queue.as_ref()?;
+        queue.items.get(queue.selected)
+    }
+
+    fn sigillink_missing_queue_selected(&self) -> Option<&SigilLinkMissingItem> {
+        let queue = self.sigillink_missing_queue.as_ref()?;
         queue.items.get(queue.selected)
     }
 
@@ -5961,6 +6103,9 @@ impl App {
                                 ));
                                 self.status =
                                     "SigiLink Intelligent Ranking warmup complete".to_string();
+                                self.maybe_prompt_sigillink_missing_paks(
+                                    SigilLinkMissingTrigger::Auto,
+                                );
                             }
                         }
                     }
@@ -8288,6 +8433,7 @@ impl App {
             self.sigillink_onboarding_pending = true;
         }
         self.request_sigillink_auto_rank();
+        self.refresh_sigillink_missing_paks();
         Ok(count)
     }
 
@@ -8906,6 +9052,8 @@ impl App {
             let _ = self.library.save(&self.config.data_dir);
         }
         self.queue_conflict_scan("mod removed");
+        self.sigillink_missing_paks.remove(id);
+        self.sigillink_missing_paks_ignored.remove(id);
         true
     }
 
@@ -9253,6 +9401,8 @@ impl App {
         } else {
             self.status = "Native mods already synced".to_string();
         }
+
+        self.refresh_sigillink_missing_paks();
     }
 
     fn self_heal_missing_paks(&mut self) -> usize {
@@ -9527,6 +9677,17 @@ impl App {
             return;
         }
 
+        let missing_items = self.collect_sigillink_missing_items(&ids);
+        if !missing_items.is_empty() {
+            for item in &missing_items {
+                self.sigillink_missing_paks.insert(item.mod_id.clone());
+            }
+            self.open_sigillink_missing_queue(SigilLinkMissingTrigger::Enable, missing_items);
+            self.status = "Missing mod files; enable blocked".to_string();
+            self.log_warn("Missing mod files; enable blocked".to_string());
+            return;
+        }
+
         let lookup = DependencyLookup::new(&self.library.mods);
         let mut present: HashSet<String> = HashSet::new();
         let mut missing = Vec::new();
@@ -9665,6 +9826,117 @@ impl App {
             }
         }
         changed
+    }
+
+    fn sigillink_missing_pak_for_mod(
+        &self,
+        mod_entry: &ModEntry,
+        paths: Option<&crate::bg3::GamePaths>,
+        native_index: Option<&[native_pak::NativePakEntry]>,
+    ) -> bool {
+        if !mod_entry.has_target_kind(TargetKind::Pak) {
+            return false;
+        }
+        if !mod_entry.is_target_enabled(TargetKind::Pak) {
+            return false;
+        }
+        resolve_pak_paths(
+            mod_entry,
+            &self.config.sigillink_cache_root(),
+            paths,
+            native_index,
+        )
+        .is_empty()
+    }
+
+    fn collect_sigillink_missing_items(&self, ids: &[String]) -> Vec<SigilLinkMissingItem> {
+        let paths = game::detect_paths(
+            self.game_id,
+            Some(&self.config.game_root),
+            Some(&self.config.larian_dir),
+        )
+        .ok();
+        let native_index = paths
+            .as_ref()
+            .map(|paths| native_pak::build_native_pak_index(&paths.larian_mods_dir));
+
+        let mut items = Vec::new();
+        for id in ids {
+            let Some(mod_entry) = self.library.mods.iter().find(|entry| entry.id == *id) else {
+                continue;
+            };
+            if !self.sigillink_missing_pak_for_mod(
+                mod_entry,
+                paths.as_ref(),
+                native_index.as_deref(),
+            ) {
+                continue;
+            }
+            let name = mod_entry.display_name();
+            let search_link = dependency_search_link(&name);
+            items.push(SigilLinkMissingItem {
+                mod_id: mod_entry.id.clone(),
+                name,
+                search_link,
+            });
+        }
+        items
+    }
+
+    fn refresh_sigillink_missing_paks(&mut self) -> Vec<SigilLinkMissingItem> {
+        let Some(profile) = self.library.active_profile() else {
+            self.sigillink_missing_paks.clear();
+            self.sigillink_missing_paks_ignored.clear();
+            return Vec::new();
+        };
+        let ids: Vec<String> = profile.order.iter().map(|entry| entry.id.clone()).collect();
+        let items = self.collect_sigillink_missing_items(&ids);
+        let missing: HashSet<String> = items.iter().map(|item| item.mod_id.clone()).collect();
+        self.sigillink_missing_paks = missing.clone();
+        self.sigillink_missing_paks_ignored
+            .retain(|id| missing.contains(id));
+        items
+    }
+
+    fn maybe_prompt_sigillink_missing_paks(&mut self, trigger: SigilLinkMissingTrigger) {
+        let items = self.refresh_sigillink_missing_paks();
+        self.open_sigillink_missing_queue(trigger, items);
+    }
+
+    fn open_sigillink_missing_queue(
+        &mut self,
+        trigger: SigilLinkMissingTrigger,
+        mut items: Vec<SigilLinkMissingItem>,
+    ) {
+        if items.is_empty() {
+            return;
+        }
+        if self.dialog.is_some() || self.dependency_queue.is_some() {
+            return;
+        }
+        if matches!(trigger, SigilLinkMissingTrigger::Auto)
+            && (self.import_active.is_some()
+                || self.pending_import_batch.is_some()
+                || self.mod_list_preview.is_some())
+        {
+            return;
+        }
+        if self.sigillink_missing_queue.is_some() {
+            return;
+        }
+        if matches!(trigger, SigilLinkMissingTrigger::Auto) {
+            items.retain(|item| !self.sigillink_missing_paks_ignored.contains(&item.mod_id));
+            if items.is_empty() {
+                return;
+            }
+        }
+        self.sigillink_missing_queue = Some(SigilLinkMissingQueue {
+            items,
+            selected: 0,
+            trigger,
+        });
+        self.status = "SigiLink missing mod files detected".to_string();
+        self.log_warn("SigiLink missing mod files detected".to_string());
     }
 
     pub fn toggle_move_mode(&mut self) {
@@ -10179,6 +10451,7 @@ impl App {
                 Duration::from_secs(3),
             );
         }
+        self.refresh_sigillink_missing_paks();
 
         let reason = self
             .deploy_reason

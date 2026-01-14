@@ -3,7 +3,7 @@ use crate::{
         expand_tilde, App, DependencyStatus, DialogChoice, DialogKind, ExplorerItem,
         ExplorerItemKind, ExportKind, Focus, InputMode, InputPurpose, LogLevel, ModSort,
         ModSortColumn, PathBrowser, PathBrowserEntryKind, PathBrowserFocus, PathBrowserPurpose,
-        SetupStep, SigilLinkCacheAction, ToastLevel, UpdateStatus,
+        SetupStep, SigilLinkCacheAction, SigilLinkMissingTrigger, ToastLevel, UpdateStatus,
     },
     library::{InstallTarget, ModEntry, TargetKind},
 };
@@ -199,6 +199,9 @@ fn run_loop(terminal: &mut Terminal<impl Backend>, app: &mut App) -> Result<()> 
 fn handle_key(app: &mut App, key: KeyEvent) -> Result<()> {
     if app.dialog.is_some() {
         return handle_dialog_mode(app, key);
+    }
+    if app.sigillink_missing_queue_active() {
+        return handle_sigillink_missing_queue(app, key);
     }
     if app.dependency_queue_active() {
         return handle_dependency_queue(app, key);
@@ -468,6 +471,32 @@ fn handle_dependency_queue(app: &mut App, key: KeyEvent) -> Result<()> {
             }
         }
         KeyCode::Esc => app.dependency_queue_cancel(),
+        _ => {}
+    }
+    Ok(())
+}
+
+fn handle_sigillink_missing_queue(app: &mut App, key: KeyEvent) -> Result<()> {
+    match key.code {
+        KeyCode::Up | KeyCode::Char('k') | KeyCode::Char('K') => {
+            app.sigillink_missing_queue_move(-1)
+        }
+        KeyCode::Down | KeyCode::Char('j') | KeyCode::Char('J') => {
+            app.sigillink_missing_queue_move(1)
+        }
+        KeyCode::PageUp => {
+            app.sigillink_missing_queue_move(-app.sigillink_missing_queue_page_step())
+        }
+        KeyCode::PageDown => {
+            app.sigillink_missing_queue_move(app.sigillink_missing_queue_page_step())
+        }
+        KeyCode::Home => app.sigillink_missing_queue_home(),
+        KeyCode::End => app.sigillink_missing_queue_end(),
+        KeyCode::Enter => app.sigillink_missing_queue_open_selected(),
+        KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            app.sigillink_missing_queue_copy_link();
+        }
+        KeyCode::Esc => app.sigillink_missing_queue_cancel(),
         _ => {}
     }
     Ok(())
@@ -2565,6 +2594,9 @@ fn draw(frame: &mut Frame<'_>, app: &mut App) {
     if app.dependency_queue_active() {
         draw_dependency_queue(frame, app, &theme);
     }
+    if app.sigillink_missing_queue_active() {
+        draw_sigillink_missing_queue(frame, app, &theme);
+    }
     if app.dialog.is_some() {
         draw_dialog(frame, app, &theme);
     }
@@ -4039,6 +4071,188 @@ fn draw_dependency_queue(frame: &mut Frame<'_>, app: &mut App, theme: &Theme) {
         Span::styled(" Cancel", text_style),
     ];
     let footer_line_two = Line::from(footer_line_two);
+    let footer_widget = Paragraph::new(vec![footer_line_one, footer_line_two])
+        .style(Style::default().bg(theme.overlay_panel_bg))
+        .alignment(Alignment::Left);
+    frame.render_widget(footer_widget, chunks[2]);
+}
+
+fn draw_sigillink_missing_queue(frame: &mut Frame<'_>, app: &mut App, theme: &Theme) {
+    let (total, trigger) = {
+        let Some(queue) = app.sigillink_missing_queue() else {
+            return;
+        };
+        (queue.items.len(), queue.trigger)
+    };
+
+    let area = frame.size();
+    let max_width = area.width.saturating_sub(4).max(1);
+    let width = max_width.clamp(56, 104);
+    let max_height = area.height.saturating_sub(4).max(1);
+    let height = max_height.clamp(14, 24);
+    let (outer_area, modal) = padded_modal(area, width, height, 2, 1);
+
+    render_modal_backdrop(frame, outer_area, theme);
+    let panel_block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(theme.overlay_border))
+        .style(Style::default().bg(theme.overlay_panel_bg))
+        .title(Span::styled(
+            "SigiLink missing mod files",
+            Style::default()
+                .fg(theme.accent)
+                .add_modifier(Modifier::BOLD),
+        ));
+    let inner = panel_block.inner(modal);
+    frame.render_widget(panel_block, modal);
+
+    let mut header_lines = Vec::new();
+    let header_text = match trigger {
+        SigilLinkMissingTrigger::Enable => {
+            "Enable blocked: missing .pak files for the selected mods."
+        }
+        SigilLinkMissingTrigger::Auto => {
+            "SigiLink ranking found missing .pak files for these mods."
+        }
+    };
+    header_lines.push(Line::from(Span::styled(
+        header_text,
+        Style::default().fg(theme.text),
+    )));
+    let summary = format!("Missing {total} mod(s)");
+    header_lines.push(Line::from(Span::styled(
+        truncate_text(&summary, inner.width as usize),
+        Style::default().fg(theme.muted),
+    )));
+    header_lines.push(Line::from(Span::styled(
+        "Open the Nexus search page and re-import to resolve.",
+        Style::default().fg(theme.muted),
+    )));
+
+    let header_height = header_lines.len() as u16 + 1;
+    let footer_height = 2u16;
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(header_height),
+            Constraint::Min(4),
+            Constraint::Length(footer_height),
+        ])
+        .split(inner);
+
+    let header_widget =
+        Paragraph::new(header_lines).style(Style::default().bg(theme.overlay_panel_bg));
+    frame.render_widget(header_widget, chunks[0]);
+
+    let list_area = chunks[1];
+    let list_width = list_area.width as usize;
+    let item_height = 2usize;
+    let view_items = (list_area.height as usize / item_height).max(1);
+    app.set_sigillink_missing_queue_view(view_items);
+    let (items, total_items, selected) = {
+        let Some(queue) = app.sigillink_missing_queue() else {
+            return;
+        };
+        let total_items = queue.items.len();
+        let selected = queue.selected;
+        let mut items = Vec::new();
+        for (index, item) in queue.items.iter().enumerate() {
+            let index_label = format!("{:>2}. ", index + 1);
+            let label_width = list_width.saturating_sub(index_label.chars().count());
+            let label_text = truncate_text(&item.name, label_width);
+            let label_line = Line::from(vec![
+                Span::styled(index_label, Style::default().fg(theme.muted)),
+                Span::styled(label_text, Style::default().fg(theme.text)),
+            ]);
+            let link_label = if item.search_link.is_some() {
+                "Nexus search available"
+            } else {
+                "No download link available"
+            };
+            let detail_line = Line::from(Span::styled(
+                truncate_text(link_label, list_width),
+                Style::default().fg(theme.muted),
+            ));
+            items.push(ListItem::new(vec![label_line, detail_line]));
+        }
+        (items, total_items, selected)
+    };
+
+    let highlight_style = Style::default()
+        .bg(theme.accent_soft)
+        .fg(Color::Black)
+        .add_modifier(Modifier::BOLD);
+    let list = List::new(items)
+        .style(Style::default().bg(theme.overlay_panel_bg))
+        .highlight_style(highlight_style)
+        .highlight_symbol("");
+
+    let mut state = ListState::default();
+    let mut offset = 0usize;
+    if total_items > view_items {
+        if selected >= view_items {
+            offset = selected + 1 - view_items;
+        }
+        let max_offset = total_items.saturating_sub(view_items);
+        if offset > max_offset {
+            offset = max_offset;
+        }
+    }
+    if total_items > 0 {
+        state.select(Some(selected));
+        *state.offset_mut() = offset;
+    }
+
+    let show_scroll = total_items > view_items;
+    let list_chunks = if show_scroll {
+        Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Min(1), Constraint::Length(1)])
+            .split(list_area)
+    } else {
+        Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Min(1), Constraint::Length(0)])
+            .split(list_area)
+    };
+    frame.render_stateful_widget(list, list_chunks[0], &mut state);
+
+    if show_scroll && list_chunks[1].width > 0 {
+        let scroll_len = total_items.saturating_sub(view_items).saturating_add(1);
+        let mut scroll_state = ScrollbarState::new(scroll_len)
+            .position(offset)
+            .viewport_content_length(view_items);
+        let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
+            .track_symbol(Some("░"))
+            .thumb_symbol("▓")
+            .begin_symbol(Some("▲"))
+            .end_symbol(Some("▼"))
+            .track_style(Style::default().fg(theme.border))
+            .thumb_style(Style::default().fg(theme.accent));
+        frame.render_stateful_widget(scrollbar, list_chunks[1], &mut scroll_state);
+    }
+
+    let key_style = Style::default()
+        .fg(theme.accent)
+        .add_modifier(Modifier::BOLD);
+    let text_style = Style::default().fg(theme.muted);
+    let cancel_label = match trigger {
+        SigilLinkMissingTrigger::Enable => "Cancel",
+        SigilLinkMissingTrigger::Auto => "Ignore",
+    };
+    let footer_line_one = Line::from(vec![
+        Span::styled("↑/↓", key_style),
+        Span::styled(" Move  ", text_style),
+        Span::styled("[Enter]", key_style),
+        Span::styled(" Open link  ", text_style),
+        Span::styled("[Ctrl+C]", key_style),
+        Span::styled(" Copy link  ", text_style),
+    ]);
+    let footer_line_two = Line::from(vec![
+        Span::styled("[Esc]", key_style),
+        Span::styled(format!(" {cancel_label}"), text_style),
+    ]);
     let footer_widget = Paragraph::new(vec![footer_line_one, footer_line_two])
         .style(Style::default().bg(theme.overlay_panel_bg))
         .alignment(Alignment::Left);
@@ -5810,7 +6024,13 @@ fn build_rows(app: &App, theme: &Theme) -> (Vec<Row<'static>>, ModCounts, usize,
             rows.push(row);
             continue;
         };
-        mod_width = mod_width.max(mod_entry.display_name().chars().count());
+        let display_name = mod_entry.display_name();
+        let display_len = if app.sigillink_missing_pak(&mod_entry.id) {
+            display_name.chars().count().saturating_add(2)
+        } else {
+            display_name.chars().count()
+        };
+        mod_width = mod_width.max(display_len);
         let loading = app.mod_row_loading(&entry.id, row_index, total_rows);
         let (row, target_len) = row_for_entry(
             app,
@@ -6054,13 +6274,14 @@ fn row_for_entry(
         let order_style = Style::default().fg(theme.text);
         let link_cell = sigillink_link_cell(app, &mod_entry.id, theme);
         let order_text = format_order_cell(order_index);
+        let name_cell = mod_name_cell(app, mod_entry, theme);
         Row::new(vec![
             Cell::from(enabled_text.to_string()).style(enabled_style),
             Cell::from(order_text).style(order_style),
             Cell::from(native_marker.to_string()).style(native_style),
             Cell::from(kind.to_string()).style(kind_style),
             link_cell,
-            Cell::from(mod_entry.display_name()),
+            name_cell,
             dep_cell,
             Cell::from(created_text).style(Style::default().fg(theme.muted)),
             Cell::from(added_text).style(Style::default().fg(theme.muted)),
@@ -6083,6 +6304,23 @@ fn sigillink_link_cell(app: &App, mod_id: &str, theme: &Theme) -> Cell<'static> 
         Style::default().fg(theme.success)
     };
     Cell::from("🔗".to_string()).style(style)
+}
+
+fn mod_name_cell(app: &App, mod_entry: &ModEntry, theme: &Theme) -> Cell<'static> {
+    if app.sigillink_missing_pak(&mod_entry.id) {
+        let name_style = Style::default()
+            .fg(theme.text)
+            .add_modifier(Modifier::CROSSED_OUT);
+        let marker_style = Style::default().fg(theme.warning);
+        let line = Line::from(vec![
+            Span::styled(mod_entry.display_name(), name_style),
+            Span::raw(" "),
+            Span::styled("!", marker_style),
+        ]);
+        Cell::from(line)
+    } else {
+        Cell::from(mod_entry.display_name())
+    }
 }
 
 fn format_order_cell(order_index: usize) -> String {
@@ -6938,6 +7176,10 @@ fn legend_rows_for_focus(focus: Focus) -> Vec<LegendRow> {
             legend.push(LegendRow {
                 key: "🔗".to_string(),
                 action: "SigiLink ranking".to_string(),
+            });
+            legend.push(LegendRow {
+                key: "!".to_string(),
+                action: "Missing mod file".to_string(),
             });
         }
         Focus::Conflicts | Focus::Log => {}

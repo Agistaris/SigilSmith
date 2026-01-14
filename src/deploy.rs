@@ -226,6 +226,12 @@ fn link_with_mode(
         SigilLinkMode::Symlink => match create_symlink(source, dest) {
             Ok(()) => {}
             Err(err) => {
+                if err.kind() == io::ErrorKind::AlreadyExists {
+                    let _ = fs::remove_file(dest);
+                    if create_symlink(source, dest).is_ok() {
+                        return Ok(());
+                    }
+                }
                 if dest.exists() {
                     let _ = fs::remove_file(dest);
                 }
