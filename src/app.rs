@@ -97,6 +97,7 @@ pub enum PathBrowserPurpose {
         profile: String,
         kind: ExportKind,
     },
+    ExportLog,
     SigilLinkCache {
         action: SigilLinkCacheAction,
         require_dev: Option<u64>,
@@ -3786,6 +3787,83 @@ impl App {
         Ok(())
     }
 
+    pub fn copy_log_tail_to_clipboard(&mut self, lines: usize) {
+        match self.log_tail_text(lines) {
+            Ok(text) => {
+                if text.is_empty() {
+                    self.status = "Log is empty".to_string();
+                    self.set_toast("Log is empty", ToastLevel::Warn, Duration::from_secs(2));
+                    return;
+                }
+                if self.copy_to_clipboard(&text) {
+                    self.status = format!("Copied last {lines} log lines");
+                    self.set_toast(
+                        &format!("Copied last {lines} log lines"),
+                        ToastLevel::Info,
+                        Duration::from_secs(2),
+                    );
+                } else {
+                    self.status = "Copy failed".to_string();
+                }
+            }
+            Err(err) => {
+                self.status = format!("Copy failed: {err}");
+                self.log_error(format!("Copy failed: {err}"));
+            }
+        }
+    }
+
+    pub fn copy_log_to_clipboard(&mut self) {
+        match self.log_text() {
+            Ok(text) => {
+                if text.is_empty() {
+                    self.status = "Log is empty".to_string();
+                    self.set_toast("Log is empty", ToastLevel::Warn, Duration::from_secs(2));
+                    return;
+                }
+                if self.copy_to_clipboard(&text) {
+                    self.status = "Log copied to clipboard".to_string();
+                    self.set_toast(
+                        "Log copied to clipboard",
+                        ToastLevel::Info,
+                        Duration::from_secs(2),
+                    );
+                } else {
+                    self.status = "Copy failed".to_string();
+                }
+            }
+            Err(err) => {
+                self.status = format!("Copy failed: {err}");
+                self.log_error(format!("Copy failed: {err}"));
+            }
+        }
+    }
+
+    pub fn open_log_export(&mut self) {
+        self.move_mode = false;
+        self.open_path_browser(PathBrowserPurpose::ExportLog);
+    }
+
+    fn export_log_to_dir(&mut self, dir: &Path) -> Result<()> {
+        let text = self.log_text()?;
+        if text.is_empty() {
+            self.status = "Log is empty".to_string();
+            self.set_toast("Log is empty", ToastLevel::Warn, Duration::from_secs(2));
+            return Ok(());
+        }
+        let filename = format!("sigilsmith-log-{}.txt", self.export_timestamp());
+        let path = dir.join(filename);
+        Self::write_atomic_text(&path, &text).context("write log export")?;
+        self.status = format!("Log exported: {}", path.display());
+        self.log_info(format!("Log exported: {}", path.display()));
+        self.set_toast(
+            &format!("Log exported: {}", path.display()),
+            ToastLevel::Info,
+            Duration::from_secs(3),
+        );
+        Ok(())
+    }
+
     pub fn export_profile(
         &mut self,
         profile: String,
@@ -4655,6 +4733,7 @@ impl App {
         let input_seed = match &purpose {
             PathBrowserPurpose::Setup(_)
             | PathBrowserPurpose::ImportProfile
+            | PathBrowserPurpose::ExportLog
             | PathBrowserPurpose::SigilLinkCache { .. } => current.display().to_string(),
             PathBrowserPurpose::ExportProfile { profile, kind } => self
                 .default_profile_export_path(profile, *kind)
@@ -4675,13 +4754,14 @@ impl App {
                 ExportKind::ModList => "Export mod list",
                 ExportKind::Modsettings => "Export modsettings.lsx",
             },
+            PathBrowserPurpose::ExportLog => "Export Log File",
             PathBrowserPurpose::SigilLinkCache { action, .. } => match action {
                 SigilLinkCacheAction::Move => "Move SigiLink Cache",
                 SigilLinkCacheAction::Relocate { .. } => "Select SigiLink Cache Folder",
             },
         };
         let focus = match &purpose {
-            PathBrowserPurpose::Setup(_) => PathBrowserFocus::List,
+            PathBrowserPurpose::Setup(_) | PathBrowserPurpose::ExportLog => PathBrowserFocus::List,
             _ => PathBrowserFocus::PathInput,
         };
         self.input_mode = InputMode::Browsing(PathBrowser {
@@ -4730,6 +4810,9 @@ impl App {
                 candidates.push(home.join("Downloads"));
             }
             PathBrowserPurpose::ExportProfile { .. } => {
+                candidates.push(self.export_dir());
+            }
+            PathBrowserPurpose::ExportLog => {
                 candidates.push(self.export_dir());
             }
             PathBrowserPurpose::SigilLinkCache { action, .. } => match action {
@@ -4873,6 +4956,7 @@ impl App {
             }
             PathBrowserPurpose::Setup(SetupStep::DownloadsDir) => path.is_dir(),
             PathBrowserPurpose::ImportProfile => path.is_file(),
+            PathBrowserPurpose::ExportLog => path.is_dir(),
             PathBrowserPurpose::ExportProfile { .. } => {
                 let parent = path.parent().unwrap_or_else(|| Path::new("."));
                 parent.is_dir() && path.file_name().is_some() && !path.is_dir()
@@ -4904,9 +4988,9 @@ impl App {
     ) -> Vec<PathBrowserEntry> {
         let mut entries = Vec::new();
         let select_label = match purpose {
-            PathBrowserPurpose::Setup(_) | PathBrowserPurpose::SigilLinkCache { .. } => {
-                "[ Select this folder ]"
-            }
+            PathBrowserPurpose::Setup(_)
+            | PathBrowserPurpose::ExportLog
+            | PathBrowserPurpose::SigilLinkCache { .. } => "[ Select this folder ]",
             PathBrowserPurpose::ImportProfile => "[ Use entered path ]",
             PathBrowserPurpose::ExportProfile { .. } => "[ Export to entered path ]",
         };
@@ -5001,6 +5085,7 @@ impl App {
             PathBrowserPurpose::ExportProfile { profile, kind } => {
                 self.export_profile(profile.clone(), path.display().to_string(), *kind)
             }
+            PathBrowserPurpose::ExportLog => self.export_log_to_dir(&path),
             PathBrowserPurpose::SigilLinkCache { action, .. } => {
                 self.apply_sigillink_cache_selection(path, action.clone())
             }
@@ -6973,6 +7058,33 @@ impl App {
 
     pub fn log_error(&mut self, message: String) {
         self.push_log(LogLevel::Error, message);
+    }
+
+    fn log_text(&self) -> Result<String> {
+        if self.log_path.exists() {
+            return fs::read_to_string(&self.log_path).context("read log file");
+        }
+        Ok(self.log_text_from_entries())
+    }
+
+    fn log_tail_text(&self, lines: usize) -> Result<String> {
+        if lines == 0 {
+            return Ok(String::new());
+        }
+        let raw = self.log_text()?;
+        let mut entries: Vec<&str> = raw.lines().collect();
+        if entries.len() > lines {
+            entries = entries[entries.len() - lines..].to_vec();
+        }
+        Ok(entries.join("\n"))
+    }
+
+    fn log_text_from_entries(&self) -> String {
+        self.logs
+            .iter()
+            .map(|entry| format!("[{}] {}", log_level_label(entry.level), entry.message))
+            .collect::<Vec<String>>()
+            .join("\n")
     }
 
     fn push_log(&mut self, level: LogLevel, message: String) {
@@ -10568,6 +10680,9 @@ impl App {
         let mut ids = Vec::new();
         for index in indices {
             if let Some(entry) = profile.order.get(index) {
+                if self.sigillink_missing_pak(&entry.id) {
+                    continue;
+                }
                 if !entry.enabled {
                     ids.push(entry.id.clone());
                 }
@@ -10595,6 +10710,9 @@ impl App {
         let mut ids = Vec::new();
         for index in indices {
             if let Some(entry) = profile.order.get(index) {
+                if self.sigillink_missing_pak(&entry.id) {
+                    continue;
+                }
                 if entry.enabled {
                     ids.push(entry.id.clone());
                 }
@@ -10649,6 +10767,9 @@ impl App {
         let mut to_enable = Vec::new();
         for index in indices {
             if let Some(entry) = profile.order.get(index) {
+                if self.sigillink_missing_pak(&entry.id) {
+                    continue;
+                }
                 if entry.enabled {
                     to_disable.push(entry.id.clone());
                 } else {
@@ -12077,12 +12198,16 @@ fn semver_stamp(major: u64, minor: u64, patch: u64, build: u64) -> u64 {
         .saturating_add(build)
 }
 
-fn append_log_file(path: &PathBuf, level: LogLevel, message: &str) -> std::io::Result<()> {
-    let label = match level {
+fn log_level_label(level: LogLevel) -> &'static str {
+    match level {
         LogLevel::Info => "INFO",
         LogLevel::Warn => "WARN",
         LogLevel::Error => "ERROR",
-    };
+    }
+}
+
+fn append_log_file(path: &PathBuf, level: LogLevel, message: &str) -> std::io::Result<()> {
+    let label = log_level_label(level);
     let mut file = fs::OpenOptions::new()
         .create(true)
         .append(true)

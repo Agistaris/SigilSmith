@@ -531,7 +531,11 @@ enum SettingsItemKind {
     ActionMoveSigilLinkCache,
     ActionClearFrameworkCaches,
     ActionClearSigilLinkCaches,
+    ActionCopyLogTail,
+    ActionCopyLogAll,
+    ActionExportLogFile,
     SigilLinkHeader,
+    SigilLinkDebugHeader,
     SigilLinkToggle,
     SigilLinkAutoPreview,
     SigilLinkInfo,
@@ -619,7 +623,7 @@ fn settings_items(app: &App) -> Vec<SettingsItem> {
             selectable: true,
         },
         SettingsItem {
-            label: "Warn on Missing Dependencies".to_string(),
+            label: "Warn On Missing Dependencies".to_string(),
             kind: SettingsItemKind::ToggleDependencyWarnings,
             checked: Some(app.app_config.warn_missing_dependencies),
             selectable: true,
@@ -658,19 +662,19 @@ fn settings_items(app: &App) -> Vec<SettingsItem> {
             selectable: true,
         },
         SettingsItem {
-            label: format!("Last rank: {last_rank}"),
+            label: format!("Last Rank: {last_rank}"),
             kind: SettingsItemKind::SigilLinkInfo,
             checked: None,
             selectable: false,
         },
         SettingsItem {
-            label: format!("Last diff: {last_diff}"),
+            label: format!("Last Diff: {last_diff}"),
             kind: SettingsItemKind::SigilLinkInfo,
             checked: None,
             selectable: false,
         },
         SettingsItem {
-            label: "Auto-rank: import + enable".to_string(),
+            label: "Auto-Rank: Import + Enable".to_string(),
             kind: SettingsItemKind::SigilLinkInfo,
             checked: None,
             selectable: false,
@@ -705,6 +709,30 @@ fn settings_items(app: &App) -> Vec<SettingsItem> {
             checked: None,
             selectable: true,
         },
+        SettingsItem {
+            label: "Debug".to_string(),
+            kind: SettingsItemKind::SigilLinkDebugHeader,
+            checked: None,
+            selectable: false,
+        },
+        SettingsItem {
+            label: "Copy Last 200 Log Lines".to_string(),
+            kind: SettingsItemKind::ActionCopyLogTail,
+            checked: None,
+            selectable: true,
+        },
+        SettingsItem {
+            label: "Copy Log To Clipboard".to_string(),
+            kind: SettingsItemKind::ActionCopyLogAll,
+            checked: None,
+            selectable: true,
+        },
+        SettingsItem {
+            label: "Export Log File".to_string(),
+            kind: SettingsItemKind::ActionExportLogFile,
+            checked: None,
+            selectable: true,
+        },
     ]);
 
     items
@@ -729,15 +757,15 @@ fn export_menu_items() -> Vec<ExportMenuItem> {
 
 fn update_menu_label(app: &App) -> String {
     match &app.update_status {
-        UpdateStatus::Checking => "Check for Updates (Checking...)".to_string(),
+        UpdateStatus::Checking => "Check For Updates (Checking...)".to_string(),
         UpdateStatus::Available { info, .. } => {
-            format!("Update Available: v{} (Enter to Update)", info.version)
+            format!("Update Available: v{} (Enter To Update)", info.version)
         }
         UpdateStatus::Applied { info } => format!("Update Applied: v{} (Restart)", info.version),
-        UpdateStatus::UpToDate { .. } => "Check for Updates (Latest)".to_string(),
-        UpdateStatus::Failed { .. } => "Check for Updates (Failed; Retry)".to_string(),
-        UpdateStatus::Skipped { .. } => "Check for Updates (See Log)".to_string(),
-        UpdateStatus::Idle => "Check for Updates".to_string(),
+        UpdateStatus::UpToDate { .. } => "Check For Updates (Latest)".to_string(),
+        UpdateStatus::Failed { .. } => "Check For Updates (Failed; Retry)".to_string(),
+        UpdateStatus::Skipped { .. } => "Check For Updates (See Log)".to_string(),
+        UpdateStatus::Idle => "Check For Updates".to_string(),
     }
 }
 
@@ -913,6 +941,16 @@ fn handle_settings_menu(app: &mut App, key: KeyEvent) -> Result<()> {
                         app.close_settings_menu();
                         app.run_sigillink_ranking_solo();
                     }
+                    SettingsItemKind::ActionCopyLogTail => {
+                        app.copy_log_tail_to_clipboard(200);
+                    }
+                    SettingsItemKind::ActionCopyLogAll => {
+                        app.copy_log_to_clipboard();
+                    }
+                    SettingsItemKind::ActionExportLogFile => {
+                        app.close_settings_menu();
+                        app.open_log_export();
+                    }
                     SettingsItemKind::ActionCheckUpdates => {
                         if matches!(app.update_status, UpdateStatus::Available { .. }) {
                             app.apply_ready_update();
@@ -920,7 +958,9 @@ fn handle_settings_menu(app: &mut App, key: KeyEvent) -> Result<()> {
                             app.request_update_check();
                         }
                     }
-                    SettingsItemKind::SigilLinkHeader | SettingsItemKind::SigilLinkInfo => {}
+                    SettingsItemKind::SigilLinkHeader
+                    | SettingsItemKind::SigilLinkDebugHeader
+                    | SettingsItemKind::SigilLinkInfo => {}
                 }
             }
         }
@@ -1253,6 +1293,7 @@ fn handle_browser_mode(app: &mut App, key: KeyEvent, browser: &mut PathBrowser) 
         PathBrowserPurpose::Setup(SetupStep::DownloadsDir) => "Not a folder.",
         PathBrowserPurpose::ImportProfile => "Select a file to import.",
         PathBrowserPurpose::ExportProfile { .. } => "Enter a file name to export.",
+        PathBrowserPurpose::ExportLog => "Select a folder to export the log.",
         PathBrowserPurpose::SigilLinkCache { require_dev, .. } => {
             if require_dev.is_some() {
                 "Select a directory on the same drive as BG3 to use SigiLink without symlinks."
@@ -1855,7 +1896,7 @@ fn draw(frame: &mut Frame<'_>, app: &mut App) {
         "Game",
         "Profile",
         "Overrides",
-        "Auto-deploy",
+        "Auto-Deploy",
         "SigiLink",
         "Help",
     ];
@@ -2389,7 +2430,7 @@ fn draw(frame: &mut Frame<'_>, app: &mut App) {
     ));
     let auto_deploy_enabled = true;
     let auto_row = KvRow {
-        label: "Auto-deploy".to_string(),
+        label: "Auto-Deploy".to_string(),
         value: if auto_deploy_enabled {
             "ON".to_string()
         } else {
@@ -2428,7 +2469,7 @@ fn draw(frame: &mut Frame<'_>, app: &mut App) {
     ));
     let help_row = KvRow {
         label: "Help".to_string(),
-        value: "? shortcuts".to_string(),
+        value: "? Shortcuts".to_string(),
         label_style,
         value_style: Style::default().fg(theme.accent),
     };
@@ -2440,7 +2481,7 @@ fn draw(frame: &mut Frame<'_>, app: &mut App) {
     if !app.paths_ready() {
         let setup_row = KvRow {
             label: "Setup".to_string(),
-            value: "Open Menu (Esc) to configure".to_string(),
+            value: "Open Menu (Esc) To Configure".to_string(),
             label_style,
             value_style: Style::default().fg(theme.warning),
         };
@@ -4478,6 +4519,7 @@ fn draw_path_browser(frame: &mut Frame<'_>, _app: &App, theme: &Theme, browser: 
             ExportKind::ModList => "Export mod list",
             ExportKind::Modsettings => "Export modsettings.lsx",
         },
+        PathBrowserPurpose::ExportLog => "Export Log File",
         PathBrowserPurpose::SigilLinkCache { action, .. } => match action {
             SigilLinkCacheAction::Move => "Move SigiLink Cache",
             SigilLinkCacheAction::Relocate { .. } => "Select SigiLink Cache Folder",
@@ -4555,6 +4597,7 @@ fn draw_path_browser(frame: &mut Frame<'_>, _app: &App, theme: &Theme, browser: 
         PathBrowserPurpose::Setup(SetupStep::DownloadsDir) => (" Folder valid ", "Not a folder."),
         PathBrowserPurpose::ImportProfile => (" File selected ", "Select a file to import."),
         PathBrowserPurpose::ExportProfile { .. } => (" Export path valid ", "Enter a file name."),
+        PathBrowserPurpose::ExportLog => (" Folder selected ", "Select a folder to export."),
         PathBrowserPurpose::SigilLinkCache { require_dev, .. } => {
             if require_dev.is_some() {
                 (
@@ -5587,7 +5630,10 @@ fn build_settings_menu_lines(
     );
 
     for (index, item) in items.iter().enumerate() {
-        if matches!(item.kind, SettingsItemKind::SigilLinkHeader) {
+        if matches!(
+            item.kind,
+            SettingsItemKind::SigilLinkHeader | SettingsItemKind::SigilLinkDebugHeader
+        ) {
             lines.push(Line::from(""));
         }
         if !item.selectable && !matches!(item.kind, SettingsItemKind::SigilLinkInfo) {
@@ -5596,6 +5642,12 @@ fn build_settings_menu_lines(
                     item.label.to_string(),
                     Style::default()
                         .fg(theme.accent)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                SettingsItemKind::SigilLinkDebugHeader => (
+                    item.label.to_string(),
+                    Style::default()
+                        .fg(theme.accent_soft)
                         .add_modifier(Modifier::BOLD),
                 ),
                 _ => (item.label.to_string(), Style::default().fg(theme.muted)),
@@ -5626,6 +5678,9 @@ fn build_settings_menu_lines(
             | SettingsItemKind::ActionClearSigilLinkCaches
             | SettingsItemKind::ActionClearSigilLinkPins
             | SettingsItemKind::ActionSigilLinkSoloRank
+            | SettingsItemKind::ActionCopyLogTail
+            | SettingsItemKind::ActionCopyLogAll
+            | SettingsItemKind::ActionExportLogFile
             | SettingsItemKind::ActionCheckUpdates => {
                 lines.push(menu_row(
                     index == selected,
@@ -5668,7 +5723,9 @@ fn build_settings_menu_lines(
                     vec![Span::styled(state_label, state_style)],
                 ));
             }
-            SettingsItemKind::SigilLinkHeader | SettingsItemKind::SigilLinkInfo => {
+            SettingsItemKind::SigilLinkHeader
+            | SettingsItemKind::SigilLinkDebugHeader
+            | SettingsItemKind::SigilLinkInfo => {
                 let (key, value) = item
                     .label
                     .split_once(": ")
@@ -5718,7 +5775,7 @@ fn build_settings_menu_lines(
         false,
         MenuRowKind::None,
         Span::styled(
-            "Enter: toggle/run | Esc: close",
+            "Enter: Toggle/Run | Esc: Close",
             Style::default().fg(theme.muted),
         ),
         theme,
@@ -5768,17 +5825,17 @@ fn build_export_menu_lines(theme: &Theme, menu: &crate::app::ExportMenu) -> Vec<
 
 fn update_status_line(app: &App) -> String {
     match &app.update_status {
-        UpdateStatus::Checking => "Updates: checking...".to_string(),
+        UpdateStatus::Checking => "Updates: Checking...".to_string(),
         UpdateStatus::Available { info, .. } => {
-            format!("Updates: v{} available (press Enter)", info.version)
+            format!("Updates: v{} Available (Press Enter)", info.version)
         }
-        UpdateStatus::Applied { info } => format!("Updates: applied v{} (restart)", info.version),
-        UpdateStatus::UpToDate { version } => format!("Updates: latest (v{})", version),
-        UpdateStatus::Failed { error } => format!("Updates: failed ({error})"),
+        UpdateStatus::Applied { info } => format!("Updates: Applied v{} (Restart)", info.version),
+        UpdateStatus::UpToDate { version } => format!("Updates: Latest (v{})", version),
+        UpdateStatus::Failed { error } => format!("Updates: Failed ({error})"),
         UpdateStatus::Skipped { version, reason } => {
-            format!("Updates: v{version} skipped ({reason})")
+            format!("Updates: v{version} Skipped ({reason})")
         }
-        UpdateStatus::Idle => "Updates: not checked".to_string(),
+        UpdateStatus::Idle => "Updates: Not Checked".to_string(),
     }
 }
 
@@ -7554,18 +7611,18 @@ fn legend_rows_for_focus(focus: Focus) -> Vec<LegendRow> {
             legend.extend([
                 LegendRow {
                     key: "[x]".to_string(),
-                    action: "Active profile".to_string(),
+                    action: "Active Profile".to_string(),
                 },
                 LegendRow {
                     key: "[ ]".to_string(),
-                    action: "Inactive profile".to_string(),
+                    action: "Inactive Profile".to_string(),
                 },
             ]);
         }
         Focus::Mods => {
             legend.push(LegendRow {
                 key: "N".to_string(),
-                action: "Native mod (mod.io)".to_string(),
+                action: "Native Mod (Mod.io)".to_string(),
             });
             legend.push(LegendRow {
                 key: "Dep".to_string(),
@@ -7573,11 +7630,11 @@ fn legend_rows_for_focus(focus: Focus) -> Vec<LegendRow> {
             });
             legend.push(LegendRow {
                 key: "🔗".to_string(),
-                action: "SigiLink ranking".to_string(),
+                action: "SigiLink Ranking".to_string(),
             });
             legend.push(LegendRow {
                 key: "!".to_string(),
-                action: "Missing mod file".to_string(),
+                action: "Missing Mod File".to_string(),
             });
         }
         Focus::Conflicts | Focus::Log => {}
@@ -7598,31 +7655,31 @@ fn hotkey_rows_for_focus(focus: Focus) -> HotkeyRows {
             context.extend([
                 LegendRow {
                     key: "Enter".to_string(),
-                    action: "Select or expand".to_string(),
+                    action: "Select Or Expand".to_string(),
                 },
                 LegendRow {
                     key: "a".to_string(),
-                    action: "New profile".to_string(),
+                    action: "New Profile".to_string(),
                 },
                 LegendRow {
                     key: "r/F2".to_string(),
-                    action: "Rename profile".to_string(),
+                    action: "Rename Profile".to_string(),
                 },
                 LegendRow {
                     key: "c".to_string(),
-                    action: "Duplicate profile".to_string(),
+                    action: "Duplicate Profile".to_string(),
                 },
                 LegendRow {
                     key: "Del".to_string(),
-                    action: "Delete profile".to_string(),
+                    action: "Delete Profile".to_string(),
                 },
                 LegendRow {
                     key: "e".to_string(),
-                    action: "Export profile".to_string(),
+                    action: "Export Mod List".to_string(),
                 },
                 LegendRow {
                     key: "p".to_string(),
-                    action: "Import profile".to_string(),
+                    action: "Import Mod List".to_string(),
                 },
             ]);
         }
@@ -7630,19 +7687,19 @@ fn hotkey_rows_for_focus(focus: Focus) -> HotkeyRows {
             context.extend([
                 LegendRow {
                     key: "←/→".to_string(),
-                    action: "Select override".to_string(),
+                    action: "Select Override".to_string(),
                 },
                 LegendRow {
                     key: "↑/↓".to_string(),
-                    action: "Choose winner".to_string(),
+                    action: "Choose Winner".to_string(),
                 },
                 LegendRow {
                     key: "Enter".to_string(),
-                    action: "Cycle winner".to_string(),
+                    action: "Cycle Winner".to_string(),
                 },
                 LegendRow {
                     key: "Backspace".to_string(),
-                    action: "Clear override".to_string(),
+                    action: "Clear Override".to_string(),
                 },
             ]);
         }
@@ -7650,19 +7707,19 @@ fn hotkey_rows_for_focus(focus: Focus) -> HotkeyRows {
             context.extend([
                 LegendRow {
                     key: "Space".to_string(),
-                    action: "Toggle enable".to_string(),
+                    action: "Toggle Enable".to_string(),
                 },
                 LegendRow {
                     key: "m".to_string(),
-                    action: "Move mode".to_string(),
+                    action: "Move Mode".to_string(),
                 },
                 LegendRow {
                     key: "u/n".to_string(),
-                    action: "Move order".to_string(),
+                    action: "Move Order".to_string(),
                 },
                 LegendRow {
                     key: "Ctrl+←/→".to_string(),
-                    action: "Sort column".to_string(),
+                    action: "Sort Column".to_string(),
                 },
                 LegendRow {
                     key: "/ or Ctrl+F".to_string(),
@@ -7670,11 +7727,11 @@ fn hotkey_rows_for_focus(focus: Focus) -> HotkeyRows {
                 },
                 LegendRow {
                     key: "PgUp/PgDn".to_string(),
-                    action: "Page scroll".to_string(),
+                    action: "Page Scroll".to_string(),
                 },
                 LegendRow {
                     key: "Del".to_string(),
-                    action: "Remove mod".to_string(),
+                    action: "Remove Mod".to_string(),
                 },
                 LegendRow {
                     key: "Target [1-5]".to_string(),
@@ -7686,7 +7743,7 @@ fn hotkey_rows_for_focus(focus: Focus) -> HotkeyRows {
                 },
                 LegendRow {
                     key: "Ctrl+R".to_string(),
-                    action: "Restore SigiLink ranking".to_string(),
+                    action: "Restore SigiLink Ranking".to_string(),
                 },
             ]);
         }
@@ -7694,11 +7751,11 @@ fn hotkey_rows_for_focus(focus: Focus) -> HotkeyRows {
             context.extend([
                 LegendRow {
                     key: "↑/↓".to_string(),
-                    action: "Scroll log".to_string(),
+                    action: "Scroll Log".to_string(),
                 },
                 LegendRow {
                     key: "PgUp/PgDn".to_string(),
-                    action: "Page scroll".to_string(),
+                    action: "Page Scroll".to_string(),
                 },
             ]);
         }
@@ -7707,15 +7764,15 @@ fn hotkey_rows_for_focus(focus: Focus) -> HotkeyRows {
     let mut global = Vec::new();
     global.push(LegendRow {
         key: "i".to_string(),
-        action: "Import mod".to_string(),
+        action: "Import Mod".to_string(),
     });
     global.push(LegendRow {
         key: "Ctrl+E/Ctrl+P".to_string(),
-        action: "Export/Import mod list".to_string(),
+        action: "Export/Import Mod List".to_string(),
     });
     global.push(LegendRow {
         key: "Tab".to_string(),
-        action: "Cycle focus".to_string(),
+        action: "Cycle Focus".to_string(),
     });
     global.push(LegendRow {
         key: "?".to_string(),
@@ -7904,11 +7961,11 @@ fn help_sections() -> Vec<HelpSection> {
             rows: vec![
                 LegendRow {
                     key: "Tab".to_string(),
-                    action: "Cycle focus".to_string(),
+                    action: "Cycle Focus".to_string(),
                 },
                 LegendRow {
                     key: "?".to_string(),
-                    action: "Toggle help".to_string(),
+                    action: "Toggle Help".to_string(),
                 },
                 LegendRow {
                     key: "Esc".to_string(),
@@ -7916,15 +7973,15 @@ fn help_sections() -> Vec<HelpSection> {
                 },
                 LegendRow {
                     key: "i".to_string(),
-                    action: "Import mod".to_string(),
+                    action: "Import Mod".to_string(),
                 },
                 LegendRow {
                     key: "Ctrl+E".to_string(),
-                    action: "Export mod list".to_string(),
+                    action: "Export Mod List".to_string(),
                 },
                 LegendRow {
                     key: "Ctrl+P".to_string(),
-                    action: "Import mod list".to_string(),
+                    action: "Import Mod List".to_string(),
                 },
                 LegendRow {
                     key: "d".to_string(),
@@ -7932,7 +7989,7 @@ fn help_sections() -> Vec<HelpSection> {
                 },
                 LegendRow {
                     key: "b".to_string(),
-                    action: "Rollback last backup".to_string(),
+                    action: "Rollback Last Backup".to_string(),
                 },
                 LegendRow {
                     key: "q".to_string(),
@@ -7945,39 +8002,39 @@ fn help_sections() -> Vec<HelpSection> {
             rows: vec![
                 LegendRow {
                     key: "↑/↓ or j/k".to_string(),
-                    action: "Move selection".to_string(),
+                    action: "Move Selection".to_string(),
                 },
                 LegendRow {
                     key: "←/→ or h/l".to_string(),
-                    action: "Collapse/expand".to_string(),
+                    action: "Collapse/Expand".to_string(),
                 },
                 LegendRow {
                     key: "Enter".to_string(),
-                    action: "Select/activate".to_string(),
+                    action: "Select/Activate".to_string(),
                 },
                 LegendRow {
                     key: "a".to_string(),
-                    action: "New profile".to_string(),
+                    action: "New Profile".to_string(),
                 },
                 LegendRow {
                     key: "r/F2".to_string(),
-                    action: "Rename profile".to_string(),
+                    action: "Rename Profile".to_string(),
                 },
                 LegendRow {
                     key: "c".to_string(),
-                    action: "Duplicate profile".to_string(),
+                    action: "Duplicate Profile".to_string(),
                 },
                 LegendRow {
                     key: "e".to_string(),
-                    action: "Export profile".to_string(),
+                    action: "Export Mod List".to_string(),
                 },
                 LegendRow {
                     key: "p".to_string(),
-                    action: "Import profile".to_string(),
+                    action: "Import Mod List".to_string(),
                 },
                 LegendRow {
                     key: "Del".to_string(),
-                    action: "Delete profile".to_string(),
+                    action: "Delete Profile".to_string(),
                 },
             ],
         },
@@ -7986,11 +8043,11 @@ fn help_sections() -> Vec<HelpSection> {
             rows: vec![
                 LegendRow {
                     key: "↑/↓ or j/k".to_string(),
-                    action: "Move selection".to_string(),
+                    action: "Move Selection".to_string(),
                 },
                 LegendRow {
                     key: "PgUp/PgDn".to_string(),
-                    action: "Page scroll".to_string(),
+                    action: "Page Scroll".to_string(),
                 },
                 LegendRow {
                     key: "Shift+↑/↓".to_string(),
@@ -7998,51 +8055,51 @@ fn help_sections() -> Vec<HelpSection> {
                 },
                 LegendRow {
                     key: "Space".to_string(),
-                    action: "Toggle enable".to_string(),
+                    action: "Toggle Enable".to_string(),
                 },
                 LegendRow {
                     key: "m".to_string(),
-                    action: "Move mode".to_string(),
+                    action: "Move Mode".to_string(),
                 },
                 LegendRow {
                     key: "u/n".to_string(),
-                    action: "Move order".to_string(),
+                    action: "Move Order".to_string(),
                 },
                 LegendRow {
                     key: "Enter/Esc".to_string(),
-                    action: "Exit move mode".to_string(),
+                    action: "Exit Move Mode".to_string(),
                 },
                 LegendRow {
                     key: "1-5".to_string(),
-                    action: "Target override (Auto/Mods/Gen/Data/Bin)".to_string(),
+                    action: "Target Override (Auto/Mods/Gen/Data/Bin)".to_string(),
                 },
                 LegendRow {
                     key: "A/S/X".to_string(),
-                    action: "Enable/Disable/Invert visible".to_string(),
+                    action: "Enable/Disable/Invert Visible".to_string(),
                 },
                 LegendRow {
                     key: "c".to_string(),
-                    action: "Clear overrides".to_string(),
+                    action: "Clear Overrides".to_string(),
                 },
                 LegendRow {
                     key: "/ or Ctrl+F".to_string(),
-                    action: "Search mods".to_string(),
+                    action: "Search Mods".to_string(),
                 },
                 LegendRow {
                     key: "Ctrl+←/→".to_string(),
-                    action: "Sort column".to_string(),
+                    action: "Sort Column".to_string(),
                 },
                 LegendRow {
                     key: "Ctrl+↑/↓".to_string(),
-                    action: "Invert sort".to_string(),
+                    action: "Invert Sort".to_string(),
                 },
                 LegendRow {
                     key: "Ctrl+L".to_string(),
-                    action: "Clear search".to_string(),
+                    action: "Clear Search".to_string(),
                 },
                 LegendRow {
                     key: "Del".to_string(),
-                    action: "Remove mod".to_string(),
+                    action: "Remove Mod".to_string(),
                 },
             ],
         },
@@ -8051,19 +8108,19 @@ fn help_sections() -> Vec<HelpSection> {
             rows: vec![
                 LegendRow {
                     key: "←/→".to_string(),
-                    action: "Select override".to_string(),
+                    action: "Select Override".to_string(),
                 },
                 LegendRow {
                     key: "↑/↓".to_string(),
-                    action: "Choose winner".to_string(),
+                    action: "Choose Winner".to_string(),
                 },
                 LegendRow {
                     key: "Enter".to_string(),
-                    action: "Cycle winner".to_string(),
+                    action: "Cycle Winner".to_string(),
                 },
                 LegendRow {
                     key: "Backspace/Del".to_string(),
-                    action: "Clear override".to_string(),
+                    action: "Clear Override".to_string(),
                 },
             ],
         },
@@ -8072,11 +8129,11 @@ fn help_sections() -> Vec<HelpSection> {
             rows: vec![
                 LegendRow {
                     key: "↑/↓".to_string(),
-                    action: "Scroll log".to_string(),
+                    action: "Scroll Log".to_string(),
                 },
                 LegendRow {
                     key: "PgUp/PgDn".to_string(),
-                    action: "Page scroll".to_string(),
+                    action: "Page Scroll".to_string(),
                 },
             ],
         },
@@ -8085,7 +8142,7 @@ fn help_sections() -> Vec<HelpSection> {
             rows: vec![
                 LegendRow {
                     key: "Enter/Y".to_string(),
-                    action: "Apply ranking".to_string(),
+                    action: "Apply Ranking".to_string(),
                 },
                 LegendRow {
                     key: "Esc/N".to_string(),
@@ -8093,7 +8150,7 @@ fn help_sections() -> Vec<HelpSection> {
                 },
                 LegendRow {
                     key: "Tab".to_string(),
-                    action: "Toggle view".to_string(),
+                    action: "Toggle View".to_string(),
                 },
                 LegendRow {
                     key: "↑/↓".to_string(),
@@ -8101,7 +8158,7 @@ fn help_sections() -> Vec<HelpSection> {
                 },
                 LegendRow {
                     key: "PgUp/PgDn".to_string(),
-                    action: "Page scroll".to_string(),
+                    action: "Page Scroll".to_string(),
                 },
                 LegendRow {
                     key: "Home/End".to_string(),
@@ -8114,15 +8171,15 @@ fn help_sections() -> Vec<HelpSection> {
             rows: vec![
                 LegendRow {
                     key: "What".to_string(),
-                    action: "Scans enabled pak/loose files to find conflicts.".to_string(),
+                    action: "Scans Enabled Pak/Loose Files To Find Conflicts.".to_string(),
                 },
                 LegendRow {
                     key: "Order".to_string(),
-                    action: "Respects dependencies, then patch tags/size/date.".to_string(),
+                    action: "Respects Dependencies, Then Patch Tags/Size/Date.".to_string(),
                 },
                 LegendRow {
                     key: "Source".to_string(),
-                    action: "Uses current profile order as the baseline.".to_string(),
+                    action: "Uses Current Profile Order As The Baseline.".to_string(),
                 },
             ],
         },
@@ -8131,15 +8188,15 @@ fn help_sections() -> Vec<HelpSection> {
             rows: vec![
                 LegendRow {
                     key: "←/→ or Tab".to_string(),
-                    action: "Change choice".to_string(),
+                    action: "Change Choice".to_string(),
                 },
                 LegendRow {
                     key: "Y/N".to_string(),
-                    action: "Pick choice".to_string(),
+                    action: "Pick Choice".to_string(),
                 },
                 LegendRow {
                     key: "D".to_string(),
-                    action: "Toggle checkbox".to_string(),
+                    action: "Toggle Checkbox".to_string(),
                 },
                 LegendRow {
                     key: "Enter/Space".to_string(),
@@ -8156,15 +8213,15 @@ fn help_sections() -> Vec<HelpSection> {
             rows: vec![
                 LegendRow {
                     key: "↑/↓".to_string(),
-                    action: "Move selection".to_string(),
+                    action: "Move Selection".to_string(),
                 },
                 LegendRow {
                     key: "Enter".to_string(),
-                    action: "Open link/search or override".to_string(),
+                    action: "Open Link/Search Or Override".to_string(),
                 },
                 LegendRow {
                     key: "Ctrl+C".to_string(),
-                    action: "Copy dependency link".to_string(),
+                    action: "Copy Dependency Link".to_string(),
                 },
                 LegendRow {
                     key: "C".to_string(),
@@ -8172,7 +8229,7 @@ fn help_sections() -> Vec<HelpSection> {
                 },
                 LegendRow {
                     key: "Esc".to_string(),
-                    action: "Cancel import".to_string(),
+                    action: "Cancel Import".to_string(),
                 },
             ],
         },
@@ -8181,19 +8238,19 @@ fn help_sections() -> Vec<HelpSection> {
             rows: vec![
                 LegendRow {
                     key: "Tab".to_string(),
-                    action: "Switch focus".to_string(),
+                    action: "Switch Focus".to_string(),
                 },
                 LegendRow {
                     key: "Enter".to_string(),
-                    action: "Open/select".to_string(),
+                    action: "Open/Select".to_string(),
                 },
                 LegendRow {
                     key: "S".to_string(),
-                    action: "Select current folder".to_string(),
+                    action: "Select Current Folder".to_string(),
                 },
                 LegendRow {
                     key: "↑/↓ or j/k".to_string(),
-                    action: "Move selection".to_string(),
+                    action: "Move Selection".to_string(),
                 },
                 LegendRow {
                     key: "PgUp/PgDn".to_string(),
@@ -8205,15 +8262,15 @@ fn help_sections() -> Vec<HelpSection> {
                 },
                 LegendRow {
                     key: "←/Backspace".to_string(),
-                    action: "Parent folder".to_string(),
+                    action: "Parent Folder".to_string(),
                 },
                 LegendRow {
                     key: "Ctrl+U".to_string(),
-                    action: "Clear path input".to_string(),
+                    action: "Clear Path Input".to_string(),
                 },
                 LegendRow {
                     key: "Ctrl+Alt+V".to_string(),
-                    action: "Paste path".to_string(),
+                    action: "Paste Path".to_string(),
                 },
                 LegendRow {
                     key: "Esc".to_string(),
@@ -8260,7 +8317,7 @@ fn build_help_lines(theme: &Theme, width: usize) -> Vec<Line<'static>> {
 
     let mut lines = Vec::new();
     lines.push(Line::from(Span::styled(
-        "Esc/? close | ↑/↓ PgUp/PgDn scroll | Home/End jump",
+        "Esc/? Close | ↑/↓ PgUp/PgDn Scroll | Home/End Jump",
         Style::default().fg(theme.muted),
     )));
     lines.push(Line::from(""));

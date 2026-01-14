@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.7.4
+
+- Title-case the Context/Legend/Hotkeys panels and the Help/Settings menus.
+- Add SigiLink Debug log actions (copy last 200 lines, copy full log, export log file).
+- Skip missing (ghost) entries for enable/disable/invert visible hotkeys.
+
 ## 0.7.3
 
 - Default SigiLink auto-accept diffs and keep auto ranking running after enable/disable and reorder changes.
