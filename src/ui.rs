@@ -2141,10 +2141,11 @@ fn draw(frame: &mut Frame<'_>, app: &mut App) {
         }
         let table_width = table_chunks[0].width;
         let spacing = 0u16;
-        let spacer_width = 2u16;
-        let on_spacer_width = 1u16;
-        let order_spacer_width = 1u16;
-        let dep_spacer_width = 1u16;
+        let spacer_width = 3u16;
+        let on_spacer_width = 2u16;
+        let order_spacer_width = 2u16;
+        let nk_spacer_width = 1u16;
+        let dep_spacer_width = 2u16;
         let link_width = 2u16;
         let dep_width = 4u16;
         let date_width = 10u16;
@@ -2153,6 +2154,7 @@ fn draw(frame: &mut Frame<'_>, app: &mut App) {
             + 3
             + order_spacer_width
             + 2
+            + nk_spacer_width
             + 6
             + dep_width
             + dep_spacer_width
@@ -2186,6 +2188,7 @@ fn draw(frame: &mut Frame<'_>, app: &mut App) {
             mod_header_cell(" # ", ModSortColumn::Order, app.mod_sort, &theme),
             mod_header_cell_static(" ", &theme),
             mod_header_cell("N", ModSortColumn::Native, app.mod_sort, &theme),
+            mod_header_cell_static(" ", &theme),
             mod_header_cell("Kind", ModSortColumn::Kind, app.mod_sort, &theme),
             mod_header_cell_static("Dep", &theme),
             mod_header_cell_static(" ", &theme),
@@ -2207,6 +2210,7 @@ fn draw(frame: &mut Frame<'_>, app: &mut App) {
                 Constraint::Length(3),
                 Constraint::Length(order_spacer_width),
                 Constraint::Length(2),
+                Constraint::Length(nk_spacer_width),
                 Constraint::Length(6),
                 Constraint::Length(dep_width),
                 Constraint::Length(dep_spacer_width),
@@ -2365,8 +2369,8 @@ fn draw(frame: &mut Frame<'_>, app: &mut App) {
             let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
                 .track_symbol(Some("░"))
                 .thumb_symbol("▓")
-                .begin_symbol(Some("▲"))
-                .end_symbol(Some("▼"))
+                .begin_symbol(None)
+                .end_symbol(None)
                 .track_style(Style::default().fg(theme.border))
                 .thumb_style(Style::default().fg(theme.accent));
             let mut scroll_area = Rect {
@@ -6604,6 +6608,9 @@ fn loading_name_overlay(name: &str, row_index: usize, pad_width: usize) -> Strin
         let seed = row_seed ^ ((idx as u64 + 1) * 0xD7) ^ now_ms;
         base[pos] = random_loading_symbol(seed).chars().next().unwrap_or(' ');
     }
+    if let Some(last) = base.last_mut() {
+        *last = ' ';
+    }
     base.into_iter().collect()
 }
 
@@ -6641,6 +6648,7 @@ fn row_for_missing_entry(
         Cell::from(" ".to_string()).style(muted),
         Cell::from(" ".to_string()).style(muted),
         Cell::from(" ".to_string()).style(muted),
+        Cell::from(" ".to_string()).style(muted),
         dep_cell,
         Cell::from(" ".to_string()).style(muted),
         link_cell,
@@ -6674,7 +6682,7 @@ fn row_for_entry(
     let target_len = state_label.chars().count();
     let mut row = if loading {
         let loading_style = Style::default().fg(theme.muted);
-        let mut cells = Vec::with_capacity(16);
+        let mut cells = Vec::with_capacity(18);
         let mut loading_index = 0usize;
         let push_loading = |cells: &mut Vec<Cell<'static>>, index: &mut usize| {
             let frame = loading_frame(row_index, *index);
@@ -6686,6 +6694,7 @@ fn row_for_entry(
         push_loading(&mut cells, &mut loading_index); // #
         cells.push(Cell::from(" ").style(loading_style));
         push_loading(&mut cells, &mut loading_index); // N
+        cells.push(Cell::from(" ").style(loading_style));
         push_loading(&mut cells, &mut loading_index); // Kind
         push_loading(&mut cells, &mut loading_index); // Dep
         cells.push(Cell::from(" ").style(loading_style));
@@ -6755,6 +6764,7 @@ fn row_for_entry(
             Cell::from(order_text).style(order_style),
             Cell::from(" "),
             Cell::from(native_marker.to_string()).style(native_style),
+            Cell::from(" "),
             Cell::from(kind.to_string()).style(kind_style),
             dep_cell,
             Cell::from(" "),
@@ -7332,7 +7342,6 @@ struct ConflictListMetrics {
     total: usize,
     list_height: usize,
     offset: usize,
-    show_separator: bool,
     show_scroll: bool,
 }
 
@@ -7372,29 +7381,10 @@ fn conflict_list_metrics(
         }
     }
 
-    let mut show_separator = total > list_height && offset + list_height < total;
-    if show_separator && list_height > 1 {
-        list_height = list_height.saturating_sub(1).max(1);
-        offset = 0;
-        if total > list_height {
-            if selected >= list_height {
-                offset = selected + 1 - list_height;
-            }
-            let max_offset = total.saturating_sub(list_height);
-            if offset > max_offset {
-                offset = max_offset;
-            }
-        }
-        show_separator = total > list_height && offset + list_height < total;
-    } else if show_separator {
-        show_separator = false;
-    }
-
     ConflictListMetrics {
         total,
         list_height,
         offset,
-        show_separator,
         show_scroll: total > list_height,
     }
 }
@@ -7458,12 +7448,24 @@ fn build_conflict_details(
         Style::default().fg(theme.accent),
     )));
 
+    let info_bg = theme.header_bg;
+    let info_line = |text: &str, style: Style| -> Line<'static> {
+        let trimmed = truncate_text(text, width);
+        let pad = width.saturating_sub(display_width(&trimmed));
+        let mut spans = Vec::new();
+        spans.push(Span::styled(trimmed, style.bg(info_bg)));
+        if pad > 0 {
+            spans.push(Span::styled(" ".repeat(pad), Style::default().bg(info_bg)));
+        }
+        Line::from(spans)
+    };
+
     let mut footer_lines = Vec::new();
     let path_label = conflict.relative_path.to_string_lossy();
-    footer_lines.push(Line::from(Span::styled(
-        truncate_text(&format!("Path: {path_label}"), width),
+    footer_lines.push(info_line(
+        &format!("Path: {path_label}"),
         Style::default().fg(theme.muted),
-    )));
+    ));
 
     let pending_winner = app
         .pending_override
@@ -7477,21 +7479,18 @@ fn build_conflict_details(
         .find(|candidate| candidate.mod_id == winner_id)
         .map(|candidate| candidate.mod_name.clone())
         .unwrap_or_else(|| conflict.winner_name.clone());
-    footer_lines.push(Line::from(Span::styled(
-        truncate_text(&format!("Winner: {winner_name}"), width),
+    footer_lines.push(info_line(
+        &format!("Winner: {winner_name}"),
         Style::default().fg(theme.text),
-    )));
+    ));
 
-    footer_lines.push(Line::from(Span::styled(
-        truncate_text("←/→ cycle  1-9 pick  Auto apply 5s  C clear  P pick", width),
+    footer_lines.push(info_line(
+        "←/→ cycle  1-9 pick  Auto apply 5s  C clear  P pick",
         Style::default().fg(theme.muted),
-    )));
+    ));
 
     if let Some(status) = conflict_status_label(app) {
-        footer_lines.push(Line::from(Span::styled(
-            truncate_text(status, width),
-            Style::default().fg(theme.muted),
-        )));
+        footer_lines.push(info_line(status, Style::default().fg(theme.muted)));
     }
 
     let mut footer_len = footer_lines.len();
@@ -7554,6 +7553,8 @@ fn build_conflict_details(
         let selected_row = index == selected;
         let row_bg = if selected_row {
             Some(theme.accent_soft)
+        } else if index % 2 == 1 {
+            Some(theme.row_alt_bg)
         } else {
             None
         };
@@ -7642,9 +7643,6 @@ fn build_conflict_details(
         lines.push(Line::from(spans));
     }
 
-    if metrics.show_separator {
-        lines.push(center_line("↓ more", Style::default().fg(theme.muted)));
-    }
     lines.extend(footer_lines);
     lines
 }
