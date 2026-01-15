@@ -38,7 +38,7 @@ const HEADER_HEIGHT: u16 = 3;
 const DETAILS_HEIGHT: u16 = 12;
 const CONTEXT_HEIGHT: u16 = 27;
 const LOG_MIN_HEIGHT: u16 = 5;
-const CONFLICTS_BAR_HEIGHT: u16 = 1;
+const CONFLICTS_BAR_HEIGHT: u16 = 0;
 const FILTER_HEIGHT: u16 = 2;
 const TABLE_MIN_HEIGHT: u16 = 6;
 const SUBPANEL_PAD_X: u16 = 0;
@@ -1911,6 +1911,7 @@ fn draw(frame: &mut Frame<'_>, app: &mut App) {
         header_line_area.x = header_line_area.x.saturating_add(1);
         header_line_area.width = header_line_area.width.saturating_sub(2);
     }
+    let tabs_area = header_line_area;
 
     let title_text = format!(
         "SigilSmith | {} | {}",
@@ -1934,11 +1935,12 @@ fn draw(frame: &mut Frame<'_>, app: &mut App) {
         let status_x = header_line_area
             .x
             .saturating_add(header_line_area.width.saturating_sub(status_width as u16));
+        let status_y = header_line_area.y;
         status_area = Rect {
             x: status_x,
-            y: chunks[0].y,
+            y: status_y,
             width: status_width as u16,
-            height: chunks[0].height,
+            height: 1,
         };
         header_line_area.width = header_line_area
             .width
@@ -1991,18 +1993,18 @@ fn draw(frame: &mut Frame<'_>, app: &mut App) {
             Span::styled(suffix_text, Style::default().fg(theme.text)),
         ])
     };
-    let title = Paragraph::new(title_line)
-        .style(Style::default().bg(theme.header_bg))
-        .alignment(Alignment::Left);
-    frame.render_widget(title, header_line_chunks[0]);
-
-    if middle_width > 0 {
+    if tabs_area.width > 0 {
         let tabs_line = build_focus_tabs_line(app, &theme);
         let tabs = Paragraph::new(tabs_line)
             .style(Style::default().bg(theme.header_bg))
             .alignment(Alignment::Center);
-        frame.render_widget(tabs, header_line_chunks[1]);
+        frame.render_widget(tabs, tabs_area);
     }
+
+    let title = Paragraph::new(title_line)
+        .style(Style::default().bg(theme.header_bg))
+        .alignment(Alignment::Left);
+    frame.render_widget(title, header_line_chunks[0]);
     if status_area.width > 0 && status_area.height > 0 {
         let overrides_focused = app.focus == Focus::Conflicts;
         draw_status_panel(
@@ -2139,21 +2141,26 @@ fn draw(frame: &mut Frame<'_>, app: &mut App) {
         }
         let table_width = table_chunks[0].width;
         let spacing = 0u16;
-        let spacer_width = 1u16;
-        let on_spacer_width = 2u16;
+        let spacer_width = 2u16;
+        let on_spacer_width = 1u16;
+        let order_spacer_width = 1u16;
+        let dep_spacer_width = 1u16;
         let link_width = 2u16;
+        let dep_width = 4u16;
         let date_width = 10u16;
-        let fixed_without_mod_target = 3
-            + 4
+        let fixed_without_mod_target = 4
             + on_spacer_width
+            + 3
+            + order_spacer_width
             + 2
             + 6
+            + dep_width
+            + dep_spacer_width
             + link_width
-            + 4
-            + spacer_width * 4
+            + spacer_width * 3
             + date_width
             + date_width
-            + spacing * 14;
+            + spacing * 16;
         let max_mod = table_width.saturating_sub(fixed_without_mod_target + 1);
         let mut mod_col = mod_width as u16;
         if max_mod > 0 {
@@ -2177,12 +2184,13 @@ fn draw(frame: &mut Frame<'_>, app: &mut App) {
             mod_header_cell(" On", ModSortColumn::Enabled, app.mod_sort, &theme),
             mod_header_cell_static(" ", &theme),
             mod_header_cell(" # ", ModSortColumn::Order, app.mod_sort, &theme),
+            mod_header_cell_static(" ", &theme),
             mod_header_cell("N", ModSortColumn::Native, app.mod_sort, &theme),
             mod_header_cell("Kind", ModSortColumn::Kind, app.mod_sort, &theme),
+            mod_header_cell_static("Dep", &theme),
+            mod_header_cell_static(" ", &theme),
             mod_header_cell_static(" ", &theme),
             mod_header_cell("Mod", ModSortColumn::Name, app.mod_sort, &theme),
-            mod_header_cell_static(" ", &theme),
-            mod_header_cell_static("Dep", &theme),
             mod_header_cell_static(" ", &theme),
             mod_header_cell("Created", ModSortColumn::Created, app.mod_sort, &theme),
             mod_header_cell_static(" ", &theme),
@@ -2197,12 +2205,13 @@ fn draw(frame: &mut Frame<'_>, app: &mut App) {
                 Constraint::Length(4),
                 Constraint::Length(on_spacer_width),
                 Constraint::Length(3),
+                Constraint::Length(order_spacer_width),
                 Constraint::Length(2),
                 Constraint::Length(6),
-                Constraint::Length(2),
+                Constraint::Length(dep_width),
+                Constraint::Length(dep_spacer_width),
+                Constraint::Length(link_width),
                 Constraint::Length(mod_col),
-                Constraint::Length(spacer_width),
-                Constraint::Length(4),
                 Constraint::Length(spacer_width),
                 Constraint::Length(date_width),
                 Constraint::Length(spacer_width),
@@ -2738,7 +2747,7 @@ fn render_filter_bar(
     app: &App,
     theme: &Theme,
     area: Rect,
-    counts: &ModCounts,
+    _counts: &ModCounts,
 ) {
     if area.width == 0 || area.height == 0 {
         return;
@@ -2765,11 +2774,7 @@ fn render_filter_bar(
     } else {
         Style::default().fg(theme.muted)
     };
-    let counts_label = if app.mod_filter_active() {
-        format!("Showing: {}/{}", counts.visible_total, counts.total)
-    } else {
-        format!(" Total: {}", counts.total)
-    };
+    let show_clear = app.mod_filter_active();
     let search_hint = if editing {
         "Enter search | Esc cancel"
     } else {
@@ -2831,25 +2836,17 @@ fn render_filter_bar(
         .alignment(Alignment::Right);
     frame.render_widget(right, search_chunks[1]);
 
-    if bar_chunks[1].height > 0 {
+    if bar_chunks[1].height > 0 && show_clear {
         let meta_area = bar_chunks[1];
-        let mut meta_spans = vec![Span::styled(
-            counts_label.clone(),
-            Style::default().fg(theme.muted),
-        )];
-        if app.mod_filter_active() {
-            meta_spans.push(Span::styled(" | ", Style::default().fg(theme.muted)));
-            meta_spans.push(Span::styled(
-                "Clear search: Ctrl+L",
-                Style::default()
-                    .fg(theme.header_bg)
-                    .bg(theme.accent_soft)
-                    .add_modifier(Modifier::BOLD),
-            ));
-        }
-        let meta_left = Paragraph::new(Line::from(meta_spans))
-            .style(Style::default().bg(theme.header_bg))
-            .alignment(Alignment::Left);
+        let meta_left = Paragraph::new(Line::from(Span::styled(
+            "Clear search: Ctrl+L",
+            Style::default()
+                .fg(theme.header_bg)
+                .bg(theme.accent_soft)
+                .add_modifier(Modifier::BOLD),
+        )))
+        .style(Style::default().bg(theme.header_bg))
+        .alignment(Alignment::Left);
         frame.render_widget(meta_left, meta_area);
     }
 }
@@ -2912,9 +2909,14 @@ fn draw_status_panel(
     if area.width == 0 || area.height == 0 {
         return;
     }
-    let status_bg = theme.log_bg;
+    let status_bg = theme.header_bg;
+    let use_border = area.height >= 3;
     let status_block = Block::default()
-        .borders(Borders::ALL)
+        .borders(if use_border {
+            Borders::ALL
+        } else {
+            Borders::NONE
+        })
         .border_type(BorderType::Rounded)
         .border_style(Style::default().fg(status_color))
         .style(Style::default().bg(status_bg))
@@ -6508,9 +6510,8 @@ fn loading_name_overlay(name: &str, row_index: usize, pad_width: usize) -> Strin
     if target_width > name_len {
         base.extend(std::iter::repeat(' ').take(target_width - name_len));
     }
-    let last_space_idx = base.iter().rposition(|ch| *ch == ' ');
-    let soft_end = if base.len() > name_len + 2 {
-        base.len().saturating_sub(2)
+    let soft_end = if base.len() > name_len + 4 {
+        base.len().saturating_sub(4)
     } else {
         base.len()
     };
@@ -6551,6 +6552,7 @@ fn loading_name_overlay(name: &str, row_index: usize, pad_width: usize) -> Strin
         return base.into_iter().collect();
     }
 
+    let last_space_idx = space_indices.last().copied();
     let mut rng = row_seed ^ now_ms.rotate_left(9) ^ frame.rotate_left(7);
     let roll = (rng % 10) as u8;
     let mut desired = if roll < 6 {
@@ -6638,10 +6640,11 @@ fn row_for_missing_entry(
         Cell::from(order_text).style(muted),
         Cell::from(" ".to_string()).style(muted),
         Cell::from(" ".to_string()).style(muted),
-        link_cell,
-        Cell::from(display).style(muted),
         Cell::from(" ".to_string()).style(muted),
         dep_cell,
+        Cell::from(" ".to_string()).style(muted),
+        link_cell,
+        Cell::from(display).style(muted),
         Cell::from(" ".to_string()).style(muted),
         Cell::from(" ".to_string()).style(muted),
         Cell::from(" ".to_string()).style(muted),
@@ -6671,7 +6674,7 @@ fn row_for_entry(
     let target_len = state_label.chars().count();
     let mut row = if loading {
         let loading_style = Style::default().fg(theme.muted);
-        let mut cells = Vec::with_capacity(15);
+        let mut cells = Vec::with_capacity(16);
         let mut loading_index = 0usize;
         let push_loading = |cells: &mut Vec<Cell<'static>>, index: &mut usize| {
             let frame = loading_frame(row_index, *index);
@@ -6681,14 +6684,15 @@ fn row_for_entry(
         push_loading(&mut cells, &mut loading_index); // On
         cells.push(Cell::from(" ").style(loading_style));
         push_loading(&mut cells, &mut loading_index); // #
+        cells.push(Cell::from(" ").style(loading_style));
         push_loading(&mut cells, &mut loading_index); // N
         push_loading(&mut cells, &mut loading_index); // Kind
+        push_loading(&mut cells, &mut loading_index); // Dep
+        cells.push(Cell::from(" ").style(loading_style));
         push_loading(&mut cells, &mut loading_index); // 🔗
         let display_name = mod_entry.display_name();
         let name_overlay = loading_name_overlay(&display_name, row_index, mod_name_pad);
         cells.push(Cell::from(name_overlay).style(loading_style));
-        cells.push(Cell::from(" ").style(loading_style));
-        push_loading(&mut cells, &mut loading_index); // Dep
         cells.push(Cell::from(" ").style(loading_style));
         push_loading(&mut cells, &mut loading_index); // Created
         cells.push(Cell::from(" ").style(loading_style));
@@ -6749,12 +6753,13 @@ fn row_for_entry(
             Cell::from(enabled_text.to_string()).style(enabled_style),
             Cell::from(" "),
             Cell::from(order_text).style(order_style),
+            Cell::from(" "),
             Cell::from(native_marker.to_string()).style(native_style),
             Cell::from(kind.to_string()).style(kind_style),
+            dep_cell,
+            Cell::from(" "),
             link_cell,
             name_cell,
-            Cell::from(" "),
-            dep_cell,
             Cell::from(" "),
             Cell::from(created_text).style(Style::default().fg(theme.muted)),
             Cell::from(" "),

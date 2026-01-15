@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.8.0
+
+- Adjust mod stack spacing and header status layout polish.
+
 ## 0.7.9
 
 - Move status panel to the header and reclaim vertical space for the main layout.
