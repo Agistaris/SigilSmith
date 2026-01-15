@@ -6454,30 +6454,61 @@ fn loading_name_overlay(name: &str, row_index: usize, pad_width: usize) -> Strin
     let row_seed = (row_index as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15);
     let name_len = name.chars().count();
     let target_width = pad_width.max(name_len);
-    let mut base = String::with_capacity(target_width);
-    base.push_str(name);
+    let mut base: Vec<char> = name.chars().collect();
     if target_width > name_len {
-        base.push_str(&" ".repeat(target_width - name_len));
+        base.extend(std::iter::repeat(' ').take(target_width - name_len));
     }
-    let mut out = String::with_capacity(base.len());
-    for (idx, ch) in base.chars().enumerate() {
-        if idx < name_len {
-            out.push(ch);
+    let mut space_indices: Vec<usize> = base
+        .iter()
+        .enumerate()
+        .filter_map(|(idx, ch)| {
+            if idx >= name_len && *ch == ' ' {
+                Some(idx)
+            } else {
+                None
+            }
+        })
+        .collect();
+    if space_indices.is_empty() {
+        space_indices = base
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, ch)| if *ch == ' ' { Some(idx) } else { None })
+            .collect();
+    }
+    if space_indices.is_empty() {
+        return base.into_iter().collect();
+    }
+
+    let frame = now_ms / 240;
+    let mut rng = row_seed ^ frame.rotate_left(11);
+    let mut desired = (rng as usize % 3) + 1;
+    desired = desired.min(space_indices.len().min(3));
+    let mut picks: Vec<usize> = Vec::new();
+    let mut guard = 0usize;
+    while picks.len() < desired && guard < space_indices.len() * 3 {
+        rng = rng
+            .wrapping_mul(0x9E37_79B9_7F4A_7C15)
+            .wrapping_add(0xA5A5_5A5A);
+        let pos = space_indices[(rng as usize) % space_indices.len()];
+        if picks.iter().any(|picked| {
+            let delta = (*picked as isize - pos as isize).abs();
+            delta <= 1
+        }) {
+            guard += 1;
             continue;
         }
-        if ch == ' ' {
-            let seed = row_seed ^ (idx as u64).wrapping_mul(0xD7);
-            let roll = rand_f32(seed ^ now_ms.rotate_left(7));
-            if roll < 0.18 {
-                out.push_str(random_loading_symbol(seed ^ now_ms));
-            } else {
-                out.push(' ');
-            }
-        } else {
-            out.push(ch);
-        }
+        picks.push(pos);
+        guard += 1;
     }
-    out
+    if picks.is_empty() {
+        picks.push(*space_indices.last().unwrap());
+    }
+    for (idx, pos) in picks.into_iter().enumerate() {
+        let seed = row_seed ^ ((idx as u64 + 1) * 0xD7) ^ now_ms;
+        base[pos] = random_loading_symbol(seed).chars().next().unwrap_or(' ');
+    }
+    base.into_iter().collect()
 }
 
 fn lerp_u64(min: u64, max: u64, t: f32) -> u64 {

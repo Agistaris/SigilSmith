@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.7.7
+
+- Refine loading overlay spacing for mod names.
+
 ## 0.7.6
 
 - Update license to permission-required source-available terms.
