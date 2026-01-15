@@ -2141,17 +2141,21 @@ fn draw(frame: &mut Frame<'_>, app: &mut App) {
         }
         let table_width = table_chunks[0].width;
         let spacing = 0u16;
-        let spacer_width = 1u16;
         let link_width = 2u16;
-        let dep_width = 4u16;
+        let dep_width = 6u16;
         let date_width = 10u16;
+        let mod_gap_width = 4u16;
+        let created_gap_width = 2u16;
+        let added_gap_width = 2u16;
         let fixed_without_mod_target = 4
             + 3
-            + 2
+            + 3
             + 6
             + dep_width
             + link_width
-            + spacer_width * 3
+            + mod_gap_width
+            + created_gap_width
+            + added_gap_width
             + date_width
             + date_width
             + spacing * 13;
@@ -2175,7 +2179,7 @@ fn draw(frame: &mut Frame<'_>, app: &mut App) {
             target_col = 1;
         }
         let header = Row::new(vec![
-            mod_header_cell(" On", ModSortColumn::Enabled, app.mod_sort, &theme),
+            mod_header_cell("On", ModSortColumn::Enabled, app.mod_sort, &theme),
             mod_header_cell(" # ", ModSortColumn::Order, app.mod_sort, &theme),
             mod_header_cell("N", ModSortColumn::Native, app.mod_sort, &theme),
             mod_header_cell("Kind", ModSortColumn::Kind, app.mod_sort, &theme),
@@ -2195,16 +2199,16 @@ fn draw(frame: &mut Frame<'_>, app: &mut App) {
             [
                 Constraint::Length(4),
                 Constraint::Length(3),
-                Constraint::Length(2),
+                Constraint::Length(3),
                 Constraint::Length(6),
                 Constraint::Length(dep_width),
                 Constraint::Length(link_width),
                 Constraint::Length(mod_col),
-                Constraint::Length(spacer_width),
+                Constraint::Length(mod_gap_width),
                 Constraint::Length(date_width),
-                Constraint::Length(spacer_width),
+                Constraint::Length(created_gap_width),
                 Constraint::Length(date_width),
-                Constraint::Length(spacer_width),
+                Constraint::Length(added_gap_width),
                 Constraint::Length(target_col),
             ],
         )
@@ -4298,9 +4302,8 @@ fn draw_override_picker(frame: &mut Frame<'_>, app: &mut App, theme: &Theme) {
     app.set_override_picker_view(view_items.max(1));
 
     let pending_winner = app
-        .pending_override
-        .as_ref()
-        .filter(|pending| pending.conflict_index == conflict_index)
+        .pending_overrides
+        .get(&conflict_index)
         .map(|pending| pending.winner_id.as_str());
     let winner_id = pending_winner.unwrap_or(conflict_winner_id.as_str());
 
@@ -6634,13 +6637,15 @@ fn row_for_missing_entry(
         .filter(|label| !label.trim().is_empty())
         .unwrap_or(&entry.id);
     let display = format!("{} (missing)", label.trim());
-    let enabled_text = if entry.enabled { " [x]" } else { " [ ]" };
+    let enabled_text = if entry.enabled { "[x] " } else { "[ ] " };
     let muted = Style::default().fg(theme.muted);
     let order_text = format_order_cell(order_index);
     let link_cell = Cell::from(" ".to_string()).style(muted);
     let dep_cell = Cell::from(Line::from(vec![
+        Span::styled(" ", muted),
         Span::styled("  ", muted),
         Span::styled("  ", muted),
+        Span::styled(" ", muted),
     ]));
     let mut row = Row::new(vec![
         Cell::from(enabled_text.to_string()).style(muted),
@@ -6713,9 +6718,9 @@ fn row_for_entry(
             } else {
                 theme.success
             };
-            (" [x]", Style::default().fg(color))
+            ("[x] ", Style::default().fg(color))
         } else {
-            (" [ ]", Style::default().fg(theme.muted))
+            ("[ ] ", Style::default().fg(theme.muted))
         };
         let kind = mod_kind_label(mod_entry);
         let kind_style = match kind {
@@ -6723,7 +6728,11 @@ fn row_for_entry(
             "Loose" => Style::default().fg(theme.success),
             _ => Style::default().fg(theme.text),
         };
-        let native_marker = if mod_entry.is_native() { "✓" } else { " " };
+        let native_marker = if mod_entry.is_native() {
+            "  ✓"
+        } else {
+            "   "
+        };
         let native_style = if mod_entry.is_native() {
             Style::default().fg(theme.success)
         } else {
@@ -6744,8 +6753,10 @@ fn row_for_entry(
             Style::default().fg(theme.muted)
         };
         let dep_cell = Cell::from(Line::from(vec![
+            Span::styled(" ", Style::default().fg(theme.muted)),
             Span::styled(missing_text, missing_style),
             Span::styled(disabled_text, disabled_style),
+            Span::styled(" ", Style::default().fg(theme.muted)),
         ]));
         let order_style = Style::default().fg(theme.text);
         let link_cell = sigillink_link_cell(app, &mod_entry.id, theme);
@@ -7457,9 +7468,8 @@ fn build_conflict_details(
     ));
 
     let pending_winner = app
-        .pending_override
-        .as_ref()
-        .filter(|pending| pending.conflict_index == selected)
+        .pending_overrides
+        .get(&selected)
         .map(|pending| pending.winner_id.as_str());
     let winner_id = pending_winner.unwrap_or(conflict.winner_id.as_str());
     let winner_name = conflict
@@ -7508,9 +7518,8 @@ fn build_conflict_details(
             break;
         };
         let pending_winner = app
-            .pending_override
-            .as_ref()
-            .filter(|pending| pending.conflict_index == index)
+            .pending_overrides
+            .get(&index)
             .map(|pending| pending.winner_id.as_str());
         let winner_id = pending_winner.unwrap_or(entry.winner_id.as_str());
 

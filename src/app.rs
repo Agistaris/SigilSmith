@@ -723,7 +723,7 @@ pub struct App {
     pub conflicts: Vec<deploy::ConflictEntry>,
     pub conflict_selected: usize,
     pub override_swap: Option<OverrideSwap>,
-    pub pending_override: Option<PendingOverride>,
+    pub pending_overrides: HashMap<usize, PendingOverride>,
     pub mods_view_height: usize,
     explorer_game_expanded: HashSet<GameId>,
     explorer_profiles_expanded: HashSet<GameId>,
@@ -1153,7 +1153,7 @@ impl App {
             conflicts: Vec::new(),
             conflict_selected: 0,
             override_swap: None,
-            pending_override: None,
+            pending_overrides: HashMap::new(),
             mods_view_height: 0,
             explorer_game_expanded: {
                 let mut expanded = HashSet::new();
@@ -2670,7 +2670,7 @@ impl App {
         if self.focus != Focus::Conflicts {
             return None;
         }
-        if let Some(pending) = &self.pending_override {
+        if let Some(pending) = self.pending_overrides.get(&self.conflict_selected) {
             return Some(OverrideSwapInfo {
                 from: pending.from.clone(),
                 to: pending.to.clone(),
@@ -3539,7 +3539,6 @@ impl App {
             return;
         }
         self.conflict_selected -= 1;
-        self.pending_override = None;
     }
 
     pub fn conflict_move_down(&mut self) {
@@ -3547,7 +3546,6 @@ impl App {
             return;
         }
         self.conflict_selected += 1;
-        self.pending_override = None;
     }
 
     pub fn cycle_conflict_winner(&mut self, delta: i32) {
@@ -3557,10 +3555,15 @@ impl App {
         if conflict.candidates.is_empty() {
             return;
         }
+        let current_id = self
+            .pending_overrides
+            .get(&self.conflict_selected)
+            .map(|pending| pending.winner_id.as_str())
+            .unwrap_or(conflict.winner_id.as_str());
         let current_index = conflict
             .candidates
             .iter()
-            .position(|candidate| candidate.mod_id == conflict.winner_id)
+            .position(|candidate| candidate.mod_id == current_id)
             .unwrap_or(0);
         let len = conflict.candidates.len() as i32;
         let next_index = (current_index as i32 + delta).rem_euclid(len) as usize;
@@ -3579,15 +3582,20 @@ impl App {
     }
 
     pub fn apply_pending_override(&mut self) {
-        let Some(pending) = self.pending_override.take() else {
-            return;
-        };
-        if pending.conflict_index >= self.conflicts.len() {
+        if self.pending_overrides.is_empty() {
             return;
         }
-        if let Err(err) = self.set_conflict_winner(pending.conflict_index, pending.winner_id) {
-            self.status = format!("Override failed: {err}");
-            self.log_error(format!("Override failed: {err}"));
+        let pending = std::mem::take(&mut self.pending_overrides);
+        let mut items: Vec<PendingOverride> = pending.into_values().collect();
+        items.sort_by_key(|item| item.conflict_index);
+        for pending in items {
+            if pending.conflict_index >= self.conflicts.len() {
+                continue;
+            }
+            if let Err(err) = self.set_conflict_winner(pending.conflict_index, pending.winner_id) {
+                self.status = format!("Override failed: {err}");
+                self.log_error(format!("Override failed: {err}"));
+            }
         }
     }
 
@@ -3595,7 +3603,7 @@ impl App {
         let Some(conflict) = self.conflicts.get(self.conflict_selected).cloned() else {
             return;
         };
-        self.pending_override = None;
+        self.pending_overrides.remove(&self.conflict_selected);
         if let Err(err) =
             self.set_conflict_winner(self.conflict_selected, conflict.default_winner_id)
         {
@@ -3608,23 +3616,37 @@ impl App {
         let Some(conflict) = self.conflicts.get(self.conflict_selected) else {
             return;
         };
-        if winner_id == conflict.winner_id {
-            self.pending_override = None;
+        let current_id = self
+            .pending_overrides
+            .get(&self.conflict_selected)
+            .map(|pending| pending.winner_id.as_str())
+            .unwrap_or(conflict.winner_id.as_str());
+        if winner_id == current_id {
+            self.pending_overrides.remove(&self.conflict_selected);
             return;
         }
+        let from_name = conflict
+            .candidates
+            .iter()
+            .find(|candidate| candidate.mod_id == current_id)
+            .map(|candidate| candidate.mod_name.clone())
+            .unwrap_or_else(|| conflict.winner_name.clone());
         let to_name = conflict
             .candidates
             .iter()
             .find(|candidate| candidate.mod_id == winner_id)
             .map(|candidate| candidate.mod_name.clone())
             .unwrap_or_else(|| winner_id.clone());
-        self.pending_override = Some(PendingOverride {
-            conflict_index: self.conflict_selected,
-            winner_id,
-            from: conflict.winner_name.clone(),
-            to: to_name,
-            last_input: Instant::now(),
-        });
+        self.pending_overrides.insert(
+            self.conflict_selected,
+            PendingOverride {
+                conflict_index: self.conflict_selected,
+                winner_id,
+                from: from_name,
+                to: to_name,
+                last_input: Instant::now(),
+            },
+        );
     }
 
     fn set_conflict_winner(&mut self, index: usize, winner_id: String) -> Result<()> {
@@ -4516,11 +4538,12 @@ impl App {
         }
 
         let override_ready = self
-            .pending_override
-            .as_ref()
-            .map(|pending| {
-                pending.last_input.elapsed()
-                    >= Duration::from_secs(SIGILLINK_AUTO_RANK_DEBOUNCE_SECS)
+            .pending_overrides
+            .values()
+            .map(|pending| pending.last_input)
+            .max()
+            .map(|last_input| {
+                last_input.elapsed() >= Duration::from_secs(SIGILLINK_AUTO_RANK_DEBOUNCE_SECS)
             })
             .unwrap_or(false);
         if override_ready {
@@ -5530,9 +5553,8 @@ impl App {
             return;
         }
         let pending_id = self
-            .pending_override
-            .as_ref()
-            .filter(|pending| pending.conflict_index == self.conflict_selected)
+            .pending_overrides
+            .get(&self.conflict_selected)
             .map(|pending| pending.winner_id.clone());
         let selected_id = pending_id.unwrap_or_else(|| conflict.winner_id.clone());
         let selected = conflict
@@ -11125,7 +11147,7 @@ impl App {
 
     fn handle_conflict_message(&mut self, message: ConflictMessage) {
         self.conflict_active = false;
-        self.pending_override = None;
+        self.pending_overrides.clear();
         match message {
             ConflictMessage::Completed { conflicts } => {
                 let count = conflicts.len();
