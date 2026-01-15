@@ -106,8 +106,9 @@ Support links (Ko-fi + GitHub Sponsors) are coming next update.
 
 ## License & Trademarks
 
-SigilSmith is licensed under Apache-2.0. The SigilSmith name and logo are trademarks of
-Agistaris; see `TRADEMARKS.md` for details.
+SigilSmith is source-available and permission is required to use, copy, modify, or
+distribute it. Contact Agistaris for licensing. The SigilSmith name and logo are
+trademarks of Agistaris; see `TRADEMARKS.md` for details.
 
 ## Library Location
 

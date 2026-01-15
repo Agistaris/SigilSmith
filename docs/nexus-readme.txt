@@ -35,7 +35,7 @@ https://github.com/Agistaris/SigilSmith/releases/tag/v0.5.0
 • .pak files deploy to the Larian Mods directory.
 • If paths are not detected, open the menu to configure (browser opens automatically).
   Use Tab to edit the path directly.
-• Full source is available on GitHub (Apache-2.0), with CI-built releases and checksums.
+• Full source is available on GitHub with a permission-required license.
 
 :: ROADMAP ::
 • Multi-game support via open adapter templates (coming next).

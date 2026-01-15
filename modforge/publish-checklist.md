@@ -1,7 +1,7 @@
 # Publish Checklist
 
 ## ModForge Page
-- [ ] Add license file in repo (MIT or Apache-2.0 recommended)
+- [ ] Add license file in repo (SigilSmith permission-required)
 - [ ] Add screenshots (overview + overrides + smart ranking)
 - [ ] Add short + long description (see modforge-listing.md)
 - [ ] Add install steps + requirements
