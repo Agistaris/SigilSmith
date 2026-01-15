@@ -2147,7 +2147,7 @@ fn draw(frame: &mut Frame<'_>, app: &mut App) {
             );
         }
         let table_width = table_chunks[0].width;
-        let spacing = 1u16;
+        let spacing = 0u16;
         let link_width = 2u16;
         let date_width = 10u16;
         let fixed_without_mod_target =
@@ -2201,7 +2201,7 @@ fn draw(frame: &mut Frame<'_>, app: &mut App) {
         )
         .style(Style::default().bg(theme.mod_bg).fg(theme.text))
         .header(header)
-        .column_spacing(1)
+        .column_spacing(spacing)
         .highlight_style(if app.focus == Focus::Mods {
             Style::default()
                 .bg(theme.accent_soft)
@@ -2346,7 +2346,7 @@ fn draw(frame: &mut Frame<'_>, app: &mut App) {
     let legend_content_height = legend_inner.height.saturating_sub(SUBPANEL_PAD_TOP) as usize;
     let context_label_width = context_labels
         .iter()
-        .map(|label| label.chars().count())
+        .map(|label| display_width(label))
         .max()
         .unwrap_or(0);
     let max_context_label = context_chunks[0].width.saturating_sub(2) as usize;
@@ -3458,19 +3458,29 @@ fn build_dialog_message_lines(dialog: &crate::app::Dialog, theme: &Theme) -> Vec
                     Span::styled(name.clone(), Style::default().fg(theme.text)),
                     Span::styled("\"?", Style::default().fg(theme.text)),
                 ]);
-                let line2 = Line::from(Span::styled(
-                    "Remove keeps the .pak in the Larian Mods folder and leaves a ghost entry.",
-                    Style::default().fg(theme.text),
-                ));
+                let line2 = Line::from(vec![
+                    Span::styled(
+                        "Remove keeps the .pak in the Larian Mods folder and leaves a ",
+                        Style::default().fg(theme.text),
+                    ),
+                    Span::styled("!", Style::default().fg(theme.warning)),
+                    Span::styled(
+                        "ghost",
+                        Style::default()
+                            .fg(theme.text)
+                            .add_modifier(Modifier::CROSSED_OUT),
+                    ),
+                    Span::styled(" entry.", Style::default().fg(theme.text)),
+                ]);
                 let line3 = Line::from(Span::styled(
-                    "Remove & update cache deletes it from the Larian Mods folder.",
+                    "Remove & update cache deletes the .pak from the Larian Mods folder.",
                     Style::default().fg(theme.warning),
                 ));
                 let line4 = Line::from(Span::styled(
                     "Unsubscribe in-game to stop updates.",
                     Style::default().fg(theme.muted),
                 ));
-                lines.extend([line1, line2, line3, line4]);
+                lines.extend([line1, line2, Line::from(""), line3, line4]);
             } else {
                 let line1 = Line::from(vec![
                     Span::styled("Remove mod \"", Style::default().fg(theme.text)),
@@ -3490,15 +3500,25 @@ fn build_dialog_message_lines(dialog: &crate::app::Dialog, theme: &Theme) -> Vec
                     ),
                     Span::styled(".", Style::default().fg(theme.text)),
                 ]);
-                let line3 = Line::from(Span::styled(
-                    "Remove keeps files in SigilSmith storage and leaves a ghost entry.",
-                    Style::default().fg(theme.text),
-                ));
+                let line3 = Line::from(vec![
+                    Span::styled(
+                        "Remove keeps files in SigilSmith storage and leaves a ",
+                        Style::default().fg(theme.text),
+                    ),
+                    Span::styled("!", Style::default().fg(theme.warning)),
+                    Span::styled(
+                        "ghost",
+                        Style::default()
+                            .fg(theme.text)
+                            .add_modifier(Modifier::CROSSED_OUT),
+                    ),
+                    Span::styled(" entry.", Style::default().fg(theme.text)),
+                ]);
                 let line4 = Line::from(Span::styled(
-                    "Remove & update cache deletes stored files.",
+                    "Remove & update cache deletes stored files from SigilSmith storage.",
                     Style::default().fg(theme.warning),
                 ));
-                lines.extend([line1, line2, line3, line4]);
+                lines.extend([line1, line2, line3, Line::from(""), line4]);
             }
             if !dependents.is_empty() {
                 lines.push(Line::from(""));
@@ -6265,10 +6285,7 @@ fn build_rows(app: &App, theme: &Theme) -> (Vec<Row<'static>>, ModCounts, usize,
     let enabled_ids = app.active_profile_enabled_ids();
     let total_rows = profile_entries.len();
 
-    for (row_index, (order_index, entry)) in profile_entries.iter().enumerate() {
-        if entry.enabled && entry.missing_label.is_none() && !app.sigillink_missing_pak(&entry.id) {
-            visible_enabled += 1;
-        }
+    for (_, entry) in &profile_entries {
         if entry.missing_label.is_some() {
             let label = entry
                 .missing_label
@@ -6277,10 +6294,6 @@ fn build_rows(app: &App, theme: &Theme) -> (Vec<Row<'static>>, ModCounts, usize,
                 .unwrap_or(&entry.id);
             let display = format!("{} (missing)", label.trim());
             mod_width = mod_width.max(display.chars().count());
-            let (row, target_len) =
-                row_for_missing_entry(app, row_index, *order_index, entry, theme);
-            target_width = target_width.max(target_len);
-            rows.push(row);
             continue;
         }
         let Some(mod_entry) = mod_map.get(&entry.id) else {
@@ -6291,15 +6304,29 @@ fn build_rows(app: &App, theme: &Theme) -> (Vec<Row<'static>>, ModCounts, usize,
                 .unwrap_or(&entry.id);
             let display = format!("{} (missing)", label.trim());
             mod_width = mod_width.max(display.chars().count());
+            continue;
+        };
+        mod_width = mod_width.max(mod_entry.display_name().chars().count());
+    }
+
+    for (row_index, (order_index, entry)) in profile_entries.iter().enumerate() {
+        if entry.enabled && entry.missing_label.is_none() && !app.sigillink_missing_pak(&entry.id) {
+            visible_enabled += 1;
+        }
+        if entry.missing_label.is_some() {
+            let (row, target_len) =
+                row_for_missing_entry(app, row_index, *order_index, entry, theme);
+            target_width = target_width.max(target_len);
+            rows.push(row);
+            continue;
+        }
+        let Some(mod_entry) = mod_map.get(&entry.id) else {
             let (row, target_len) =
                 row_for_missing_entry(app, row_index, *order_index, entry, theme);
             target_width = target_width.max(target_len);
             rows.push(row);
             continue;
         };
-        let display_name = mod_entry.display_name();
-        let display_len = display_name.chars().count();
-        mod_width = mod_width.max(display_len);
         let loading = app.mod_row_loading(&entry.id, row_index, total_rows);
         let effective_enabled = entry.enabled && !app.sigillink_missing_pak(&entry.id);
         let (row, target_len) = row_for_entry(
@@ -6307,6 +6334,7 @@ fn build_rows(app: &App, theme: &Theme) -> (Vec<Row<'static>>, ModCounts, usize,
             row_index,
             *order_index,
             effective_enabled,
+            mod_width,
             mod_entry,
             theme,
             dep_lookup.as_ref(),
@@ -6418,14 +6446,25 @@ fn random_loading_symbol(seed: u64) -> &'static str {
     SYMBOLS[pick % SYMBOLS.len()]
 }
 
-fn loading_name_overlay(name: &str, row_index: usize) -> String {
+fn loading_name_overlay(name: &str, row_index: usize, pad_width: usize) -> String {
     let now_ms = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis() as u64;
     let row_seed = (row_index as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15);
-    let mut out = String::with_capacity(name.len());
-    for (idx, ch) in name.chars().enumerate() {
+    let name_len = name.chars().count();
+    let target_width = pad_width.max(name_len);
+    let mut base = String::with_capacity(target_width);
+    base.push_str(name);
+    if target_width > name_len {
+        base.push_str(&" ".repeat(target_width - name_len));
+    }
+    let mut out = String::with_capacity(base.len());
+    for (idx, ch) in base.chars().enumerate() {
+        if idx < name_len {
+            out.push(ch);
+            continue;
+        }
         if ch == ' ' {
             let seed = row_seed ^ (idx as u64).wrapping_mul(0xD7);
             let roll = rand_f32(seed ^ now_ms.rotate_left(7));
@@ -6491,6 +6530,7 @@ fn row_for_entry(
     row_index: usize,
     order_index: usize,
     enabled: bool,
+    mod_name_pad: usize,
     mod_entry: &ModEntry,
     theme: &Theme,
     dep_lookup: Option<&crate::app::DependencyLookup>,
@@ -6514,7 +6554,7 @@ fn row_for_entry(
         push_loading(&mut cells, &mut loading_index); // Kind
         push_loading(&mut cells, &mut loading_index); // 🔗
         let display_name = mod_entry.display_name();
-        let name_overlay = loading_name_overlay(&display_name, row_index);
+        let name_overlay = loading_name_overlay(&display_name, row_index, mod_name_pad);
         cells.push(Cell::from(name_overlay).style(loading_style));
         push_loading(&mut cells, &mut loading_index); // Dep
         push_loading(&mut cells, &mut loading_index); // Created
@@ -6651,7 +6691,10 @@ fn truncate_text(value: &str, max_width: usize) -> String {
 }
 
 fn display_width(value: &str) -> usize {
-    value.chars().count()
+    value
+        .chars()
+        .map(|ch| if matches!(ch, '🔗') { 2 } else { 1 })
+        .sum()
 }
 
 fn split_value_width(left: &str, right: &str) -> usize {
@@ -7981,14 +8024,19 @@ fn format_legend_rows(
             let action_len = display_width(&action_text);
             let filled = key_len + spacing + action_len;
             let trailing = width.saturating_sub(filled);
+            let key_style = if row.key == "!" {
+                Style::default()
+                    .fg(theme.warning)
+                    .bg(bg)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default()
+                    .fg(theme.accent)
+                    .bg(bg)
+                    .add_modifier(Modifier::BOLD)
+            };
             Line::from(vec![
-                Span::styled(
-                    key_text,
-                    Style::default()
-                        .fg(theme.accent)
-                        .bg(bg)
-                        .add_modifier(Modifier::BOLD),
-                ),
+                Span::styled(key_text, key_style),
                 Span::styled(pad, Style::default().bg(bg)),
                 Span::styled(action_text, Style::default().fg(theme.text).bg(bg)),
                 Span::styled(" ".repeat(trailing), Style::default().bg(bg)),

@@ -7688,17 +7688,8 @@ impl App {
         Some(format!("SigiLink ranking in {seconds}s"))
     }
 
-    pub fn mod_row_loading(&self, mod_id: &str, _row_index: usize, _total_rows: usize) -> bool {
-        if self.metadata_active {
-            return !self.metadata_processed_ids.contains(mod_id);
-        }
-        if self.native_sync_active
-            || self.startup_dependency_check_pending
-            || !self.dependency_cache_ready
-        {
-            return true;
-        }
-        false
+    pub fn mod_row_loading(&self, _mod_id: &str, _row_index: usize, _total_rows: usize) -> bool {
+        self.mod_list_loading()
     }
 
     pub fn missing_dependency_count_for_mod(
@@ -7716,8 +7707,13 @@ impl App {
         deps.iter()
             .filter(|dep| {
                 let mut ids = resolved_dependency_ids(lookup, dep, mod_entry);
+                let only_self = ids.len() == 1 && ids[0] == mod_entry.id;
+                ids.retain(|id| id != &mod_entry.id);
                 ids.retain(|id| !self.sigillink_missing_pak(id));
                 if ids.is_empty() {
+                    if only_self {
+                        return false;
+                    }
                     return !is_unverified_dependency(dep);
                 }
                 false
@@ -7742,8 +7738,13 @@ impl App {
         let mut disabled = 0usize;
         for dep in deps {
             let mut ids = resolved_dependency_ids(lookup, &dep, mod_entry);
+            let only_self = ids.len() == 1 && ids[0] == mod_entry.id;
+            ids.retain(|id| id != &mod_entry.id);
             ids.retain(|id| !self.sigillink_missing_pak(id));
             if ids.is_empty() {
+                if only_self {
+                    continue;
+                }
                 if !is_unverified_dependency(&dep) {
                     missing += 1;
                 }
