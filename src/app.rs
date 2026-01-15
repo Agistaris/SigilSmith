@@ -632,6 +632,8 @@ pub struct App {
     mod_filter_snapshot: Option<String>,
     pub mod_sort: ModSort,
     pub settings_menu: Option<SettingsMenu>,
+    settings_menu_last_selected: usize,
+    settings_menu_return: bool,
     pub export_menu: Option<ExportMenu>,
     pub update_status: UpdateStatus,
     pub smart_rank_preview: Option<SmartRankPreview>,
@@ -1060,6 +1062,8 @@ impl App {
             mod_filter_snapshot: None,
             mod_sort: ModSort::default(),
             settings_menu: None,
+            settings_menu_last_selected: 0,
+            settings_menu_return: false,
             export_menu: None,
             update_status: UpdateStatus::Idle,
             smart_rank_preview: None,
@@ -1448,11 +1452,16 @@ impl App {
     }
 
     pub fn open_settings_menu(&mut self) {
-        self.settings_menu = Some(SettingsMenu { selected: 0 });
+        let selected = self.settings_menu_last_selected;
+        self.settings_menu = Some(SettingsMenu { selected });
+        self.settings_menu_return = false;
         self.start_update_check();
     }
 
     pub fn close_settings_menu(&mut self) {
+        if let Some(menu) = &self.settings_menu {
+            self.settings_menu_last_selected = menu.selected;
+        }
         self.settings_menu = None;
     }
 
@@ -1462,6 +1471,10 @@ impl App {
         } else {
             self.open_settings_menu();
         }
+    }
+
+    pub fn request_settings_menu_return(&mut self) {
+        self.settings_menu_return = true;
     }
 
     pub fn toggle_help(&mut self) {
@@ -3229,7 +3242,7 @@ impl App {
             .find(|entry| entry.id == id)
             .map(|entry| entry.is_native())
             .unwrap_or(false);
-        let default_choice = DialogChoice::Yes;
+        let default_choice = DialogChoice::No;
         let (title, toggle) = if is_native {
             ("Remove Native Mod".to_string(), None)
         } else {
@@ -3245,7 +3258,7 @@ impl App {
             title,
             message: String::new(),
             yes_label: "Remove".to_string(),
-            no_label: "Remove + delete file(s)".to_string(),
+            no_label: "Remove & update cache".to_string(),
             choice: default_choice,
             kind: DialogKind::DeleteMod {
                 id,
@@ -4516,6 +4529,7 @@ impl App {
         self.update_hotkey_transition();
         self.maybe_show_sigillink_onboarding();
         self.maybe_start_sigillink_rank_pending();
+        self.maybe_return_to_settings_menu();
 
         if self.update_active {
             if let Some(started_at) = self.update_started_at {
@@ -4529,6 +4543,30 @@ impl App {
                 }
             }
         }
+    }
+
+    fn maybe_return_to_settings_menu(&mut self) {
+        if !self.settings_menu_return {
+            return;
+        }
+        if self.settings_menu.is_some()
+            || self.export_menu.is_some()
+            || self.help_open
+            || self.paths_overlay_open
+            || self.dialog.is_some()
+            || self.override_picker_active()
+            || self.sigillink_missing_queue.is_some()
+            || self.dependency_queue.is_some()
+            || self.smart_rank_preview.is_some()
+            || self.mod_list_preview.is_some()
+        {
+            return;
+        }
+        if !matches!(self.input_mode, InputMode::Normal) {
+            return;
+        }
+        self.settings_menu_return = false;
+        self.open_settings_menu();
     }
 
     fn maybe_show_sigillink_onboarding(&mut self) {
@@ -9456,8 +9494,21 @@ impl App {
         }
         self.library.dependency_blocks.remove(id);
 
+        let keep_ghost = !delete_files;
+        let ghost_label = mod_entry.display_name();
         for profile in &mut self.library.profiles {
-            profile.order.retain(|entry| entry.id != id);
+            if keep_ghost {
+                for entry in &mut profile.order {
+                    if entry.id == id {
+                        entry.enabled = false;
+                        if entry.missing_label.is_none() {
+                            entry.missing_label = Some(ghost_label.clone());
+                        }
+                    }
+                }
+            } else {
+                profile.order.retain(|entry| entry.id != id);
+            }
             profile
                 .file_overrides
                 .retain(|override_entry| override_entry.mod_id != id);
@@ -10038,6 +10089,17 @@ impl App {
         let Some(entry) = profile.order.get(index) else {
             return;
         };
+        if entry.missing_label.is_some()
+            || !self
+                .library
+                .mods
+                .iter()
+                .any(|mod_entry| mod_entry.id == entry.id)
+        {
+            self.status = "Missing mod file".to_string();
+            self.set_toast("Missing mod file", ToastLevel::Warn, Duration::from_secs(2));
+            return;
+        }
         let id = entry.id.clone();
         let missing = self.sigillink_missing_pak(&id);
         let enabled = entry.enabled && !missing;
@@ -10680,6 +10742,9 @@ impl App {
         let mut ids = Vec::new();
         for index in indices {
             if let Some(entry) = profile.order.get(index) {
+                if entry.missing_label.is_some() {
+                    continue;
+                }
                 if self.sigillink_missing_pak(&entry.id) {
                     continue;
                 }
@@ -10710,6 +10775,9 @@ impl App {
         let mut ids = Vec::new();
         for index in indices {
             if let Some(entry) = profile.order.get(index) {
+                if entry.missing_label.is_some() {
+                    continue;
+                }
                 if self.sigillink_missing_pak(&entry.id) {
                     continue;
                 }
@@ -10767,6 +10835,9 @@ impl App {
         let mut to_enable = Vec::new();
         for index in indices {
             if let Some(entry) = profile.order.get(index) {
+                if entry.missing_label.is_some() {
+                    continue;
+                }
                 if self.sigillink_missing_pak(&entry.id) {
                     continue;
                 }

@@ -214,11 +214,14 @@ fn push_dependency_ref(deps: &mut Vec<String>, uuid: Option<String>, label: Opti
 }
 
 pub fn is_base_dependency_label(label: &str) -> bool {
-    let normalized: String = label
+    let mut normalized: String = label
         .chars()
         .filter(|ch| ch.is_ascii_alphanumeric())
         .map(|ch| ch.to_ascii_lowercase())
         .collect();
+    if normalized.ends_with("pak") {
+        normalized = normalized.trim_end_matches("pak").to_string();
+    }
     matches!(
         normalized.as_str(),
         "gustav"

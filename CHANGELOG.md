@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.7.5
+
+- Align context labels independently of hotkey widths.
+- Soften Help section headers and stripe Help rows across full width.
+- Keep Esc menu open after closing submenus.
+- Remove now leaves a ghost entry (non-delete) and clarifies delete wording.
+- Ignore base dependency labels with .pak suffixes and animate loading gaps in names.
+
 ## 0.7.4
 
 - Title-case the Context/Legend/Hotkeys panels and the Help/Settings menus.
