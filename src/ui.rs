@@ -2141,28 +2141,20 @@ fn draw(frame: &mut Frame<'_>, app: &mut App) {
         }
         let table_width = table_chunks[0].width;
         let spacing = 0u16;
-        let spacer_width = 3u16;
-        let on_spacer_width = 2u16;
-        let order_spacer_width = 2u16;
-        let nk_spacer_width = 1u16;
-        let dep_spacer_width = 2u16;
+        let spacer_width = 1u16;
         let link_width = 2u16;
         let dep_width = 4u16;
         let date_width = 10u16;
         let fixed_without_mod_target = 4
-            + on_spacer_width
             + 3
-            + order_spacer_width
             + 2
-            + nk_spacer_width
             + 6
             + dep_width
-            + dep_spacer_width
             + link_width
             + spacer_width * 3
             + date_width
             + date_width
-            + spacing * 16;
+            + spacing * 13;
         let max_mod = table_width.saturating_sub(fixed_without_mod_target + 1);
         let mut mod_col = mod_width as u16;
         if max_mod > 0 {
@@ -2184,14 +2176,10 @@ fn draw(frame: &mut Frame<'_>, app: &mut App) {
         }
         let header = Row::new(vec![
             mod_header_cell(" On", ModSortColumn::Enabled, app.mod_sort, &theme),
-            mod_header_cell_static(" ", &theme),
             mod_header_cell(" # ", ModSortColumn::Order, app.mod_sort, &theme),
-            mod_header_cell_static(" ", &theme),
             mod_header_cell("N", ModSortColumn::Native, app.mod_sort, &theme),
-            mod_header_cell_static(" ", &theme),
             mod_header_cell("Kind", ModSortColumn::Kind, app.mod_sort, &theme),
             mod_header_cell_static("Dep", &theme),
-            mod_header_cell_static(" ", &theme),
             mod_header_cell_static(" ", &theme),
             mod_header_cell("Mod", ModSortColumn::Name, app.mod_sort, &theme),
             mod_header_cell_static(" ", &theme),
@@ -2206,14 +2194,10 @@ fn draw(frame: &mut Frame<'_>, app: &mut App) {
             rows,
             [
                 Constraint::Length(4),
-                Constraint::Length(on_spacer_width),
                 Constraint::Length(3),
-                Constraint::Length(order_spacer_width),
                 Constraint::Length(2),
-                Constraint::Length(nk_spacer_width),
                 Constraint::Length(6),
                 Constraint::Length(dep_width),
-                Constraint::Length(dep_spacer_width),
                 Constraint::Length(link_width),
                 Constraint::Length(mod_col),
                 Constraint::Length(spacer_width),
@@ -6510,17 +6494,18 @@ fn loading_name_overlay(name: &str, row_index: usize, pad_width: usize) -> Strin
     let row_seed = (row_index as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15);
     let name_len = name.chars().count();
     let target_width = pad_width.max(name_len);
+    let tail_blank = 2usize;
     let mut base: Vec<char> = name.chars().collect();
     if target_width > name_len {
         base.extend(std::iter::repeat(' ').take(target_width - name_len));
     }
-    let soft_end = if base.len() > name_len + 4 {
-        base.len().saturating_sub(4)
+    let soft_end = if base.len() > name_len + tail_blank {
+        base.len().saturating_sub(tail_blank)
     } else {
         base.len()
     };
     let frame = now_ms / 220;
-    let parity = (frame & 1) as usize;
+    let parity = ((frame ^ row_seed) & 1) as usize;
     let mut space_indices: Vec<usize> = base
         .iter()
         .enumerate()
@@ -6575,6 +6560,17 @@ fn loading_name_overlay(name: &str, row_index: usize, pad_width: usize) -> Strin
         desired = 1;
     }
     desired = desired.min(space_indices.len().min(2));
+    if desired == 0 {
+        if target_width > name_len {
+            let tail_start = target_width.saturating_sub(tail_blank).max(name_len);
+            for idx in tail_start..target_width {
+                if let Some(ch) = base.get_mut(idx) {
+                    *ch = ' ';
+                }
+            }
+        }
+        return base.into_iter().collect();
+    }
     let mut picks: Vec<usize> = Vec::new();
     let mut guard = 0usize;
     while picks.len() < desired && guard < space_indices.len() * 3 {
@@ -6602,14 +6598,19 @@ fn loading_name_overlay(name: &str, row_index: usize, pad_width: usize) -> Strin
         }
     }
     if picks.is_empty() {
-        picks.push(*space_indices.last().unwrap());
+        picks.push(space_indices[(rng as usize) % space_indices.len()]);
     }
     for (idx, pos) in picks.into_iter().enumerate() {
         let seed = row_seed ^ ((idx as u64 + 1) * 0xD7) ^ now_ms;
         base[pos] = random_loading_symbol(seed).chars().next().unwrap_or(' ');
     }
-    if let Some(last) = base.last_mut() {
-        *last = ' ';
+    if target_width > name_len {
+        let tail_start = target_width.saturating_sub(tail_blank).max(name_len);
+        for idx in tail_start..target_width {
+            if let Some(ch) = base.get_mut(idx) {
+                *ch = ' ';
+            }
+        }
     }
     base.into_iter().collect()
 }
@@ -6643,14 +6644,10 @@ fn row_for_missing_entry(
     ]));
     let mut row = Row::new(vec![
         Cell::from(enabled_text.to_string()).style(muted),
-        Cell::from(" ".to_string()).style(muted),
         Cell::from(order_text).style(muted),
         Cell::from(" ".to_string()).style(muted),
         Cell::from(" ".to_string()).style(muted),
-        Cell::from(" ".to_string()).style(muted),
-        Cell::from(" ".to_string()).style(muted),
         dep_cell,
-        Cell::from(" ".to_string()).style(muted),
         link_cell,
         Cell::from(display).style(muted),
         Cell::from(" ".to_string()).style(muted),
@@ -6682,7 +6679,7 @@ fn row_for_entry(
     let target_len = state_label.chars().count();
     let mut row = if loading {
         let loading_style = Style::default().fg(theme.muted);
-        let mut cells = Vec::with_capacity(18);
+        let mut cells = Vec::with_capacity(16);
         let mut loading_index = 0usize;
         let push_loading = |cells: &mut Vec<Cell<'static>>, index: &mut usize| {
             let frame = loading_frame(row_index, *index);
@@ -6690,14 +6687,10 @@ fn row_for_entry(
             cells.push(Cell::from(frame.to_string()).style(loading_style));
         };
         push_loading(&mut cells, &mut loading_index); // On
-        cells.push(Cell::from(" ").style(loading_style));
         push_loading(&mut cells, &mut loading_index); // #
-        cells.push(Cell::from(" ").style(loading_style));
         push_loading(&mut cells, &mut loading_index); // N
-        cells.push(Cell::from(" ").style(loading_style));
         push_loading(&mut cells, &mut loading_index); // Kind
         push_loading(&mut cells, &mut loading_index); // Dep
-        cells.push(Cell::from(" ").style(loading_style));
         push_loading(&mut cells, &mut loading_index); // 🔗
         let display_name = mod_entry.display_name();
         let name_overlay = loading_name_overlay(&display_name, row_index, mod_name_pad);
@@ -6760,14 +6753,10 @@ fn row_for_entry(
         let name_cell = mod_name_cell(app, mod_entry, theme);
         Row::new(vec![
             Cell::from(enabled_text.to_string()).style(enabled_style),
-            Cell::from(" "),
             Cell::from(order_text).style(order_style),
-            Cell::from(" "),
             Cell::from(native_marker.to_string()).style(native_style),
-            Cell::from(" "),
             Cell::from(kind.to_string()).style(kind_style),
             dep_cell,
-            Cell::from(" "),
             link_cell,
             name_cell,
             Cell::from(" "),
@@ -7553,8 +7542,6 @@ fn build_conflict_details(
         let selected_row = index == selected;
         let row_bg = if selected_row {
             Some(theme.accent_soft)
-        } else if index % 2 == 1 {
-            Some(theme.row_alt_bg)
         } else {
             None
         };
