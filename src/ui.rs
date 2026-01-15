@@ -34,12 +34,11 @@ use std::{
 
 const SIDE_PANEL_WIDTH: u16 = 43;
 const STATUS_WIDTH: u16 = SIDE_PANEL_WIDTH;
-const STATUS_HEIGHT: u16 = 3;
 const HEADER_HEIGHT: u16 = 3;
 const DETAILS_HEIGHT: u16 = 12;
 const CONTEXT_HEIGHT: u16 = 27;
 const LOG_MIN_HEIGHT: u16 = 5;
-const CONFLICTS_BAR_HEIGHT: u16 = STATUS_HEIGHT;
+const CONFLICTS_BAR_HEIGHT: u16 = 1;
 const FILTER_HEIGHT: u16 = 2;
 const TABLE_MIN_HEIGHT: u16 = 6;
 const SUBPANEL_PAD_X: u16 = 0;
@@ -1867,24 +1866,6 @@ fn draw(frame: &mut Frame<'_>, app: &mut App) {
         .split(area);
     let (rows, counts, target_width, mod_width) = build_rows(app, &theme);
     let profile_label = app.active_profile_label();
-    let renaming_active = app.is_renaming_active_profile();
-    let filter_active = app.mod_filter_active();
-    let loading_mods = app.mod_list_loading();
-    let mods_label = if loading_mods {
-        "...".to_string()
-    } else {
-        format_visible_count(counts.visible_total, counts.total)
-    };
-    let enabled_label = if loading_mods {
-        "...".to_string()
-    } else {
-        format_enabled_count(
-            counts.visible_enabled,
-            counts.visible_total,
-            counts.enabled,
-            filter_active,
-        )
-    };
     let status_text = app.status_line();
     let status_color = status_color_text(&status_text, &theme);
     let overrides_total = app.conflicts.len();
@@ -1931,33 +1912,56 @@ fn draw(frame: &mut Frame<'_>, app: &mut App) {
         header_line_area.width = header_line_area.width.saturating_sub(2);
     }
 
-    let title_text = format!("SigilSmith | {}", app.game_id.display_name());
-    let stats_text = format!(
-        "Profile: {} | Mods {} | Enabled {}",
-        profile_label, mods_label, enabled_label
+    let title_text = format!(
+        "SigilSmith | {} | {}",
+        profile_label,
+        app.game_id.display_name()
     );
-    let available = header_line_area.width as usize;
-    let mut left_width = title_text.chars().count().min(available);
-    let mut right_width = stats_text
-        .chars()
-        .count()
-        .min(available.saturating_sub(left_width));
+    let initial_available = header_line_area.width as usize;
     let min_middle = 1usize;
-    if left_width + right_width + min_middle > available {
-        let overflow = left_width + right_width + min_middle - available;
-        if right_width >= left_width {
-            right_width = right_width.saturating_sub(overflow);
-        } else {
-            left_width = left_width.saturating_sub(overflow);
-        }
+    let min_left = 20usize;
+    let max_status = STATUS_WIDTH as usize;
+    let mut status_width = if initial_available > min_left + min_middle {
+        max_status.min(initial_available.saturating_sub(min_left + min_middle))
+    } else {
+        0
+    };
+    if status_width > initial_available {
+        status_width = initial_available;
     }
-    let middle_width = available.saturating_sub(left_width + right_width);
+    let mut status_area = Rect::default();
+    if status_width > 0 && (header_line_area.width as usize) > status_width.saturating_add(1) {
+        let status_x = header_line_area
+            .x
+            .saturating_add(header_line_area.width.saturating_sub(status_width as u16));
+        status_area = Rect {
+            x: status_x,
+            y: chunks[0].y,
+            width: status_width as u16,
+            height: chunks[0].height,
+        };
+        header_line_area.width = header_line_area
+            .width
+            .saturating_sub(status_width as u16 + 1);
+    } else {
+        status_width = 0;
+    }
+    let available = header_line_area.width as usize;
+    let left_available = available.saturating_sub(status_width);
+    let mut left_width = title_text.chars().count().min(left_available);
+    let mut middle_width = left_available.saturating_sub(left_width);
+    if middle_width < min_middle && left_width > 0 {
+        let need = min_middle.saturating_sub(middle_width);
+        let reduce = need.min(left_width);
+        left_width = left_width.saturating_sub(reduce);
+        middle_width = middle_width.saturating_add(reduce);
+    }
     let header_line_chunks = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([
             Constraint::Length(left_width as u16),
             Constraint::Length(middle_width as u16),
-            Constraint::Length(right_width as u16),
+            Constraint::Length(status_width as u16),
         ])
         .split(header_line_area);
 
@@ -1972,8 +1976,11 @@ fn draw(frame: &mut Frame<'_>, app: &mut App) {
                 .add_modifier(Modifier::BOLD),
         ))
     } else {
-        let game_width = max_title.saturating_sub(title_prefix.len() + title_bar.len());
-        let game_name = truncate_text(app.game_id.display_name(), game_width);
+        let suffix = format!(
+            "{title_bar}{profile_label}{title_bar}{}",
+            app.game_id.display_name()
+        );
+        let suffix_text = truncate_text(&suffix, max_title.saturating_sub(title_prefix.len()));
         Line::from(vec![
             Span::styled(
                 title_prefix,
@@ -1981,8 +1988,7 @@ fn draw(frame: &mut Frame<'_>, app: &mut App) {
                     .fg(theme.accent)
                     .add_modifier(Modifier::BOLD),
             ),
-            Span::styled(title_bar, Style::default().fg(theme.muted)),
-            Span::styled(game_name, Style::default().fg(theme.text)),
+            Span::styled(suffix_text, Style::default().fg(theme.text)),
         ])
     };
     let title = Paragraph::new(title_line)
@@ -1997,33 +2003,18 @@ fn draw(frame: &mut Frame<'_>, app: &mut App) {
             .alignment(Alignment::Center);
         frame.render_widget(tabs, header_line_chunks[1]);
     }
-
-    let stats_line = Line::from(vec![
-        Span::styled("Profile: ", Style::default().fg(theme.muted)),
-        Span::styled(
-            profile_label,
-            Style::default().fg(if renaming_active {
-                theme.warning
-            } else {
-                theme.accent
-            }),
-        ),
-        Span::styled(" | ", Style::default().fg(theme.muted)),
-        Span::styled("Mods ", Style::default().fg(theme.muted)),
-        Span::styled(mods_label.clone(), Style::default().fg(theme.text)),
-        Span::styled(" | ", Style::default().fg(theme.muted)),
-        Span::styled("Enabled ", Style::default().fg(theme.muted)),
-        Span::styled(
-            enabled_label.clone(),
-            Style::default()
-                .fg(theme.success)
-                .add_modifier(Modifier::BOLD),
-        ),
-    ]);
-    let stats = Paragraph::new(stats_line)
-        .style(Style::default().bg(theme.header_bg))
-        .alignment(Alignment::Right);
-    frame.render_widget(stats, header_line_chunks[2]);
+    if status_area.width > 0 && status_area.height > 0 {
+        let overrides_focused = app.focus == Focus::Conflicts;
+        draw_status_panel(
+            frame,
+            app,
+            &theme,
+            status_area,
+            &status_text,
+            status_color,
+            overrides_focused,
+        );
+    }
 
     let left_panel_height = chunks[1].height.saturating_add(chunks[2].height);
     let left_panel_area = Rect {
@@ -2159,10 +2150,10 @@ fn draw(frame: &mut Frame<'_>, app: &mut App) {
             + 6
             + link_width
             + 4
-            + spacer_width * 3
+            + spacer_width * 4
             + date_width
             + date_width
-            + spacing * 13;
+            + spacing * 14;
         let max_mod = table_width.saturating_sub(fixed_without_mod_target + 1);
         let mut mod_col = mod_width as u16;
         if max_mod > 0 {
@@ -2190,6 +2181,7 @@ fn draw(frame: &mut Frame<'_>, app: &mut App) {
             mod_header_cell("Kind", ModSortColumn::Kind, app.mod_sort, &theme),
             mod_header_cell_static(" ", &theme),
             mod_header_cell("Mod", ModSortColumn::Name, app.mod_sort, &theme),
+            mod_header_cell_static(" ", &theme),
             mod_header_cell_static("Dep", &theme),
             mod_header_cell_static(" ", &theme),
             mod_header_cell("Created", ModSortColumn::Created, app.mod_sort, &theme),
@@ -2209,6 +2201,7 @@ fn draw(frame: &mut Frame<'_>, app: &mut App) {
                 Constraint::Length(6),
                 Constraint::Length(2),
                 Constraint::Length(mod_col),
+                Constraint::Length(spacer_width),
                 Constraint::Length(4),
                 Constraint::Length(spacer_width),
                 Constraint::Length(date_width),
@@ -2638,113 +2631,58 @@ fn draw(frame: &mut Frame<'_>, app: &mut App) {
     }
 
     let status_row = chunks[3];
-    let bottom_chunks = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([Constraint::Min(10), Constraint::Length(STATUS_WIDTH)])
-        .split(status_row);
-
-    let conflict_area = bottom_chunks[0];
-    let status_area = bottom_chunks[1];
-
     let overrides_focused = app.focus == Focus::Conflicts;
-    let conflict_bg = theme.log_bg;
-    let conflict_block = Block::default()
-        .borders(Borders::NONE)
-        .style(Style::default().bg(conflict_bg))
-        .padding(Padding {
-            left: 1,
-            right: 1,
-            top: 0,
-            bottom: 0,
-        });
-    frame.render_widget(conflict_block.clone(), conflict_area);
-    let conflict_inner = conflict_block.inner(conflict_area);
-    if conflict_inner.height > 0 && conflict_inner.width > 0 {
-        let line_y = conflict_inner.y + (conflict_inner.height.saturating_sub(1) / 2);
-        let line_area = Rect {
-            x: conflict_inner.x,
-            y: line_y,
-            width: conflict_inner.width,
-            height: 1,
+    if status_row.height > 0 && status_row.width > 0 {
+        let conflict_area = Rect {
+            x: chunks[2].x.saturating_add(SIDE_PANEL_WIDTH),
+            y: status_row.y,
+            width: chunks[2].width.saturating_sub(SIDE_PANEL_WIDTH),
+            height: status_row.height,
         };
-        if overrides_focused && line_area.width > 0 {
-            let bar_width = conflict_line_width(app, &theme, line_area.width as usize);
-            if bar_width > 0 {
-                let bar_area = Rect {
-                    x: line_area.x,
-                    y: line_area.y,
-                    width: bar_width.min(line_area.width),
+        if conflict_area.width > 0 {
+            let conflict_bg = theme.log_bg;
+            let conflict_block = Block::default()
+                .borders(Borders::NONE)
+                .style(Style::default().bg(conflict_bg))
+                .padding(Padding {
+                    left: 1,
+                    right: 1,
+                    top: 0,
+                    bottom: 0,
+                });
+            frame.render_widget(conflict_block.clone(), conflict_area);
+            let conflict_inner = conflict_block.inner(conflict_area);
+            if conflict_inner.height > 0 && conflict_inner.width > 0 {
+                let line_y = conflict_inner.y + (conflict_inner.height.saturating_sub(1) / 2);
+                let line_area = Rect {
+                    x: conflict_inner.x,
+                    y: line_y,
+                    width: conflict_inner.width,
                     height: 1,
                 };
-                frame.render_widget(
-                    Block::default().style(Style::default().bg(theme.row_alt_bg)),
-                    bar_area,
-                );
+                if overrides_focused && line_area.width > 0 {
+                    let bar_width = conflict_line_width(app, &theme, line_area.width as usize);
+                    if bar_width > 0 {
+                        let bar_area = Rect {
+                            x: line_area.x,
+                            y: line_area.y,
+                            width: bar_width.min(line_area.width),
+                            height: 1,
+                        };
+                        frame.render_widget(
+                            Block::default().style(Style::default().bg(theme.row_alt_bg)),
+                            bar_area,
+                        );
+                    }
+                }
+                let conflict_line = build_conflict_banner(app, &theme, line_area.width as usize);
+                let conflicts = Paragraph::new(conflict_line)
+                    .style(Style::default().bg(conflict_bg))
+                    .alignment(Alignment::Left);
+                frame.render_widget(conflicts, line_area);
             }
         }
-        let conflict_line = build_conflict_banner(app, &theme, line_area.width as usize);
-        let conflicts = Paragraph::new(conflict_line)
-            .style(Style::default().bg(conflict_bg))
-            .alignment(Alignment::Left);
-        frame.render_widget(conflicts, line_area);
     }
-
-    let status_bg = theme.log_bg;
-    let status_block = Block::default()
-        .borders(Borders::ALL)
-        .border_type(BorderType::Rounded)
-        .border_style(Style::default().fg(status_color))
-        .style(Style::default().bg(status_bg))
-        .padding(Padding {
-            left: 1,
-            right: 1,
-            top: 0,
-            bottom: 0,
-        });
-    frame.render_widget(status_block.clone(), status_area);
-    let status_inner = status_block.inner(status_area);
-    if app.is_busy() && status_inner.width > 0 && status_inner.height > 0 {
-        let mut bar_width = status_inner.width / 3;
-        if bar_width < 6 {
-            bar_width = status_inner.width.min(6);
-        }
-        if bar_width == 0 {
-            bar_width = status_inner.width;
-        }
-        let travel = status_inner.width.saturating_sub(bar_width);
-        let tick = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_millis()
-            / 120;
-        let cycle = travel.saturating_mul(2).max(1) as u128;
-        let step = (tick % cycle) as u16;
-        let offset = if step > travel {
-            travel.saturating_mul(2).saturating_sub(step)
-        } else {
-            step
-        };
-        let bar_area = Rect {
-            x: status_inner.x + offset,
-            y: status_inner.y,
-            width: bar_width.min(status_inner.width),
-            height: status_inner.height,
-        };
-        let bar_color = if overrides_focused {
-            theme.accent
-        } else {
-            theme.accent_soft
-        };
-        frame.render_widget(
-            Block::default().style(Style::default().bg(bar_color)),
-            bar_area,
-        );
-    }
-    let status_text = truncate_text(&status_text, status_inner.width as usize);
-    let status_widget = Paragraph::new(status_text)
-        .style(Style::default().fg(status_color))
-        .alignment(Alignment::Center);
-    frame.render_widget(status_widget, status_inner);
 
     if app.dependency_queue_active() {
         draw_dependency_queue(frame, app, &theme);
@@ -2940,33 +2878,6 @@ fn build_focus_tabs_line(app: &App, theme: &Theme) -> Line<'static> {
     Line::from(spans)
 }
 
-fn format_visible_count(visible: usize, total: usize) -> String {
-    if total == 0 {
-        "0".to_string()
-    } else if visible == total {
-        total.to_string()
-    } else {
-        format!("{visible}/{total}")
-    }
-}
-
-fn format_enabled_count(
-    visible_enabled: usize,
-    visible_total: usize,
-    enabled_total: usize,
-    filter_active: bool,
-) -> String {
-    if filter_active {
-        if visible_total == 0 {
-            "0".to_string()
-        } else {
-            format!("{visible_enabled}/{visible_total}")
-        }
-    } else {
-        enabled_total.to_string()
-    }
-}
-
 fn status_color_text(status: &str, theme: &Theme) -> Color {
     let lower = status.to_lowercase();
     if lower.contains("failed")
@@ -2987,6 +2898,76 @@ fn status_color_text(status: &str, theme: &Theme) -> Color {
         return theme.success;
     }
     theme.accent
+}
+
+fn draw_status_panel(
+    frame: &mut Frame<'_>,
+    app: &App,
+    theme: &Theme,
+    area: Rect,
+    status_text: &str,
+    status_color: Color,
+    overrides_focused: bool,
+) {
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+    let status_bg = theme.log_bg;
+    let status_block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(status_color))
+        .style(Style::default().bg(status_bg))
+        .padding(Padding {
+            left: 1,
+            right: 1,
+            top: 0,
+            bottom: 0,
+        });
+    frame.render_widget(status_block.clone(), area);
+    let status_inner = status_block.inner(area);
+    if app.is_busy() && status_inner.width > 0 && status_inner.height > 0 {
+        let mut bar_width = status_inner.width / 3;
+        if bar_width < 6 {
+            bar_width = status_inner.width.min(6);
+        }
+        if bar_width == 0 {
+            bar_width = status_inner.width;
+        }
+        let travel = status_inner.width.saturating_sub(bar_width);
+        let tick = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis()
+            / 120;
+        let cycle = travel.saturating_mul(2).max(1) as u128;
+        let step = (tick % cycle) as u16;
+        let offset = if step > travel {
+            travel.saturating_mul(2).saturating_sub(step)
+        } else {
+            step
+        };
+        let bar_area = Rect {
+            x: status_inner.x + offset,
+            y: status_inner.y,
+            width: bar_width.min(status_inner.width),
+            height: status_inner.height,
+        };
+        let bar_color = if overrides_focused {
+            theme.accent
+        } else {
+            theme.accent_soft
+        };
+        frame.render_widget(
+            Block::default().style(Style::default().bg(bar_color)),
+            bar_area,
+        );
+    }
+    let status_text = truncate_text(status_text, status_inner.width as usize);
+    let status_widget = Paragraph::new(status_text)
+        .style(Style::default().fg(status_color))
+        .alignment(Alignment::Center);
+    frame.render_widget(status_widget, status_inner);
 }
 
 fn build_log_lines(app: &App, theme: &Theme, height: usize) -> Vec<Line<'static>> {
@@ -6345,12 +6326,10 @@ struct ModCounts {
     total: usize,
     enabled: usize,
     visible_total: usize,
-    visible_enabled: usize,
 }
 
 fn build_rows(app: &App, theme: &Theme) -> (Vec<Row<'static>>, ModCounts, usize, usize) {
     let mut rows = Vec::new();
-    let mut visible_enabled = 0;
     let mut target_width = "Target".chars().count();
     let mut mod_width = "Mod".chars().count();
     let (total, enabled) = app.profile_counts();
@@ -6385,9 +6364,6 @@ fn build_rows(app: &App, theme: &Theme) -> (Vec<Row<'static>>, ModCounts, usize,
     }
 
     for (row_index, (order_index, entry)) in profile_entries.iter().enumerate() {
-        if entry.enabled && entry.missing_label.is_none() && !app.sigillink_missing_pak(&entry.id) {
-            visible_enabled += 1;
-        }
         if entry.missing_label.is_some() {
             let (row, target_len) =
                 row_for_missing_entry(app, row_index, *order_index, entry, theme);
@@ -6427,7 +6403,6 @@ fn build_rows(app: &App, theme: &Theme) -> (Vec<Row<'static>>, ModCounts, usize,
             total,
             enabled,
             visible_total,
-            visible_enabled,
         },
         target_width,
         mod_width,
@@ -6534,13 +6509,18 @@ fn loading_name_overlay(name: &str, row_index: usize, pad_width: usize) -> Strin
         base.extend(std::iter::repeat(' ').take(target_width - name_len));
     }
     let last_space_idx = base.iter().rposition(|ch| *ch == ' ');
+    let soft_end = if base.len() > name_len + 2 {
+        base.len().saturating_sub(2)
+    } else {
+        base.len()
+    };
     let frame = now_ms / 220;
     let parity = (frame & 1) as usize;
     let mut space_indices: Vec<usize> = base
         .iter()
         .enumerate()
         .filter_map(|(idx, ch)| {
-            if idx >= name_len && *ch == ' ' && idx % 2 == parity {
+            if idx >= name_len && idx < soft_end && *ch == ' ' && idx % 2 == parity {
                 Some(idx)
             } else {
                 None
@@ -6552,7 +6532,7 @@ fn loading_name_overlay(name: &str, row_index: usize, pad_width: usize) -> Strin
             .iter()
             .enumerate()
             .filter_map(|(idx, ch)| {
-                if idx >= name_len && *ch == ' ' {
+                if idx >= name_len && idx < soft_end && *ch == ' ' {
                     Some(idx)
                 } else {
                     None
@@ -6580,7 +6560,8 @@ fn loading_name_overlay(name: &str, row_index: usize, pad_width: usize) -> Strin
     } else {
         2
     };
-    let force_last = last_space_idx.is_some() && ((frame + row_index as u64) % 6 == 0);
+    let force_last = last_space_idx.is_some()
+        && rand_f32(row_seed ^ now_ms.rotate_left(5) ^ frame.rotate_left(11)) < 0.08;
     if force_last && desired == 0 {
         desired = 1;
     }
@@ -6659,6 +6640,7 @@ fn row_for_missing_entry(
         Cell::from(" ".to_string()).style(muted),
         link_cell,
         Cell::from(display).style(muted),
+        Cell::from(" ".to_string()).style(muted),
         dep_cell,
         Cell::from(" ".to_string()).style(muted),
         Cell::from(" ".to_string()).style(muted),
@@ -6689,7 +6671,7 @@ fn row_for_entry(
     let target_len = state_label.chars().count();
     let mut row = if loading {
         let loading_style = Style::default().fg(theme.muted);
-        let mut cells = Vec::with_capacity(14);
+        let mut cells = Vec::with_capacity(15);
         let mut loading_index = 0usize;
         let push_loading = |cells: &mut Vec<Cell<'static>>, index: &mut usize| {
             let frame = loading_frame(row_index, *index);
@@ -6705,6 +6687,7 @@ fn row_for_entry(
         let display_name = mod_entry.display_name();
         let name_overlay = loading_name_overlay(&display_name, row_index, mod_name_pad);
         cells.push(Cell::from(name_overlay).style(loading_style));
+        cells.push(Cell::from(" ").style(loading_style));
         push_loading(&mut cells, &mut loading_index); // Dep
         cells.push(Cell::from(" ").style(loading_style));
         push_loading(&mut cells, &mut loading_index); // Created
@@ -6770,6 +6753,7 @@ fn row_for_entry(
             Cell::from(kind.to_string()).style(kind_style),
             link_cell,
             name_cell,
+            Cell::from(" "),
             dep_cell,
             Cell::from(" "),
             Cell::from(created_text).style(Style::default().fg(theme.muted)),

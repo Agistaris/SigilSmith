@@ -22,12 +22,26 @@ Multi-game support is coming next via an open adapter template (BG3-first today,
 ## Highlights
 
 - Drag & drop `.zip/.7z/.pak` or folders; automatic target detection.
-- Profiles + load order with deterministic override rules (last wins).
-- Override Actions panel with debounced swap overlay for manual conflict picks.
-- AI Smart Ranking preview (diff view + scroll) to suggest a stable order.
-- Created/Added dates from meta.lsx/info.json for better ordering heuristics.
-- Native mod.io entries show inline and can be managed alongside manual mods.
-- Auto-update check on startup (AppImage self-update, deb/tar downloads with instructions).
+- SigiLink cache with hardlink/symlink deploys (no full copies).
+- SigiLink Intelligent Ranking with pins, diffs, and safe auto-runs.
+- Mod list interop: JSON export/import + modsettings.lsx export/import.
+- Overrides panel for fast conflict resolution with inline winners.
+- Missing mod placeholders + dependency dialogs to keep order clean.
+- Native mod.io entries alongside manual installs.
+- Auto-update checks with clear release notes.
+
+## What's New (0.5.0+)
+
+- SigiLink cache: transactional imports, hardlink/symlink deploy, and cache tools.
+- SigiLink Intelligent Ranking: onboarding, pins, auto-rank, and clear diff views.
+- Mod list interop: JSON + modsettings.lsx import/export with preview.
+- Dependency UX: confirm enable/disable cascades and missing file prompts.
+- D/Dep column counts: missing vs disabled dependencies in one glance.
+- Better TUI: aligned panels, wider settings, richer help, and cleaner overlays.
+
+Creator note: I worked tirelessly day and night on the new SigiLink cache and ranking
+system, chasing edge cases and polishing the UX. This release is finally ready, and
+I have more planned snapshots (and a few secrets) for the next release.
 
 ## Requirements
 
@@ -66,14 +80,17 @@ cargo run
 - `a` new profile (Explorer)
 - `r` or `F2` rename profile (Explorer)
 - `c` duplicate profile (Explorer)
-- `e` export profile (Explorer)
-- `p` import profile list (Explorer)
+- `e` export mod list (Explorer)
+- `p` import mod list (Explorer)
 - `i` import a mod (file, folder, zip, or 7z)
 - drag & drop into the terminal to import (whole window)
 - `space` enable/disable (Mods)
 - `m` move mode
 - `u` move up
 - `n` move down
+- `Ctrl+E` export mod list
+- `Ctrl+P` import mod list
+- `Ctrl+R` restore SigiLink ranking for selected mod
 - `1` override: Auto (default target selection)
 - `2` override: Pak
 - `3` override: Generated
@@ -83,7 +100,7 @@ cargo run
 - `Up/Down` choose winner (Overrides)
 - `Backspace` clear conflict override (Overrides)
 - `PgUp/PgDn` scroll log
-- `Esc` settings menu (AI Smart Ranking, confirmations, configure paths, keybinds)
+- `Esc` settings menu (SigiLink, confirmations, configure paths, keybinds)
 - `b` rollback last backup
 - `Del` remove mod from library
 - `d` deploy to game
@@ -107,8 +124,9 @@ Support links (Ko-fi + GitHub Sponsors) are coming next update.
 ## License & Trademarks
 
 SigilSmith is source-available and permission is required to use, copy, modify, or
-distribute it. Contact Agistaris for licensing. The SigilSmith name and logo are
-trademarks of Agistaris; see `TRADEMARKS.md` for details.
+distribute it, including for any commercial or paid use. Contact Agistaris for
+licensing. The SigilSmith name and logo are trademarks of Agistaris; see
+`TRADEMARKS.md` for details.
 
 ## Library Location
 
@@ -122,7 +140,7 @@ SigilSmith keeps its mod library here:
 
 - Importing copies mod files into the library.
 - Deploy writes `modsettings.lsx` and merges loose files in the profile order (last wins).
-- Deploy records all files it copies in `deploy_manifest.json` so it can clean up before the next deploy.
+- Deploy uses the SigiLink cache and hardlink/symlink targets (no full-copy fallback).
 - Each deploy snapshots `library.json`, `deploy_manifest.json`, and `modsettings.lsx` under `backups/`.
 
 ## Config

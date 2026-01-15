@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.7.9
+
+- Move status panel to the header and reclaim vertical space for the main layout.
+- Keep SigiLink ranking backups aligned with file overrides.
+- Reduce trailing animation banding on mod-name loading overlays.
+- Refresh public docs and release notes for the SigiLink era.
+
 ## 0.7.8
 
 - Add additional spacing between the On and order columns in the mod stack.

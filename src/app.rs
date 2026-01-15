@@ -2577,12 +2577,14 @@ impl App {
         let total = preview.report.total;
         let missing = preview.report.missing;
         let pins = self.sigillink_pin_count();
+        let file_overrides = profile.file_overrides.clone();
         if let Some(profile) = self.library.active_profile_mut() {
             profile.order = proposed.clone();
         }
         let inputs_hash = self.sigillink_inputs_hash();
         if let Some(rank_profile) = self.sigillink_ranking_profile_mut() {
             rank_profile.order = proposed.clone();
+            rank_profile.file_overrides = file_overrides;
             rank_profile.sigillink_meta.last_ranked_at = Some(now_timestamp());
             rank_profile.sigillink_meta.last_moves = moved;
             rank_profile.sigillink_meta.last_pins = pins;
