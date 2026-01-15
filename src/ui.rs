@@ -36,7 +36,7 @@ const SIDE_PANEL_WIDTH: u16 = 43;
 const STATUS_WIDTH: u16 = SIDE_PANEL_WIDTH;
 const STATUS_HEIGHT: u16 = 3;
 const HEADER_HEIGHT: u16 = 3;
-const DETAILS_HEIGHT: u16 = 11;
+const DETAILS_HEIGHT: u16 = 12;
 const CONTEXT_HEIGHT: u16 = 27;
 const LOG_MIN_HEIGHT: u16 = 5;
 const CONFLICTS_BAR_HEIGHT: u16 = STATUS_HEIGHT;
@@ -2149,11 +2149,12 @@ fn draw(frame: &mut Frame<'_>, app: &mut App) {
         let table_width = table_chunks[0].width;
         let spacing = 0u16;
         let spacer_width = 1u16;
+        let on_spacer_width = 2u16;
         let link_width = 2u16;
         let date_width = 10u16;
         let fixed_without_mod_target = 3
             + 4
-            + spacer_width
+            + on_spacer_width
             + 2
             + 6
             + link_width
@@ -2202,7 +2203,7 @@ fn draw(frame: &mut Frame<'_>, app: &mut App) {
             rows,
             [
                 Constraint::Length(4),
-                Constraint::Length(spacer_width),
+                Constraint::Length(on_spacer_width),
                 Constraint::Length(3),
                 Constraint::Length(2),
                 Constraint::Length(6),
@@ -2315,10 +2316,31 @@ fn draw(frame: &mut Frame<'_>, app: &mut App) {
     let details_area = lower_chunks[0];
     frame.render_widget(details_fill, details_area);
     let details_inner = details_block.inner(details_area);
-    let details_content_width = details_inner
+    let mut details_content_width = details_inner
         .width
-        .saturating_sub(SUBPANEL_PAD_X.saturating_mul(2)) as usize;
+        .saturating_sub(SUBPANEL_PAD_X.saturating_mul(2))
+        as usize;
     let details_content_height = details_inner.height.saturating_sub(SUBPANEL_PAD_TOP) as usize;
+    let conflict_metrics = if app.focus == Focus::Conflicts
+        && !app.conflicts.is_empty()
+        && !app.conflicts_scanning()
+        && !app.conflicts_pending()
+        && details_content_height > 0
+    {
+        let total = app.conflicts.len();
+        let selected = app.conflict_selected.min(total.saturating_sub(1));
+        let mut footer_len = 3usize;
+        if conflict_status_label(app).is_some() {
+            footer_len += 1;
+        }
+        let metrics = conflict_list_metrics(total, selected, details_content_height, footer_len);
+        if metrics.show_scroll && details_content_width > 1 {
+            details_content_width = details_content_width.saturating_sub(1);
+        }
+        Some(metrics)
+    } else {
+        None
+    };
     let details_lines = build_details(app, &theme, details_content_width, details_content_height);
     let details_lines = pad_lines(
         details_lines,
@@ -2329,6 +2351,38 @@ fn draw(frame: &mut Frame<'_>, app: &mut App) {
         .style(Style::default().fg(theme.text).bg(details_bg))
         .block(details_block);
     frame.render_widget(details, details_area);
+    if let Some(metrics) = conflict_metrics {
+        if metrics.show_scroll && details_inner.width > 0 && details_inner.height > 0 {
+            let scroll_len = metrics
+                .total
+                .saturating_sub(metrics.list_height)
+                .saturating_add(1);
+            let mut scroll_state = ScrollbarState::new(scroll_len)
+                .position(metrics.offset)
+                .viewport_content_length(metrics.list_height);
+            let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
+                .track_symbol(Some("░"))
+                .thumb_symbol("▓")
+                .begin_symbol(Some("▲"))
+                .end_symbol(Some("▼"))
+                .track_style(Style::default().fg(theme.border))
+                .thumb_style(Style::default().fg(theme.accent));
+            let mut scroll_area = Rect {
+                x: details_inner
+                    .x
+                    .saturating_add(details_inner.width.saturating_sub(1)),
+                y: details_inner.y.saturating_add(1),
+                width: 1,
+                height: metrics.list_height as u16,
+            };
+            if scroll_area.y >= details_inner.y.saturating_add(details_inner.height) {
+                scroll_area.height = 0;
+            }
+            if scroll_area.height > 0 {
+                frame.render_stateful_widget(scrollbar, scroll_area, &mut scroll_state);
+            }
+        }
+    }
     let context_block = theme
         .block("Context")
         .style(Style::default().bg(theme.subpanel_bg));
@@ -2362,7 +2416,7 @@ fn draw(frame: &mut Frame<'_>, app: &mut App) {
         .width
         .saturating_sub(SUBPANEL_PAD_X.saturating_mul(2)) as usize;
     let legend_content_height = legend_inner.height.saturating_sub(SUBPANEL_PAD_TOP) as usize;
-    let context_label_width = context_labels
+    let context_label_width_raw = context_labels
         .iter()
         .map(|label| display_width(label))
         .max()
@@ -2374,14 +2428,16 @@ fn draw(frame: &mut Frame<'_>, app: &mut App) {
         .chain(hotkey_rows.context.iter())
         .map(|row| display_width(&row.key))
         .max()
-        .unwrap_or(context_label_width);
+        .unwrap_or(context_label_width_raw);
     let min_action_width = 12usize;
     let max_key_width = legend_content_width.saturating_sub(min_action_width + 2);
-    let context_label_width = context_label_width.min(max_context_label).max(1);
     let mut legend_key_width = max_key_len.min(max_key_width.max(1)).max(1);
     if legend_key_width == 0 {
         legend_key_width = 1;
     }
+    let align_label_width = legend_key_width.min(max_context_label).max(1);
+    let context_label_width = align_label_width;
+    let legend_key_width = align_label_width;
 
     let mut context_lines = Vec::new();
     context_lines.push(Line::from(Span::styled(
@@ -3824,12 +3880,6 @@ fn draw_help_menu(frame: &mut Frame<'_>, app: &mut App, theme: &Theme) {
     }
 
     let show_scroll = max_scroll > 0;
-    if show_scroll && content_width > 1 {
-        let adjusted_width = content_width.saturating_sub(1);
-        if adjusted_width != content_width {
-            lines = build_help_lines(theme, adjusted_width);
-        }
-    }
 
     render_modal_backdrop(frame, outer_area, theme);
     let help_block = Block::default()
@@ -3857,6 +3907,13 @@ fn draw_help_menu(frame: &mut Frame<'_>, app: &mut App, theme: &Theme) {
             .constraints([Constraint::Min(1), Constraint::Length(0)])
             .split(help_inner)
     };
+    let content_width = help_chunks[0].width.max(1) as usize;
+    lines = build_help_lines(theme, content_width);
+    let view_height = help_chunks[0].height.max(1) as usize;
+    let max_scroll = lines.len().saturating_sub(view_height);
+    if app.help_scroll > max_scroll {
+        app.help_scroll = max_scroll;
+    }
     let help_widget = Paragraph::new(lines)
         .scroll((app.help_scroll as u16, 0))
         .style(Style::default().fg(theme.text).bg(theme.header_bg));
@@ -7282,6 +7339,77 @@ fn build_explorer_details(app: &App, theme: &Theme, width: usize) -> Vec<Line<'s
     }
 }
 
+struct ConflictListMetrics {
+    total: usize,
+    list_height: usize,
+    offset: usize,
+    show_separator: bool,
+    show_scroll: bool,
+}
+
+fn conflict_status_label(app: &App) -> Option<&'static str> {
+    let override_reason = app.deploy_reason_contains("conflict override");
+    if app.deploy_active() && override_reason {
+        Some("Loading...")
+    } else if app.deploy_pending() && override_reason {
+        Some("Queued...")
+    } else if app.override_swap.is_some() {
+        Some("Applied")
+    } else {
+        None
+    }
+}
+
+fn conflict_list_metrics(
+    total: usize,
+    selected: usize,
+    height: usize,
+    footer_len: usize,
+) -> ConflictListMetrics {
+    let header_height = 1usize;
+    let mut list_height = height.saturating_sub(header_height + footer_len);
+    if list_height == 0 {
+        list_height = 1;
+    }
+
+    let mut offset = 0usize;
+    if total > list_height {
+        if selected >= list_height {
+            offset = selected + 1 - list_height;
+        }
+        let max_offset = total.saturating_sub(list_height);
+        if offset > max_offset {
+            offset = max_offset;
+        }
+    }
+
+    let mut show_separator = total > list_height && offset + list_height < total;
+    if show_separator && list_height > 1 {
+        list_height = list_height.saturating_sub(1).max(1);
+        offset = 0;
+        if total > list_height {
+            if selected >= list_height {
+                offset = selected + 1 - list_height;
+            }
+            let max_offset = total.saturating_sub(list_height);
+            if offset > max_offset {
+                offset = max_offset;
+            }
+        }
+        show_separator = total > list_height && offset + list_height < total;
+    } else if show_separator {
+        show_separator = false;
+    }
+
+    ConflictListMetrics {
+        total,
+        list_height,
+        offset,
+        show_separator,
+        show_scroll: total > list_height,
+    }
+}
+
 fn build_conflict_details(
     app: &App,
     theme: &Theme,
@@ -7370,45 +7498,22 @@ fn build_conflict_details(
         Style::default().fg(theme.muted),
     )));
 
-    let status_line = {
-        let override_reason = app.deploy_reason_contains("conflict override");
-        if app.deploy_active() && override_reason {
-            Some("Loading...".to_string())
-        } else if app.deploy_pending() && override_reason {
-            Some("Queued...".to_string())
-        } else if app.override_swap.is_some() {
-            Some("Applied".to_string())
-        } else {
-            None
-        }
-    };
-    if let Some(status) = status_line {
+    if let Some(status) = conflict_status_label(app) {
         footer_lines.push(Line::from(Span::styled(
-            truncate_text(&status, width),
+            truncate_text(status, width),
             Style::default().fg(theme.muted),
         )));
     }
 
-    let header_height = 1usize;
-    let mut list_height = height.saturating_sub(header_height + footer_lines.len());
-    while list_height == 0 && !footer_lines.is_empty() {
+    let mut footer_len = footer_lines.len();
+    let mut metrics = conflict_list_metrics(total, selected, height, footer_len);
+    while metrics.list_height == 0 && !footer_lines.is_empty() {
         footer_lines.pop();
-        list_height = height.saturating_sub(header_height + footer_lines.len());
+        footer_len = footer_lines.len();
+        metrics = conflict_list_metrics(total, selected, height, footer_len);
     }
-    if list_height == 0 {
-        list_height = 1;
-    }
-
-    let view_height = list_height;
-    let mut offset = 0usize;
-    if total > view_height {
-        if selected >= view_height {
-            offset = selected + 1 - view_height;
-        }
-        let max_offset = total.saturating_sub(view_height);
-        if offset > max_offset {
-            offset = max_offset;
-        }
+    if metrics.list_height == 0 {
+        metrics.list_height = 1;
     }
 
     let max_label_len = 10usize;
@@ -7421,7 +7526,7 @@ fn build_conflict_details(
         truncate_text(trimmed, max_label_len)
     };
 
-    for index in offset..offset.saturating_add(view_height) {
+    for index in metrics.offset..metrics.offset.saturating_add(metrics.list_height) {
         let Some(entry) = app.conflicts.get(index) else {
             break;
         };
@@ -7548,6 +7653,9 @@ fn build_conflict_details(
         lines.push(Line::from(spans));
     }
 
+    if metrics.show_separator {
+        lines.push(center_line("↓ more", Style::default().fg(theme.muted)));
+    }
     lines.extend(footer_lines);
     lines
 }
@@ -7966,7 +8074,7 @@ fn hotkey_rows(app: &App) -> HotkeyRows {
 
 fn legend_line_count(legend: &[LegendRow], hotkeys: &HotkeyRows) -> usize {
     let mut count = 0usize;
-    let legend_rows = legend.len().max(2);
+    let legend_rows = legend.len().max(4).min(4);
     count = count.saturating_add(1 + legend_rows);
     let hotkey_rows = hotkeys.global.len().saturating_add(hotkeys.context.len());
     if hotkey_rows > 0 {
@@ -7997,11 +8105,14 @@ fn build_legend_lines(
             action: "None".to_string(),
         });
     }
-    while legend_rows.len() < 2 {
+    while legend_rows.len() < 4 {
         legend_rows.push(LegendRow {
             key: String::new(),
             action: String::new(),
         });
+    }
+    if legend_rows.len() > 4 {
+        legend_rows.truncate(4);
     }
     lines.extend(format_context_rows(
         &legend_rows,
@@ -8041,7 +8152,7 @@ fn section_header_line(title: &str, width: usize, theme: &Theme) -> Line<'static
     Line::from(Span::styled(
         padded,
         Style::default()
-            .fg(theme.accent)
+            .fg(theme.header_bg)
             .bg(theme.accent_soft)
             .add_modifier(Modifier::BOLD),
     ))

@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.7.8
+
+- Add additional spacing between the On and order columns in the mod stack.
+- Keep Context values aligned with Legend/Hotkeys and lock the Legend section to 4 rows.
+- Extend the overrides panel height and add a scrollbar + “↓ more” indicator.
+- Darken Help section header text while keeping the blue highlight.
+
 ## 0.7.7
 
 - Refine loading overlay spacing for mod names.
