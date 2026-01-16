@@ -548,7 +548,7 @@ impl ModSort {
     pub fn column_label(&self) -> &'static str {
         match self.column {
             ModSortColumn::Order => "Order",
-            ModSortColumn::Name => "Mod",
+            ModSortColumn::Name => "Mod Name",
             ModSortColumn::Enabled => "Enabled",
             ModSortColumn::Native => "Native",
             ModSortColumn::Kind => "Kind",
@@ -1428,7 +1428,7 @@ impl App {
         if let Some(column) = self.default_sort_column_value() {
             let label = match column {
                 ModSortColumn::Order => "Order",
-                ModSortColumn::Name => "Mod",
+                ModSortColumn::Name => "Mod Name",
                 ModSortColumn::Enabled => "Enabled",
                 ModSortColumn::Native => "Native",
                 ModSortColumn::Kind => "Kind",
@@ -1439,7 +1439,7 @@ impl App {
             return label.to_string();
         }
         let auto_label = if self.sigillink_ranking_enabled() {
-            "Auto (Mod)"
+            "Auto (Mod Name)"
         } else {
             "Auto (Order)"
         };
@@ -4129,6 +4129,16 @@ Use Ctrl+R to reset this mod or Ctrl+Shift+R to reset all pins."
     fn parse_modsettings_import(&self, path: &Path, source_label: String) -> Result<ModListImport> {
         let snapshot = deploy::read_modsettings_snapshot(path)?;
         let mut warnings = Vec::new();
+        let has_enabled_attr = fs::read_to_string(path)
+            .ok()
+            .map(|raw| raw.contains("Enabled"))
+            .unwrap_or(false);
+        if !has_enabled_attr {
+            warnings.push(
+                "modsettings.lsx does not include disabled state; disabled mods cannot be inferred."
+                    .to_string(),
+            );
+        }
         let mut modules_by_uuid: HashMap<String, deploy::ModSettingsModule> = snapshot
             .modules
             .into_iter()
@@ -4949,10 +4959,14 @@ Use Ctrl+R to reset this mod or Ctrl+Shift+R to reset all pins."
             | PathBrowserPurpose::ImportProfile
             | PathBrowserPurpose::ExportLog
             | PathBrowserPurpose::SigilLinkCache { .. } => current.display().to_string(),
-            PathBrowserPurpose::ExportProfile { profile, kind } => self
-                .default_profile_export_path(profile, *kind)
-                .display()
-                .to_string(),
+            PathBrowserPurpose::ExportProfile { profile, kind } => {
+                let default_path = self.default_profile_export_path(profile, *kind);
+                let filename = default_path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .unwrap_or("export");
+                current.join(filename).display().to_string()
+            }
         };
         let entries = self.build_path_browser_entries(&purpose, &current, &input_seed);
         let title = match &purpose {
@@ -4991,6 +5005,12 @@ Use Ctrl+R to reset this mod or Ctrl+Shift+R to reset all pins."
             .map(|base| base.home_dir().to_path_buf())
             .unwrap_or_else(|| PathBuf::from("/"));
         let mut candidates = Vec::new();
+        let last_browser_dir = self
+            .app_config
+            .last_browser_dir
+            .as_ref()
+            .filter(|path| path.is_dir())
+            .cloned();
         match purpose {
             PathBrowserPurpose::Setup(SetupStep::GameRoot) => {
                 if !self.config.game_root.as_os_str().is_empty() {
@@ -5015,15 +5035,28 @@ Use Ctrl+R to reset this mod or Ctrl+Shift+R to reset all pins."
                 candidates.push(home.join("Downloads"));
             }
             PathBrowserPurpose::ImportProfile => {
+                if let Some(last_dir) = last_browser_dir.clone() {
+                    candidates.push(last_dir);
+                }
+                let sigilsmith_dir = self.export_root_dir().join("SigilSmith");
+                if sigilsmith_dir.is_dir() {
+                    candidates.push(sigilsmith_dir);
+                }
                 if !self.app_config.downloads_dir.as_os_str().is_empty() {
                     candidates.push(self.app_config.downloads_dir.clone());
                 }
                 candidates.push(home.join("Downloads"));
             }
             PathBrowserPurpose::ExportProfile { .. } => {
+                if let Some(last_dir) = last_browser_dir.clone() {
+                    candidates.push(last_dir);
+                }
                 candidates.push(self.export_dir());
             }
             PathBrowserPurpose::ExportLog => {
+                if let Some(last_dir) = last_browser_dir {
+                    candidates.push(last_dir);
+                }
                 candidates.push(self.export_dir());
             }
             PathBrowserPurpose::SigilLinkCache { action, .. } => match action {
@@ -5046,6 +5079,24 @@ Use Ctrl+R to reset this mod or Ctrl+Shift+R to reset all pins."
             .into_iter()
             .find(|path| path.is_dir())
             .unwrap_or(home)
+    }
+
+    pub(crate) fn remember_last_browser_dir(&mut self, purpose: &PathBrowserPurpose, path: &Path) {
+        match purpose {
+            PathBrowserPurpose::ImportProfile
+            | PathBrowserPurpose::ExportProfile { .. }
+            | PathBrowserPurpose::ExportLog => {}
+            _ => return,
+        }
+        let dir = if path.is_dir() {
+            path.to_path_buf()
+        } else {
+            path.parent().unwrap_or(path).to_path_buf()
+        };
+        if dir.is_dir() {
+            self.app_config.last_browser_dir = Some(dir);
+            let _ = self.app_config.save();
+        }
     }
 
     fn sigilsmith_dir(&self) -> PathBuf {
@@ -5127,7 +5178,7 @@ Use Ctrl+R to reset this mod or Ctrl+Shift+R to reset all pins."
         Ok(())
     }
 
-    fn default_profile_export_path(&self, profile: &str, kind: ExportKind) -> PathBuf {
+    pub(crate) fn default_profile_export_path(&self, profile: &str, kind: ExportKind) -> PathBuf {
         let safe_profile = Self::sanitize_filename_component(profile);
         let profile_part = if safe_profile.is_empty() {
             "profile".to_string()
@@ -5313,6 +5364,7 @@ Use Ctrl+R to reset this mod or Ctrl+Shift+R to reset all pins."
         path: PathBuf,
         raw_input: Option<&str>,
     ) -> Result<()> {
+        self.remember_last_browser_dir(purpose, &path);
         self.input_mode = InputMode::Normal;
         match purpose {
             PathBrowserPurpose::Setup(SetupStep::GameRoot) => self.submit_game_root_path(path),

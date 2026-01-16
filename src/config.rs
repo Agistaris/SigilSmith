@@ -17,6 +17,8 @@ pub struct AppConfig {
     pub delete_mod_files_on_remove: bool,
     #[serde(default = "default_downloads_dir")]
     pub downloads_dir: PathBuf,
+    #[serde(default)]
+    pub last_browser_dir: Option<PathBuf>,
     #[serde(default = "default_true")]
     pub offer_dependency_downloads: bool,
     #[serde(default = "default_true")]
@@ -59,6 +61,7 @@ impl AppConfig {
             enable_mods_after_import: true,
             delete_mod_files_on_remove: false,
             downloads_dir: default_downloads_dir(),
+            last_browser_dir: None,
             offer_dependency_downloads: true,
             warn_missing_dependencies: true,
             dependency_search_copy_preference: None,

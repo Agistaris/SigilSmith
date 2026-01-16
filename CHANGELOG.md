@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.8.2
+
+- Surface the missing mod file legend row and expand the context panel to keep hotkeys visible.
+- Improve modsettings.lsx imports when Enabled flags are absent (fallback to ModOrder).
+- Style the mod list preview hotkeys and slim the log status badge.
+
 ## 0.8.1
 
 - Update path browser UX (list-first focus, Enter/Space select, dynamic tab label, better paste handling).

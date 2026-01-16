@@ -462,6 +462,7 @@ pub fn read_modsettings_snapshot(path: &Path) -> Result<ModSettingsSnapshot> {
     let mut base_uuids = HashSet::new();
     let mut modules = Vec::new();
     let mut enabled = HashSet::new();
+    let mut saw_enabled_attr = false;
     for node in nodes {
         let uuid = match module_attr(&node, "UUID") {
             Some(uuid) => uuid,
@@ -484,9 +485,14 @@ pub fn read_modsettings_snapshot(path: &Path) -> Result<ModSettingsSnapshot> {
             .or_else(|| module_attr(&node, "CreatedOn"))
             .and_then(|value| metadata::parse_created_at_value(&value));
 
-        let is_enabled = module_attr(&node, "Enabled")
-            .map(|value| value == "1" || value.eq_ignore_ascii_case("true"))
-            .unwrap_or(true);
+        let enabled_attr = module_attr(&node, "Enabled");
+        let is_enabled = match enabled_attr {
+            Some(value) => {
+                saw_enabled_attr = true;
+                value == "1" || value.eq_ignore_ascii_case("true")
+            }
+            None => false,
+        };
         if is_enabled {
             enabled.insert(uuid.clone());
         }
@@ -524,6 +530,10 @@ pub fn read_modsettings_snapshot(path: &Path) -> Result<ModSettingsSnapshot> {
                 .collect::<Vec<String>>()
         })
         .unwrap_or_default();
+
+    if !saw_enabled_attr {
+        enabled = order.iter().cloned().collect();
+    }
 
     Ok(ModSettingsSnapshot {
         modules,
