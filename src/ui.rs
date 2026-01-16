@@ -1798,20 +1798,16 @@ fn handle_input_mode(
             if (c == 'h' || c == 'H') && key.modifiers.contains(KeyModifiers::CONTROL) {
                 buffer.pop();
                 *last_edit_at = std::time::Instant::now();
-                return Ok(());
-            }
-            if c == '\u{8}' || c == '\u{7f}' {
+            } else if c == '\u{8}' || c == '\u{7f}' {
                 buffer.pop();
                 *last_edit_at = std::time::Instant::now();
-                return Ok(());
-            }
-            if key.modifiers.contains(KeyModifiers::CONTROL)
+            } else if key.modifiers.contains(KeyModifiers::CONTROL)
                 || key.modifiers.contains(KeyModifiers::ALT)
             {
-                return Ok(());
+            } else {
+                buffer.push(c);
+                *last_edit_at = std::time::Instant::now();
             }
-            buffer.push(c);
-            *last_edit_at = std::time::Instant::now();
         }
         KeyCode::Backspace | KeyCode::Delete => {
             buffer.pop();

@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.8.7
+
+- Fix backspace handling in profile rename input so edits persist.
+
 ## 0.8.6
 
 - Fix Ctrl+Shift+R to reset all SigilLink pins in the mod stack.
