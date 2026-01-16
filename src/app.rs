@@ -107,6 +107,7 @@ pub enum PathBrowserPurpose {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PathBrowserEntryKind {
     Select,
+    SaveHere,
     Parent,
     Dir,
     File,
@@ -5056,6 +5057,37 @@ impl App {
         path_input: &str,
     ) -> Vec<PathBrowserEntry> {
         let mut entries = Vec::new();
+        if let PathBrowserPurpose::ExportProfile { profile, kind } = purpose {
+            let raw_input = path_input.trim();
+            let file_name = Path::new(raw_input)
+                .file_name()
+                .and_then(|name| name.to_str())
+                .filter(|name| !name.is_empty())
+                .map(|name| name.to_string())
+                .unwrap_or_else(|| {
+                    self.default_profile_export_path(profile, *kind)
+                        .file_name()
+                        .and_then(|name| name.to_str())
+                        .unwrap_or("export")
+                        .to_string()
+                });
+            let save_path = current.join(&file_name);
+            let abbrev = if file_name.chars().count() > 32 {
+                let mut trimmed = file_name.chars().take(29).collect::<String>();
+                trimmed.push_str("...");
+                trimmed
+            } else {
+                file_name.clone()
+            };
+            let save_label = format!("Save {abbrev} here  💾");
+            let selectable = self.path_browser_selectable(purpose, &save_path);
+            entries.push(PathBrowserEntry {
+                label: save_label,
+                path: save_path,
+                kind: PathBrowserEntryKind::SaveHere,
+                selectable,
+            });
+        }
         let show_select = matches!(
             purpose,
             PathBrowserPurpose::Setup(_)
@@ -5810,7 +5842,7 @@ impl App {
         }
     }
 
-    fn copy_to_clipboard(&mut self, text: &str) -> bool {
+    pub(crate) fn copy_to_clipboard(&mut self, text: &str) -> bool {
         let result = match self.clipboard_mut() {
             Some(clipboard) => clipboard.set_text(text.to_string()),
             None => return false,

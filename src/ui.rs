@@ -418,7 +418,7 @@ fn handle_smart_rank_preview(app: &mut App, key: KeyEvent) -> Result<()> {
 
 fn handle_mod_list_preview(app: &mut App, key: KeyEvent) -> Result<()> {
     match key.code {
-        KeyCode::Enter => {
+        KeyCode::Enter | KeyCode::Char(' ') => {
             if let Err(err) = app.apply_mod_list_preview() {
                 app.status = format!("Mod list import failed: {err}");
                 app.log_error(format!("Mod list import failed: {err}"));
@@ -464,7 +464,7 @@ fn handle_dependency_queue(app: &mut App, key: KeyEvent) -> Result<()> {
         KeyCode::PageDown => app.dependency_queue_move(app.dependency_queue_page_step()),
         KeyCode::Home => app.dependency_queue_home(),
         KeyCode::End => app.dependency_queue_end(),
-        KeyCode::Enter => app.dependency_queue_open_selected(),
+        KeyCode::Enter | KeyCode::Char(' ') => app.dependency_queue_open_selected(),
         KeyCode::Char('c') | KeyCode::Char('C') => {
             if key.modifiers.contains(KeyModifiers::CONTROL) {
                 app.dependency_queue_copy_link();
@@ -494,7 +494,7 @@ fn handle_sigillink_missing_queue(app: &mut App, key: KeyEvent) -> Result<()> {
         }
         KeyCode::Home => app.sigillink_missing_queue_home(),
         KeyCode::End => app.sigillink_missing_queue_end(),
-        KeyCode::Enter => app.sigillink_missing_queue_open_selected(),
+        KeyCode::Enter | KeyCode::Char(' ') => app.sigillink_missing_queue_open_selected(),
         KeyCode::Char('c') if !key.modifiers.contains(KeyModifiers::CONTROL) => {
             app.sigillink_missing_queue_copy_uuid();
         }
@@ -1426,10 +1426,13 @@ fn handle_browser_mode(app: &mut App, key: KeyEvent, browser: &mut PathBrowser) 
                     &browser.path_input,
                 );
             }
+            KeyCode::Char('c') | KeyCode::Char('C')
+                if key.modifiers.contains(KeyModifiers::CONTROL) =>
+            {
+                copy_text_to_clipboard(app, &browser.path_input);
+            }
             KeyCode::Char('v') | KeyCode::Char('V')
-                if key.modifiers.contains(KeyModifiers::CONTROL)
-                    && (key.modifiers.contains(KeyModifiers::SHIFT)
-                        || key.modifiers.contains(KeyModifiers::ALT)) =>
+                if key.modifiers.contains(KeyModifiers::CONTROL) =>
             {
                 paste_clipboard_into(app, &mut browser.path_input);
                 browser.entries = app.build_path_browser_entries(
@@ -1476,9 +1479,6 @@ fn handle_browser_mode(app: &mut App, key: KeyEvent, browser: &mut PathBrowser) 
                     browser.selected = (browser.selected + 10).min(len.saturating_sub(1));
                 }
             }
-            KeyCode::Home => {
-                browser.selected = 0;
-            }
             KeyCode::End => {
                 if len > 0 {
                     browser.selected = len.saturating_sub(1);
@@ -1489,6 +1489,7 @@ fn handle_browser_mode(app: &mut App, key: KeyEvent, browser: &mut PathBrowser) 
                 sync_path_input_for_browser(app, browser);
             }
             KeyCode::Left
+            | KeyCode::Home
             | KeyCode::Backspace
             | KeyCode::Char('\u{7f}')
             | KeyCode::Char('\u{8}') => {
@@ -1499,7 +1500,7 @@ fn handle_browser_mode(app: &mut App, key: KeyEvent, browser: &mut PathBrowser) 
             KeyCode::Enter | KeyCode::Char(' ') => {
                 if let Some(entry) = browser.entries.get(browser.selected) {
                     match entry.kind {
-                        PathBrowserEntryKind::Select => {
+                        PathBrowserEntryKind::Select | PathBrowserEntryKind::SaveHere => {
                             if entry.selectable {
                                 app.apply_path_browser_selection(
                                     &browser.purpose,
@@ -1582,6 +1583,25 @@ fn sanitize_paste_text(text: &str) -> String {
         .replace('\n', " ")
         .trim()
         .to_string()
+}
+
+fn copy_text_to_clipboard(app: &mut App, text: &str) -> bool {
+    if app.copy_to_clipboard(text) {
+        app.status = "Path copied to clipboard".to_string();
+        app.set_toast(
+            "Path copied to clipboard",
+            ToastLevel::Info,
+            Duration::from_secs(2),
+        );
+        true
+    } else {
+        app.set_toast(
+            "Clipboard unavailable",
+            ToastLevel::Warn,
+            Duration::from_secs(2),
+        );
+        false
+    }
 }
 
 fn paste_clipboard_into(app: &mut App, target: &mut String) -> bool {
@@ -2487,16 +2507,17 @@ fn draw(frame: &mut Frame<'_>, app: &mut App) {
     } else {
         theme.text
     });
-    let profile_counts = format!("{disabled_mods} / {enabled_mods} | {total_mods}");
+    let profile_counts = format!("{disabled_mods} / {enabled_mods} | {total_mods} ");
     let profile_spans = vec![
         Span::styled(disabled_mods.to_string(), Style::default().fg(theme.muted)),
         Span::styled(" / ", Style::default().fg(theme.muted)),
         Span::styled(enabled_mods.to_string(), Style::default().fg(theme.success)),
         Span::styled(" | ", Style::default().fg(theme.muted)),
         Span::styled(total_mods.to_string(), Style::default().fg(theme.accent)),
+        Span::styled(" ", Style::default().fg(theme.muted)),
     ];
     let overrides_left = format!("Auto ({overrides_auto})");
-    let overrides_right = format!("│ Manual ({overrides_manual})");
+    let overrides_right = format!("│ Manual ({overrides_manual}) ");
     let overrides_right_spans = vec![
         Span::styled("│ ", Style::default().fg(theme.muted)),
         Span::styled(
@@ -2507,6 +2528,7 @@ fn draw(frame: &mut Frame<'_>, app: &mut App) {
                 theme.muted
             }),
         ),
+        Span::styled(" ", Style::default().fg(theme.muted)),
     ];
     let value_width = context_width.saturating_sub(context_label_width + 2);
     let desired_width = split_value_width(&profile_name, &profile_counts)
@@ -4824,10 +4846,7 @@ fn draw_path_browser(frame: &mut Frame<'_>, app: &App, theme: &Theme, browser: &
     let header = Paragraph::new(vec![path_line, current_line, status_line, Line::from("")]);
     frame.render_widget(header, chunks[0]);
 
-    let hide_select = matches!(
-        browser.purpose,
-        PathBrowserPurpose::ImportProfile | PathBrowserPurpose::ExportProfile { .. }
-    );
+    let hide_select = matches!(browser.purpose, PathBrowserPurpose::ImportProfile);
     let mut entries: Vec<ListItem> = Vec::new();
     if hide_select {
         entries.push(ListItem::new(Line::from("")));
@@ -4835,6 +4854,15 @@ fn draw_path_browser(frame: &mut Frame<'_>, app: &App, theme: &Theme, browser: &
     entries.extend(browser.entries.iter().map(|entry| {
         let style = match entry.kind {
             PathBrowserEntryKind::Select => {
+                if entry.selectable {
+                    Style::default()
+                        .fg(theme.success)
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(theme.warning)
+                }
+            }
+            PathBrowserEntryKind::SaveHere => {
                 if entry.selectable {
                     Style::default()
                         .fg(theme.success)
@@ -6921,12 +6949,12 @@ fn sigillink_link_cell(app: &App, mod_id: &str, theme: &Theme) -> Cell<'static> 
     if !app.sigillink_ranking_enabled() {
         return Cell::from(" ".to_string()).style(Style::default().fg(theme.muted));
     }
-    let style = if app.sigillink_is_pinned(mod_id) {
-        Style::default().fg(theme.warning)
+    let (glyph, style) = if app.sigillink_is_pinned(mod_id) {
+        ("⛕", Style::default().fg(theme.warning))
     } else {
-        Style::default().fg(theme.success)
+        ("⛓", Style::default().fg(theme.success))
     };
-    Cell::from("🔗".to_string()).style(style)
+    Cell::from(glyph.to_string()).style(style)
 }
 
 fn mod_name_cell(app: &App, mod_entry: &ModEntry, theme: &Theme) -> Cell<'static> {
@@ -7002,7 +7030,13 @@ fn truncate_spans(parts: Vec<(String, Style)>, max_width: usize) -> Vec<Span<'st
 fn display_width(value: &str) -> usize {
     value
         .chars()
-        .map(|ch| if matches!(ch, '🔗') { 2 } else { 1 })
+        .map(|ch| {
+            if matches!(ch, '🔗' | '⛓' | '⛕') {
+                2
+            } else {
+                1
+            }
+        })
         .sum()
 }
 
@@ -8048,8 +8082,12 @@ fn legend_rows_for_focus(focus: Focus) -> Vec<LegendRow> {
                 action: "Dependencies Missing/Off".to_string(),
             });
             legend.push(LegendRow {
-                key: "🔗".to_string(),
+                key: "⛓".to_string(),
                 action: "SigiLink Ranking".to_string(),
+            });
+            legend.push(LegendRow {
+                key: "⛕".to_string(),
+                action: "Manual Pin".to_string(),
             });
             legend.push(LegendRow {
                 key: "!".to_string(),
@@ -8622,6 +8660,23 @@ fn help_sections() -> Vec<HelpSection> {
             ],
         },
         HelpSection {
+            title: "SigiLink Manual Pins",
+            rows: vec![
+                LegendRow {
+                    key: "Move Mod".to_string(),
+                    action: "Creates A Manual Pin (⛕) While Auto Ranking Is ON.".to_string(),
+                },
+                LegendRow {
+                    key: "Ctrl+R".to_string(),
+                    action: "Restore SigiLink Ranking For Selected Mod.".to_string(),
+                },
+                LegendRow {
+                    key: "⛓/⛕".to_string(),
+                    action: "Auto-Managed vs Manual Pin In The Link Column.".to_string(),
+                },
+            ],
+        },
+        HelpSection {
             title: "Dialogs",
             rows: vec![
                 LegendRow {
@@ -8654,7 +8709,7 @@ fn help_sections() -> Vec<HelpSection> {
                     action: "Move Selection".to_string(),
                 },
                 LegendRow {
-                    key: "Enter".to_string(),
+                    key: "Enter/Space".to_string(),
                     action: "Open Link/Search Or Override".to_string(),
                 },
                 LegendRow {
@@ -8679,12 +8734,8 @@ fn help_sections() -> Vec<HelpSection> {
                     action: "Switch Focus".to_string(),
                 },
                 LegendRow {
-                    key: "Enter".to_string(),
+                    key: "Enter/Space".to_string(),
                     action: "Open/Select".to_string(),
-                },
-                LegendRow {
-                    key: "S".to_string(),
-                    action: "Select Current Folder".to_string(),
                 },
                 LegendRow {
                     key: "↑/↓ or j/k".to_string(),
@@ -8699,15 +8750,19 @@ fn help_sections() -> Vec<HelpSection> {
                     action: "Top/Bottom".to_string(),
                 },
                 LegendRow {
-                    key: "←/Backspace".to_string(),
+                    key: "←/Backspace/Home".to_string(),
                     action: "Parent Folder".to_string(),
+                },
+                LegendRow {
+                    key: "Ctrl+C".to_string(),
+                    action: "Copy Path".to_string(),
                 },
                 LegendRow {
                     key: "Ctrl+U".to_string(),
                     action: "Clear Path Input".to_string(),
                 },
                 LegendRow {
-                    key: "Ctrl+Alt+V".to_string(),
+                    key: "Ctrl+V".to_string(),
                     action: "Paste Path".to_string(),
                 },
                 LegendRow {
