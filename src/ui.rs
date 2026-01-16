@@ -768,15 +768,15 @@ fn settings_items(app: &App) -> Vec<SettingsItem> {
 fn export_menu_items() -> Vec<ExportMenuItem> {
     vec![
         ExportMenuItem {
-            label: "Export mod list (JSON)".to_string(),
+            label: "Export SigilSmith Mod List (JSON)".to_string(),
             kind: ExportMenuItemKind::ExportModList,
         },
         ExportMenuItem {
-            label: "Copy active mod list to clipboard".to_string(),
+            label: "Copy SigilSmith Mod List (Clipboard)".to_string(),
             kind: ExportMenuItemKind::ExportModListClipboard,
         },
         ExportMenuItem {
-            label: "Export modsettings.lsx (interop)".to_string(),
+            label: "Export modsettings.lsx (Interop)".to_string(),
             kind: ExportMenuItemKind::ExportModsettings,
         },
     ]
@@ -1976,7 +1976,15 @@ fn draw(frame: &mut Frame<'_>, app: &mut App) {
         .split(area);
     let (rows, counts, target_width, mod_width) = build_rows(app, &theme);
     let profile_label = app.active_profile_label();
-    let status_text = app.status_line();
+    let mut status_text = app.status_line();
+    if app.is_busy() {
+        let spinner = status_spinner_symbol();
+        if status_text.is_empty() {
+            status_text = spinner.to_string();
+        } else {
+            status_text = format!("{status_text} {spinner}");
+        }
+    }
     let status_color = status_color_text(&status_text, &theme);
     let overrides_total = app.conflicts.len();
     let overrides_manual = app
@@ -2003,7 +2011,7 @@ fn draw(frame: &mut Frame<'_>, app: &mut App) {
     let legend_rows = legend_rows(app);
     let hotkey_rows = hotkey_rows(app);
     let base_context_height = context_labels.len().saturating_add(1);
-    let desired_context_height = CONTEXT_HEIGHT.saturating_add(2);
+    let desired_context_height = CONTEXT_HEIGHT.saturating_add(8);
     frame.render_widget(
         Block::default().style(Style::default().bg(theme.header_bg)),
         chunks[0],
@@ -2699,26 +2707,18 @@ fn draw(frame: &mut Frame<'_>, app: &mut App) {
     let log_inner = log_block.inner(log_area);
     frame.render_widget(log_block, log_area);
     let mut status_area = status_badge_area(log_inner, &status_text);
-    let status_band = if status_area.height > 0 {
+    if status_area.height > 0 {
         let band_y = log_inner
             .y
             .saturating_add(log_inner.height.saturating_sub(status_area.height));
         status_area.y = band_y;
-        Rect {
-            x: log_inner.x,
-            y: status_area.y,
-            width: log_inner.width,
-            height: status_area.height,
-        }
-    } else {
-        Rect::default()
-    };
-    let log_content = if status_band.height > 0 {
+    }
+    let log_content = if status_area.height > 0 {
         Rect {
             x: log_inner.x,
             y: log_inner.y,
             width: log_inner.width,
-            height: status_area.y.saturating_sub(log_inner.y),
+            height: log_inner.height.saturating_sub(status_area.height),
         }
     } else {
         log_inner
@@ -2756,10 +2756,6 @@ fn draw(frame: &mut Frame<'_>, app: &mut App) {
     }
 
     if status_area.width > 0 && status_area.height > 0 {
-        frame.render_widget(
-            Block::default().style(Style::default().bg(theme.header_bg)),
-            status_band,
-        );
         draw_status_panel(
             frame,
             app,
@@ -3028,6 +3024,17 @@ fn status_color_text(status: &str, theme: &Theme) -> Color {
     theme.accent
 }
 
+fn status_spinner_symbol() -> &'static str {
+    const FRAMES: [&str; 8] = ["⠁", "⠂", "⠄", "⡀", "⢀", "⠠", "⠐", "⠈"];
+    let tick = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+        / 120;
+    let idx = (tick as usize) % FRAMES.len();
+    FRAMES[idx]
+}
+
 fn status_badge_area(area: Rect, status_text: &str) -> Rect {
     if area.width == 0 || area.height == 0 {
         return Rect::default();
@@ -3058,7 +3065,7 @@ fn status_badge_area(area: Rect, status_text: &str) -> Rect {
 
 fn draw_status_panel(
     frame: &mut Frame<'_>,
-    app: &App,
+    _app: &App,
     theme: &Theme,
     area: Rect,
     status_text: &str,
@@ -3068,7 +3075,7 @@ fn draw_status_panel(
     if area.width == 0 || area.height == 0 {
         return;
     }
-    let status_bg = theme.header_bg;
+    let status_bg = theme.log_bg;
     let status_block = Block::default()
         .borders(Borders::NONE)
         .style(Style::default().bg(status_bg))
@@ -3080,43 +3087,7 @@ fn draw_status_panel(
         });
     frame.render_widget(status_block.clone(), area);
     let status_inner = status_block.inner(area);
-    if app.is_busy() && status_inner.width > 0 && status_inner.height > 0 {
-        let mut bar_width = status_inner.width / 3;
-        if bar_width < 6 {
-            bar_width = status_inner.width.min(6);
-        }
-        if bar_width == 0 {
-            bar_width = status_inner.width;
-        }
-        let travel = status_inner.width.saturating_sub(bar_width);
-        let tick = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_millis()
-            / 120;
-        let cycle = travel.saturating_mul(2).max(1) as u128;
-        let step = (tick % cycle) as u16;
-        let offset = if step > travel {
-            travel.saturating_mul(2).saturating_sub(step)
-        } else {
-            step
-        };
-        let bar_area = Rect {
-            x: status_inner.x + offset,
-            y: status_inner.y,
-            width: bar_width.min(status_inner.width),
-            height: status_inner.height,
-        };
-        let bar_color = if overrides_focused {
-            theme.accent
-        } else {
-            theme.accent_soft
-        };
-        frame.render_widget(
-            Block::default().style(Style::default().bg(bar_color)),
-            bar_area,
-        );
-    }
+    let _ = overrides_focused;
     let status_text = truncate_text(status_text, status_inner.width as usize);
     let text_y = status_inner
         .y
@@ -5114,19 +5085,35 @@ fn draw_mod_list_preview(frame: &mut Frame<'_>, app: &mut App, theme: &Theme) {
     let max_width = area.width.saturating_sub(2).max(1);
     let width = max_width.min(110).max(58).min(max_width);
     let max_height = area.height.saturating_sub(2).max(1);
-    let height = max_height.min(24).max(12);
-    let (outer_area, preview_area) = padded_modal(area, width, height, 2, 1);
-
-    let inner_width = preview_area.width.saturating_sub(3) as usize;
-    let inner_height = preview_area.height.saturating_sub(2) as usize;
-    let render = build_mod_list_preview_render(
-        app,
-        preview,
-        theme,
-        inner_width,
-        inner_height,
-        app.mod_list_scroll,
-    );
+    let mut height = max_height.min(16).max(8);
+    let mut outer_area = Rect::default();
+    let mut preview_area = Rect::default();
+    let mut render = ModListPreviewRender {
+        lines: Vec::new(),
+        scroll: 0,
+        max_scroll: 0,
+    };
+    for _ in 0..2 {
+        (outer_area, preview_area) = padded_modal(area, width, height, 2, 1);
+        let inner_width = preview_area.width.saturating_sub(3) as usize;
+        let inner_height = preview_area.height.saturating_sub(2) as usize;
+        render = build_mod_list_preview_render(
+            app,
+            preview,
+            theme,
+            inner_width,
+            inner_height,
+            app.mod_list_scroll,
+        );
+        if render.max_scroll == 0 {
+            let desired = (render.lines.len() as u16 + 2).clamp(8, max_height);
+            if desired < height {
+                height = desired;
+                continue;
+            }
+        }
+        break;
+    }
     app.mod_list_scroll = render.scroll;
 
     render_modal_backdrop(frame, outer_area, theme);
@@ -5707,19 +5694,14 @@ fn build_mod_list_preview_render(
         }
     }
 
-    body_lines.push(Line::from(""));
-    body_lines.push(Line::from(Span::styled(
-        "Ambiguous:",
-        Style::default()
-            .fg(theme.error)
-            .add_modifier(Modifier::BOLD),
-    )));
-    if ambiguous.is_empty() {
+    if !ambiguous.is_empty() {
+        body_lines.push(Line::from(""));
         body_lines.push(Line::from(Span::styled(
-            "None",
-            Style::default().fg(theme.muted),
+            "Ambiguous:",
+            Style::default()
+                .fg(theme.error)
+                .add_modifier(Modifier::BOLD),
         )));
-    } else {
         for (label, candidates) in ambiguous {
             body_lines.push(Line::from(Span::styled(
                 truncate_text(&format!("- {label}"), width),
@@ -6165,12 +6147,6 @@ fn build_settings_menu_lines(
 fn build_export_menu_lines(theme: &Theme, menu: &crate::app::ExportMenu) -> Vec<Line<'static>> {
     let mut lines = Vec::new();
     lines.push(Line::from(Span::styled(
-        "Export",
-        Style::default()
-            .fg(theme.accent)
-            .add_modifier(Modifier::BOLD),
-    )));
-    lines.push(Line::from(Span::styled(
         format!("Profile: {}", menu.profile),
         Style::default().fg(theme.muted),
     )));
@@ -6191,13 +6167,58 @@ fn build_export_menu_lines(theme: &Theme, menu: &crate::app::ExportMenu) -> Vec<
             Span::raw(" "),
             Span::styled(item.label.clone(), style),
         ]));
+        let help = match item.kind {
+            ExportMenuItemKind::ExportModList => {
+                "Recommended: order + enabled + overrides for SigilSmith sync."
+            }
+            ExportMenuItemKind::ExportModListClipboard => {
+                "Clipboard JSON for quick share/paste into SigilSmith."
+            }
+            ExportMenuItemKind::ExportModsettings => {
+                "Interop for BG3MM/Vortex; disabled state may be lost."
+            }
+        };
+        lines.push(Line::from(vec![
+            Span::raw("  "),
+            Span::styled(help, Style::default().fg(theme.muted)),
+        ]));
+        lines.push(Line::from(""));
     }
 
+    let content_width = lines
+        .iter()
+        .map(|line| display_width(&line.to_string()))
+        .max()
+        .unwrap_or(0)
+        .max(1);
+    let key_style = Style::default()
+        .fg(theme.accent)
+        .add_modifier(Modifier::BOLD);
+    let text_style = Style::default().fg(theme.muted);
+    let footer_parts = vec![
+        ("[Enter/Space]".to_string(), key_style),
+        (" Select  ".to_string(), text_style),
+        ("[Esc]".to_string(), key_style),
+        (" Cancel".to_string(), text_style),
+    ];
+    let footer_width: usize = footer_parts
+        .iter()
+        .map(|(text, _)| display_width(text))
+        .sum();
+    let pad = if content_width > footer_width {
+        (content_width - footer_width) / 2
+    } else {
+        0
+    };
+    let mut spans = Vec::new();
+    if pad > 0 {
+        spans.push(Span::raw(" ".repeat(pad)));
+    }
+    for (text, style) in footer_parts {
+        spans.push(Span::styled(text, style));
+    }
     lines.push(Line::from(""));
-    lines.push(Line::from(Span::styled(
-        "Enter: select  Esc: cancel",
-        Style::default().fg(theme.muted),
-    )));
+    lines.push(Line::from(spans));
     lines
 }
 
@@ -8311,6 +8332,10 @@ fn hotkey_rows_for_focus(focus: Focus) -> HotkeyRows {
                     action: "Toggle Enable".to_string(),
                 },
                 LegendRow {
+                    key: "Shift+↑/↓".to_string(),
+                    action: "Jump 10".to_string(),
+                },
+                LegendRow {
                     key: "m".to_string(),
                     action: "Move Mode".to_string(),
                 },
@@ -8319,12 +8344,20 @@ fn hotkey_rows_for_focus(focus: Focus) -> HotkeyRows {
                     action: "Move Order".to_string(),
                 },
                 LegendRow {
+                    key: "Enter/Esc".to_string(),
+                    action: "Exit Move Mode".to_string(),
+                },
+                LegendRow {
                     key: "Ctrl+←/→".to_string(),
                     action: "Sort Column".to_string(),
                 },
                 LegendRow {
                     key: "/ or Ctrl+F".to_string(),
                     action: "Search".to_string(),
+                },
+                LegendRow {
+                    key: "Ctrl+L".to_string(),
+                    action: "Clear Search".to_string(),
                 },
                 LegendRow {
                     key: "PgUp/PgDn".to_string(),
@@ -8514,7 +8547,9 @@ fn format_context_rows(
 
     rows.iter()
         .map(|row| {
-            let spacing = if row.key == "⛓" || row.key == "⛕" || row.key == "!" {
+            let spacing = if row.key == "!" {
+                2usize
+            } else if row.key == "⛓" || row.key == "⛕" {
                 3usize
             } else {
                 2usize

@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.8.4
+
+- Replace the log status bar animation with a compact braille spinner.
+- Expand context hotkeys and align the missing-mod legend row.
+- Refine the export modal footer styling and spacing.
+
+## 0.8.3
+
+- Clarify export options (SigilSmith JSON recommended vs. interop modsettings.lsx) and group help text.
+- Reduce mod list preview modal height to better fit content.
+- Keep the log status badge compact without a full-width footer band.
+
 ## 0.8.2
 
 - Surface the missing mod file legend row and expand the context panel to keep hotkeys visible.
