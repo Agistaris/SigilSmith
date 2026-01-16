@@ -1295,10 +1295,12 @@ fn handle_mods_mode(app: &mut App, key: KeyEvent) -> Result<()> {
         {
             app.enter_mod_filter();
         }
-        (KeyCode::Char('R'), mods) if mods.contains(KeyModifiers::CONTROL) => {
+        (KeyCode::Char('R') | KeyCode::Char('r'), mods)
+            if mods.contains(KeyModifiers::CONTROL) && mods.contains(KeyModifiers::SHIFT) =>
+        {
             app.prompt_clear_sigillink_pins();
         }
-        (KeyCode::Char('r'), mods) if mods.contains(KeyModifiers::CONTROL) => {
+        (KeyCode::Char('R') | KeyCode::Char('r'), mods) if mods.contains(KeyModifiers::CONTROL) => {
             app.restore_sigillink_rank_for_selected();
         }
         (KeyCode::Char('/'), _) => app.enter_mod_filter(),

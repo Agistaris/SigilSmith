@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.8.6
+
+- Fix Ctrl+Shift+R to reset all SigilLink pins in the mod stack.
+- Skip redundant native .pak meta reads when modsettings are unchanged to speed cold syncs.
+
 ## 0.8.5
 
 - Add auto-deploy onboarding + settings toggle and reflect it in the context panel.
