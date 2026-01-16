@@ -194,6 +194,7 @@ pub enum DialogKind {
     SigilLinkOnboarding,
     SigilLinkRankPrompt,
     SigilLinkClearPins,
+    SigilLinkPinNotice,
     EnableAllVisible,
     DisableAllVisible,
     InvertVisible,
@@ -620,6 +621,11 @@ pub struct App {
     pub paths_overlay_open: bool,
     pub should_quit: bool,
     pub move_mode: bool,
+    pub move_origin_id: Option<String>,
+    pub move_origin_index: Option<usize>,
+    pub move_origin_pinned: bool,
+    pub move_origin_order: Option<Vec<ProfileEntry>>,
+    pub move_origin_selected: Option<usize>,
     pub dialog: Option<Dialog>,
     pub logs: Vec<LogEntry>,
     pub log_scroll: usize,
@@ -1050,6 +1056,11 @@ impl App {
             paths_overlay_open: false,
             should_quit: false,
             move_mode: false,
+            move_origin_id: None,
+            move_origin_index: None,
+            move_origin_pinned: false,
+            move_origin_order: None,
+            move_origin_selected: None,
             dialog: None,
             logs: Vec::new(),
             log_scroll: 0,
@@ -1168,6 +1179,7 @@ impl App {
             },
         };
 
+        app.apply_default_sort();
         app.load_smart_rank_cache();
         let mod_count = app.library.mods.len();
         app.log_info(format!("Library loaded: {mod_count} mod(s)"));
@@ -1345,6 +1357,12 @@ impl App {
         profile.order.get(index).map(|entry| entry.id.clone())
     }
 
+    fn active_profile_index_by_id(&self, id: &str) -> Option<usize> {
+        self.library
+            .active_profile()
+            .and_then(|profile| profile.order.iter().position(|entry| entry.id == id))
+    }
+
     pub fn mod_filter_active(&self) -> bool {
         !self.mod_filter.trim().is_empty()
     }
@@ -1387,6 +1405,96 @@ impl App {
             self.mod_sort.column_label(),
             self.mod_sort.direction_label()
         );
+    }
+
+    fn default_sort_column_value(&self) -> Option<ModSortColumn> {
+        let Some(value) = self.app_config.default_sort_column.as_deref() else {
+            return None;
+        };
+        match value {
+            "order" => Some(ModSortColumn::Order),
+            "mod" => Some(ModSortColumn::Name),
+            "enabled" => Some(ModSortColumn::Enabled),
+            "native" => Some(ModSortColumn::Native),
+            "kind" => Some(ModSortColumn::Kind),
+            "created" => Some(ModSortColumn::Created),
+            "added" => Some(ModSortColumn::Added),
+            "target" => Some(ModSortColumn::Target),
+            _ => None,
+        }
+    }
+
+    pub fn default_sort_label(&self) -> String {
+        if let Some(column) = self.default_sort_column_value() {
+            let label = match column {
+                ModSortColumn::Order => "Order",
+                ModSortColumn::Name => "Mod",
+                ModSortColumn::Enabled => "Enabled",
+                ModSortColumn::Native => "Native",
+                ModSortColumn::Kind => "Kind",
+                ModSortColumn::Target => "Target",
+                ModSortColumn::Created => "Created",
+                ModSortColumn::Added => "Added",
+            };
+            return label.to_string();
+        }
+        let auto_label = if self.sigillink_ranking_enabled() {
+            "Auto (Mod)"
+        } else {
+            "Auto (Order)"
+        };
+        auto_label.to_string()
+    }
+
+    fn apply_default_sort(&mut self) {
+        let current_id = self.selected_profile_id();
+        let column = if let Some(column) = self.default_sort_column_value() {
+            column
+        } else if self.sigillink_ranking_enabled() {
+            ModSortColumn::Name
+        } else {
+            ModSortColumn::Order
+        };
+        self.mod_sort = ModSort {
+            column,
+            direction: SortDirection::Asc,
+        };
+        self.reselect_mod_by_id(current_id);
+    }
+
+    pub fn cycle_default_sort_column(&mut self) -> Result<()> {
+        let options: [Option<ModSortColumn>; 9] = [
+            None,
+            Some(ModSortColumn::Enabled),
+            Some(ModSortColumn::Order),
+            Some(ModSortColumn::Native),
+            Some(ModSortColumn::Kind),
+            Some(ModSortColumn::Name),
+            Some(ModSortColumn::Created),
+            Some(ModSortColumn::Added),
+            Some(ModSortColumn::Target),
+        ];
+        let current = self.default_sort_column_value();
+        let current_index = options
+            .iter()
+            .position(|option| *option == current)
+            .unwrap_or(0);
+        let next_index = (current_index + 1) % options.len();
+        let next = options[next_index];
+        self.app_config.default_sort_column = next.map(|column| match column {
+            ModSortColumn::Order => "order".to_string(),
+            ModSortColumn::Name => "mod".to_string(),
+            ModSortColumn::Enabled => "enabled".to_string(),
+            ModSortColumn::Native => "native".to_string(),
+            ModSortColumn::Kind => "kind".to_string(),
+            ModSortColumn::Created => "created".to_string(),
+            ModSortColumn::Added => "added".to_string(),
+            ModSortColumn::Target => "target".to_string(),
+        });
+        self.app_config.save()?;
+        self.apply_default_sort();
+        self.status = format!("Default sort: {}", self.default_sort_label());
+        Ok(())
     }
 
     fn reselect_mod_by_id(&mut self, id: Option<String>) {
@@ -1604,6 +1712,9 @@ impl App {
                 ToastLevel::Warn,
                 Duration::from_secs(3),
             );
+        }
+        if self.app_config.default_sort_column.is_none() {
+            self.apply_default_sort();
         }
         Ok(())
     }
@@ -1912,16 +2023,16 @@ impl App {
             return;
         };
         if profile.sigillink_pins.is_empty() {
-            self.status = "SigiLink pins already cleared".to_string();
+            self.status = "SigiLink pins already reset".to_string();
             return;
         }
         profile.sigillink_pins.clear();
         if self.allow_persistence() {
             let _ = self.library.save(&self.config.data_dir);
         }
-        self.status = "SigiLink pins cleared".to_string();
+        self.status = "SigiLink pins reset".to_string();
         self.set_toast(
-            "SigiLink pins cleared",
+            "SigiLink pins reset",
             ToastLevel::Info,
             Duration::from_secs(2),
         );
@@ -1932,23 +2043,53 @@ impl App {
             return;
         }
         if self.sigillink_pin_count() == 0 {
-            self.status = "SigiLink pins already cleared".to_string();
+            self.status = "SigiLink pins already reset".to_string();
             self.set_toast(
-                "SigiLink pins already cleared",
+                "SigiLink pins already reset",
                 ToastLevel::Info,
                 Duration::from_secs(2),
             );
             return;
         }
         self.open_dialog(Dialog {
-            title: "Clear all SigiLink pins?".to_string(),
-            message: "This will remove manual SigiLink overrides in the current profile."
-                .to_string(),
-            yes_label: "Clear".to_string(),
+            title: "Reset all SigiLink pins?".to_string(),
+            message: "This will clear manual SigiLink pins in the current profile.".to_string(),
+            yes_label: "Reset".to_string(),
             no_label: "Cancel".to_string(),
             choice: DialogChoice::No,
             kind: DialogKind::SigilLinkClearPins,
             toggle: None,
+            scroll: 0,
+        });
+    }
+
+    fn maybe_prompt_sigillink_pin_notice(&mut self, mod_id: &str) {
+        if self.dialog.is_some() || self.app_config.sigillink_pin_notice_dismissed {
+            return;
+        }
+        let name = self
+            .library
+            .mods
+            .iter()
+            .find(|entry| entry.id == mod_id)
+            .map(|entry| entry.display_name())
+            .unwrap_or_else(|| "Selected mod".to_string());
+        let message = format!(
+            "\"{name}\" is now unlinked from SigiLink auto ranking.\n\
+SigiLink will not move it automatically, but other mods may shift around it.\n\
+Use Ctrl+R to reset this mod or Ctrl+Shift+R to reset all pins."
+        );
+        self.open_dialog(Dialog {
+            title: "SigiLink Manual Pin".to_string(),
+            message,
+            yes_label: "OK".to_string(),
+            no_label: "Cancel".to_string(),
+            choice: DialogChoice::Yes,
+            kind: DialogKind::SigilLinkPinNotice,
+            toggle: Some(DialogToggle {
+                label: "Don't show again".to_string(),
+                checked: false,
+            }),
             scroll: 0,
         });
     }
@@ -9474,6 +9615,14 @@ impl App {
                     self.clear_all_sigillink_pins();
                 }
             }
+            DialogKind::SigilLinkPinNotice => {
+                if let Some(toggle) = dialog.toggle {
+                    if toggle.checked {
+                        self.app_config.sigillink_pin_notice_dismissed = true;
+                        let _ = self.app_config.save();
+                    }
+                }
+            }
             DialogKind::ImportSummary => {}
             DialogKind::EnableAllVisible => {}
             DialogKind::DisableAllVisible => {}
@@ -10203,9 +10352,9 @@ impl App {
             self.status = "SigiLink pin not set".to_string();
             return;
         }
-        self.status = "SigiLink pin cleared".to_string();
+        self.status = "SigiLink pin reset".to_string();
         self.set_toast(
-            "SigiLink pin cleared",
+            "SigiLink pin reset",
             ToastLevel::Info,
             Duration::from_secs(2),
         );
@@ -10560,25 +10709,90 @@ impl App {
 
     pub fn toggle_move_mode(&mut self) {
         if self.move_mode {
-            self.move_mode = false;
-            self.status = "Move mode disabled".to_string();
-            if self.move_dirty {
-                self.move_dirty = false;
-                self.schedule_smart_rank_refresh(
-                    smart_rank::SmartRankRefreshMode::ReorderOnly,
-                    "order changed",
-                    true,
-                );
-                self.queue_auto_deploy("order changed");
-                if self.app_config.sigillink_ranking_enabled {
-                    self.request_sigillink_auto_rank();
+            self.confirm_move_mode();
+        } else {
+            self.start_move_mode();
+        }
+    }
+
+    fn start_move_mode(&mut self) {
+        self.move_mode = true;
+        self.move_dirty = false;
+        self.move_origin_id = self.selected_profile_id();
+        self.move_origin_index = self.selected_profile_index();
+        self.move_origin_pinned = self
+            .move_origin_id
+            .as_ref()
+            .map(|id| self.sigillink_is_pinned(id))
+            .unwrap_or(false);
+        self.move_origin_order = self
+            .library
+            .active_profile()
+            .map(|profile| profile.order.clone());
+        self.move_origin_selected = Some(self.selected);
+        self.status =
+            "Move mode: use arrows to reorder, Enter/Space/M confirm, Esc cancel".to_string();
+    }
+
+    fn confirm_move_mode(&mut self) {
+        self.move_mode = false;
+        let moved = self.move_dirty;
+        self.move_dirty = false;
+        let origin_id = self.move_origin_id.take();
+        let origin_index = self.move_origin_index.take();
+        let origin_pinned = self.move_origin_pinned;
+        self.move_origin_pinned = false;
+        self.move_origin_order = None;
+        self.move_origin_selected = None;
+        self.status = "Move mode disabled".to_string();
+        if !moved {
+            return;
+        }
+        if self.app_config.sigillink_ranking_enabled {
+            if let (Some(id), Some(origin_index)) = (origin_id.clone(), origin_index) {
+                let current_index = self.active_profile_index_by_id(&id);
+                if let Some(current_index) = current_index {
+                    if current_index == origin_index {
+                        if !origin_pinned {
+                            self.clear_sigillink_pin(&id);
+                        }
+                    } else {
+                        self.set_sigillink_pin(&id, current_index);
+                        self.maybe_prompt_sigillink_pin_notice(&id);
+                    }
                 }
             }
-        } else {
-            self.move_mode = true;
-            self.move_dirty = false;
-            self.status = "Move mode: use arrows to reorder, Enter/Esc to exit".to_string();
         }
+        self.schedule_smart_rank_refresh(
+            smart_rank::SmartRankRefreshMode::ReorderOnly,
+            "order changed",
+            true,
+        );
+        self.queue_auto_deploy("order changed");
+        if self.app_config.sigillink_ranking_enabled {
+            self.request_sigillink_auto_rank();
+        }
+    }
+
+    pub fn cancel_move_mode(&mut self) {
+        if !self.move_mode {
+            return;
+        }
+        if let Some(order) = self.move_origin_order.take() {
+            if let Some(profile) = self.library.active_profile_mut() {
+                profile.order = order;
+            }
+        }
+        if let Some(selected) = self.move_origin_selected.take() {
+            self.selected = selected;
+            self.clamp_selection();
+        }
+        self.move_mode = false;
+        self.move_dirty = false;
+        self.move_origin_id = None;
+        self.move_origin_index = None;
+        self.move_origin_pinned = false;
+        self.status = "Move canceled".to_string();
     }
 
     pub fn remove_selected(&mut self) {
@@ -10724,7 +10938,7 @@ impl App {
             profile.order.get(prev_index).map(|entry| entry.id.clone())
         };
         self.selected = self.selected.saturating_sub(1);
-        if self.app_config.sigillink_ranking_enabled {
+        if self.app_config.sigillink_ranking_enabled && !self.move_mode {
             if let Some(id) = moved_id {
                 self.set_sigillink_pin(&id, prev_index);
             }
@@ -10772,7 +10986,7 @@ impl App {
             profile.order.get(next_index).map(|entry| entry.id.clone())
         };
         self.selected = (self.selected + 1).min(indices.len().saturating_sub(1));
-        if self.app_config.sigillink_ranking_enabled {
+        if self.app_config.sigillink_ranking_enabled && !self.move_mode {
             if let Some(id) = moved_id {
                 self.set_sigillink_pin(&id, next_index);
             }

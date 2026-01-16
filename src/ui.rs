@@ -550,6 +550,7 @@ enum SettingsItemKind {
     ToggleDependencyDownloads,
     ToggleDependencyWarnings,
     ToggleStartupDependencyNotice,
+    DefaultSortColumn,
     ActionCheckUpdates,
 }
 
@@ -578,7 +579,7 @@ fn settings_items(app: &App) -> Vec<SettingsItem> {
     let sigillink_meta = app.sigillink_rank_meta();
     let last_rank = format_rank_timestamp(sigillink_meta.last_ranked_at);
     let last_diff = format!(
-        "{} moves, {} pins",
+        "{} moves, {} unlinked",
         sigillink_meta.last_moves, sigillink_meta.last_pins
     );
     let mut items = vec![
@@ -643,6 +644,12 @@ fn settings_items(app: &App) -> Vec<SettingsItem> {
             selectable: true,
         },
         SettingsItem {
+            label: "Default Sort Column".to_string(),
+            kind: SettingsItemKind::DefaultSortColumn,
+            checked: None,
+            selectable: true,
+        },
+        SettingsItem {
             label: update_menu_label(app),
             kind: SettingsItemKind::ActionCheckUpdates,
             checked: None,
@@ -694,7 +701,7 @@ fn settings_items(app: &App) -> Vec<SettingsItem> {
             selectable: true,
         },
         SettingsItem {
-            label: "Clear All SigiLink Pins".to_string(),
+            label: "Reset All SigiLink Pins".to_string(),
             kind: SettingsItemKind::ActionClearSigilLinkPins,
             checked: None,
             selectable: true,
@@ -911,6 +918,12 @@ fn handle_settings_menu(app: &mut App, key: KeyEvent) -> Result<()> {
                     }
                     SettingsItemKind::ToggleDeleteModFilesOnRemove => {
                         if let Err(err) = app.toggle_delete_mod_files_on_remove() {
+                            app.status = format!("Settings update failed: {err}");
+                            app.log_error(format!("Settings update failed: {err}"));
+                        }
+                    }
+                    SettingsItemKind::DefaultSortColumn => {
+                        if let Err(err) = app.cycle_default_sort_column() {
                             app.status = format!("Settings update failed: {err}");
                             app.log_error(format!("Settings update failed: {err}"));
                         }
@@ -1182,6 +1195,8 @@ fn handle_mods_mode(app: &mut App, key: KeyEvent) -> Result<()> {
     }
     if app.move_mode {
         match key.code {
+            KeyCode::Enter | KeyCode::Char(' ') => app.toggle_move_mode(),
+            KeyCode::Esc => app.cancel_move_mode(),
             KeyCode::Char('m') | KeyCode::Char('M') => app.toggle_move_mode(),
             KeyCode::Char('k')
             | KeyCode::Char('K')
@@ -1215,9 +1230,10 @@ fn handle_mods_mode(app: &mut App, key: KeyEvent) -> Result<()> {
         {
             app.enter_mod_filter();
         }
-        (KeyCode::Char('r'), mods) | (KeyCode::Char('R'), mods)
-            if mods.contains(KeyModifiers::CONTROL) =>
-        {
+        (KeyCode::Char('R'), mods) if mods.contains(KeyModifiers::CONTROL) => {
+            app.prompt_clear_sigillink_pins();
+        }
+        (KeyCode::Char('r'), mods) if mods.contains(KeyModifiers::CONTROL) => {
             app.restore_sigillink_rank_for_selected();
         }
         (KeyCode::Char('/'), _) => app.enter_mod_filter(),
@@ -1253,7 +1269,6 @@ fn handle_mods_mode(app: &mut App, key: KeyEvent) -> Result<()> {
                 app.toggle_move_mode();
             }
         }
-        (KeyCode::Enter, _) | (KeyCode::Esc, _) if app.move_mode => app.toggle_move_mode(),
         (KeyCode::Char(' '), _) | (KeyCode::Enter, _) => app.toggle_selected(),
         (KeyCode::Char('A'), _) => app.enable_visible_mods(),
         (KeyCode::Char('S'), _) => app.disable_visible_mods(),
@@ -2576,25 +2591,34 @@ fn draw(frame: &mut Frame<'_>, app: &mut App) {
         context_width,
         context_label_width,
     ));
-    let (sigilink_value, sigilink_style) = if app.sigillink_ranking_enabled() {
-        (
-            format!("ON  Pins: {}", app.sigillink_pin_count()),
-            Style::default().fg(theme.success),
+    let sigilink_line = if app.sigillink_ranking_enabled() {
+        let pin_count = app.sigillink_pin_count();
+        let value_parts = vec![
+            ("ON".to_string(), Style::default().fg(theme.success)),
+            ("  ".to_string(), Style::default().fg(theme.muted)),
+            ("Unlinked: ".to_string(), Style::default().fg(theme.muted)),
+            (pin_count.to_string(), Style::default().fg(theme.warning)),
+        ];
+        format_kv_line_aligned_spans(
+            "SigiLink",
+            label_style,
+            value_parts,
+            context_width,
+            context_label_width,
         )
     } else {
-        ("OFF".to_string(), Style::default().fg(theme.muted))
+        format_kv_line_aligned(
+            &KvRow {
+                label: "SigiLink".to_string(),
+                value: "OFF".to_string(),
+                label_style,
+                value_style: Style::default().fg(theme.muted),
+            },
+            context_width,
+            context_label_width,
+        )
     };
-    let sigilink_row = KvRow {
-        label: "SigiLink".to_string(),
-        value: sigilink_value,
-        label_style,
-        value_style: sigilink_style,
-    };
-    context_lines.push(format_kv_line_aligned(
-        &sigilink_row,
-        context_width,
-        context_label_width,
-    ));
+    context_lines.push(sigilink_line);
     let help_row = KvRow {
         label: "Help".to_string(),
         value: "? Shortcuts".to_string(),
@@ -2720,13 +2744,6 @@ fn draw(frame: &mut Frame<'_>, app: &mut App) {
     if status_area.width > 0 && status_area.height > 0 {
         frame.render_widget(
             Block::default().style(Style::default().bg(theme.header_bg)),
-            status_band,
-        );
-        frame.render_widget(
-            Block::default()
-                .borders(Borders::TOP)
-                .border_style(Style::default().fg(theme.border))
-                .style(Style::default().bg(theme.header_bg)),
             status_band,
         );
         draw_status_panel(
@@ -5804,6 +5821,7 @@ fn build_settings_menu_lines(
             .max()
             .unwrap_or(0),
     );
+    let default_sort_key_w = clamp_key(display_width("Default Sort Column").max(general_key_w));
     let sigilink_key_w = clamp_key(
         items
             .iter()
@@ -5907,6 +5925,16 @@ fn build_settings_menu_lines(
                     MenuRowKind::Action,
                     Span::styled(item.label.to_string(), style),
                     theme,
+                ));
+            }
+            SettingsItemKind::DefaultSortColumn => {
+                let value = app.default_sort_label();
+                lines.push(kv_row(
+                    MenuRowKind::None,
+                    &item.label,
+                    default_sort_key_w,
+                    style,
+                    vec![Span::styled(value, Style::default().fg(theme.text))],
                 ));
             }
             SettingsItemKind::ToggleEnableModsAfterImport
@@ -6140,7 +6168,7 @@ fn mode_toast(app: &App) -> Option<(String, ToastLevel)> {
         InputMode::Normal => {
             if app.move_mode {
                 Some((
-                    "Move mode: arrows reorder | Enter/Esc exit".to_string(),
+                    "Move mode: arrows reorder | Enter/Space/M confirm | Esc cancel".to_string(),
                     ToastLevel::Info,
                 ))
             } else {
@@ -7317,8 +7345,8 @@ fn build_details(app: &App, theme: &Theme, width: usize, height: usize) -> Vec<L
     });
     if app.sigillink_ranking_enabled() && app.sigillink_is_pinned(&entry.id) {
         rows.push(KvRow {
-            label: "SigiLink Pin".to_string(),
-            value: "ON (Ctrl+R to restore)".to_string(),
+            label: "SigiLink Unlinked".to_string(),
+            value: "ON (Ctrl+R to reset)".to_string(),
             label_style,
             value_style: Style::default().fg(theme.warning),
         });
@@ -8200,7 +8228,11 @@ fn hotkey_rows_for_focus(focus: Focus) -> HotkeyRows {
                 },
                 LegendRow {
                     key: "Ctrl+R".to_string(),
-                    action: "Restore SigiLink Ranking".to_string(),
+                    action: "Reset SigiLink Pin".to_string(),
+                },
+                LegendRow {
+                    key: "Ctrl+Shift+R".to_string(),
+                    action: "Reset All SigiLink Pins".to_string(),
                 },
             ]);
         }
@@ -8668,7 +8700,11 @@ fn help_sections() -> Vec<HelpSection> {
                 },
                 LegendRow {
                     key: "Ctrl+R".to_string(),
-                    action: "Restore SigiLink Ranking For Selected Mod.".to_string(),
+                    action: "Reset SigiLink Pin For Selected Mod.".to_string(),
+                },
+                LegendRow {
+                    key: "Ctrl+Shift+R".to_string(),
+                    action: "Reset All SigiLink Pins (Confirm).".to_string(),
                 },
                 LegendRow {
                     key: "⛓/⛕".to_string(),
@@ -8917,6 +8953,37 @@ fn format_kv_line_aligned(row: &KvRow, width: usize, label_width: usize) -> Line
         Span::styled(": ", row.label_style),
         Span::styled(value_text, row.value_style),
     ])
+}
+
+fn format_kv_line_aligned_spans(
+    label: &str,
+    label_style: Style,
+    value_parts: Vec<(String, Style)>,
+    width: usize,
+    label_width: usize,
+) -> Line<'static> {
+    if width == 0 {
+        return Line::from("");
+    }
+    if width <= 2 {
+        return Line::from(Span::styled(truncate_text(label, width), label_style));
+    }
+    let label_width = label_width.min(width.saturating_sub(2));
+    let value_width = width.saturating_sub(label_width + 2);
+    if value_width == 0 {
+        return Line::from(Span::styled(truncate_text(label, width), label_style));
+    }
+    let label_text = truncate_text(label, label_width);
+    let label_len = label_text.chars().count();
+    let pad = " ".repeat(label_width.saturating_sub(label_len));
+    let value_spans = truncate_spans(value_parts, value_width);
+    let mut spans = vec![
+        Span::styled(label_text, label_style),
+        Span::raw(pad),
+        Span::styled(": ", label_style),
+    ];
+    spans.extend(value_spans);
+    Line::from(spans)
 }
 
 fn format_kv_line_split(

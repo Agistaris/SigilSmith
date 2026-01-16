@@ -31,6 +31,10 @@ pub struct AppConfig {
     pub sigillink_ranking_enabled: bool,
     #[serde(default = "default_true")]
     pub sigillink_auto_preview: bool,
+    #[serde(default = "default_false")]
+    pub sigillink_pin_notice_dismissed: bool,
+    #[serde(default)]
+    pub default_sort_column: Option<String>,
 }
 
 impl AppConfig {
@@ -62,6 +66,8 @@ impl AppConfig {
             sigillink_onboarded: false,
             sigillink_ranking_enabled: false,
             sigillink_auto_preview: true,
+            sigillink_pin_notice_dismissed: false,
+            default_sort_column: None,
         };
         config.save()?;
         Ok(config)
