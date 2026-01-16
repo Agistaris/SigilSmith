@@ -13091,6 +13091,8 @@ fn sync_native_mods_delta(
     } else {
         None
     };
+    let fast_native_sync =
+        modsettings_hash.is_some() && modsettings_hash == library.modsettings_hash;
     let modules_set: HashSet<String> = modules
         .iter()
         .map(|module| module.info.uuid.clone())
@@ -13157,16 +13159,24 @@ fn sync_native_mods_delta(
 
         let pak_path = paths.larian_mods_dir.join(&filename);
         let modsettings_created = module_created_by_uuid.get(&mod_entry.id).copied().flatten();
-        let pak_meta = metadata::read_meta_lsx_from_pak_cached(pak_cache, &pak_path);
-        let meta_created = pak_meta.as_ref().and_then(|meta| meta.created_at);
-        let mut dependencies = pak_meta
-            .as_ref()
-            .map(|meta| meta.dependencies.clone())
-            .unwrap_or_default();
+        let (raw_created, raw_modified) = path_times(&pak_path);
+        let mut meta_created = None;
+        let mut dependencies = mod_entry.dependencies.clone();
+        let file_stamp = raw_modified.or(raw_created);
+        let should_read_meta = !fast_native_sync
+            || mod_entry.modified_at.is_none()
+            || file_stamp
+                .map(|stamp| mod_entry.modified_at.map_or(true, |prev| stamp > prev))
+                .unwrap_or(false);
+        if should_read_meta {
+            if let Some(pak_meta) = metadata::read_meta_lsx_from_pak_cached(pak_cache, &pak_path) {
+                meta_created = pak_meta.created_at;
+                dependencies = pak_meta.dependencies;
+            }
+        }
         dependencies.sort();
         dependencies.dedup();
         dependencies.retain(|dep| !dep.eq_ignore_ascii_case(&mod_entry.id));
-        let (raw_created, raw_modified) = path_times(&pak_path);
         let primary_created = earliest_timestamp(&[modsettings_created, meta_created]);
         let (created_at, modified_at) =
             resolve_native_times(primary_created, raw_created, raw_modified);
