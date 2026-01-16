@@ -49,14 +49,6 @@ git push --tags
 2) The `release` workflow builds and uploads artifacts in `dist/`.
 3) Edit the GitHub Release notes if needed (optional).
 
-## 5) Funding Links
-
-When your handles are ready, update `.github/FUNDING.yml`:
-
-```yaml
-github: [yourhandle]
-ko_fi: yourhandle
-```
 
 ## 6) Publish to Mod Sites
 

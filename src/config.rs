@@ -157,6 +157,7 @@ impl GameConfig {
         self.sigillink_cache_root().join("mods")
     }
 
+    #[allow(dead_code)]
     pub fn sigillink_index_root(&self) -> PathBuf {
         self.sigillink_cache_root().join("sigillink")
     }

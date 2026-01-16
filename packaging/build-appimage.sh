@@ -46,4 +46,4 @@ if [ ! -x "$APPIMAGETOOL" ]; then
 fi
 
 mkdir -p "$DIST_DIR"
-"$APPIMAGETOOL" "$APPDIR" "$DIST_DIR/sigilsmith-${VERSION}-x86_64.AppImage"
+APPIMAGE_EXTRACT_AND_RUN=1 "$APPIMAGETOOL" "$APPDIR" "$DIST_DIR/sigilsmith-${VERSION}-x86_64.AppImage"

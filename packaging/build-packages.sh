@@ -28,7 +28,7 @@ cargo deb --no-build
 cp "$ROOT/target/debian"/*.deb "$DIST_DIR/"
 
 cargo rpm build
-cp "$ROOT/target/rpmbuild/RPMS"/*/*.rpm "$DIST_DIR/"
+cp "$ROOT/target/release/rpmbuild/RPMS"/*/sigilsmith-"$VERSION"-*.rpm "$DIST_DIR/"
 
 "$ROOT/packaging/build-appimage.sh"
 

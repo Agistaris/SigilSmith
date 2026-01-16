@@ -1,6 +1,8 @@
 # SigilSmith
 
-SigilSmith is a Linux-first TUI mod manager for Baldur's Gate 3. It focuses on native file-based mod deployment:
+SigilSmith is a keyboard-first, Linux-first TUI mod manager for Baldur's Gate 3. Drag-drop imports, profiles,
+overrides, SigiLink cache deploys, and intelligent ordering in one place. It focuses on native file-based mod
+deployment:
 
 - `.pak` mods -> `~/.local/share/Larian Studios/Baldur's Gate 3/Mods`
 - Loose files -> `Baldur's Gate 3/Data/Generated` or `Baldur's Gate 3/Data`
@@ -10,15 +12,34 @@ Multi-game support is coming next via an open adapter template (BG3-first today,
 
 ## Screenshots
 
+### Overview
 ![Overview](docs/01-hero-overview.png)
+
+### Explorer + Profiles
 ![Profiles](docs/02-explorer-profiles.png)
+
+### Mod Stack Search
 ![Search](docs/03-search-names.png)
+
+### Mod Stack Sorting
 ![Sort](docs/04-sort-name.png)
+
+### SigiLink Intelligent Ranking
 ![Smart Ranking](docs/05-smart-ranking.png)
+
+### Overrides
 ![Overrides](docs/06overrides-mode.png)
+
+### Settings
 ![Settings](docs/07-settings-menu.png)
+
+### Directory Select
 ![Directory Select](docs/08_directory_select.png)
+
+### Mod List Export
 ![Export Mod List](docs/09-export-mod-list.png)
+
+### Help / Shortcuts
 ![Help](docs/10-question-menu.png)
 
 ## Highlights
@@ -32,8 +53,9 @@ Multi-game support is coming next via an open adapter template (BG3-first today,
 - Missing mod placeholders + dependency dialogs to keep order clean.
 - Native mod.io entries alongside manual installs.
 - Auto-update checks with clear release notes.
+- Fast, readable TUI layout with clear focus states and full-width striping.
 
-## What's New (0.5.0 → 0.8.x)
+## What's New (0.5.0 → 0.9.0)
 
 ### SigiLink Cache + Deploy
 - Transactional imports with staging + safe cancel.
@@ -91,8 +113,8 @@ shows a clear missing-mod dialog and offers Nexus search links to re-import.
 
 ## Requirements
 
-- Rust (stable toolchain)
 - BG3 installed (Steam native or Proton)
+- Linux terminal (Konsole, GNOME Terminal, etc.)
 
 ## Install
 
@@ -105,6 +127,8 @@ The public repository includes the full source and CI release workflow. Release 
 are built by GitHub Actions from signed tags, and every release includes checksums.
 
 ### From Source
+
+Requires the Rust stable toolchain.
 
 ```bash
 cargo build --release
@@ -137,6 +161,7 @@ cargo run
 - `Ctrl+E` export mod list
 - `Ctrl+P` import mod list
 - `Ctrl+R` restore SigiLink ranking for selected mod
+- `F12` reset all SigiLink pins
 - `1` override: Auto (default target selection)
 - `2` override: Pak
 - `3` override: Generated
@@ -156,8 +181,7 @@ cargo run
 
 - `docs/INSTALL.md` install options and packages
 - `docs/RELEASE.md` release checklist and build steps
-- `docs/PUBLISH.md` publishing to mod sites
-- `docs/SUPPORT.md` donation options and setup
+- `docs/release_body.md` release body template
 
 ## Support
 

@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.9.0
+
+- Refresh release docs and screenshots for the 0.9.0 rollout.
+- Update SigiLink reset-all hotkey to `F12` and sync the help text.
+- Center the Native sort header and align the missing-mod legend row.
+
 ## 0.8.7
 
 - Fix backspace handling in profile rename input so edits persist.

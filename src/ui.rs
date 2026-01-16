@@ -1295,12 +1295,7 @@ fn handle_mods_mode(app: &mut App, key: KeyEvent) -> Result<()> {
         {
             app.enter_mod_filter();
         }
-        (KeyCode::Char('R'), mods) if mods.contains(KeyModifiers::CONTROL) => {
-            app.prompt_clear_sigillink_pins();
-        }
-        (KeyCode::Char('r'), mods)
-            if mods.contains(KeyModifiers::CONTROL) && mods.contains(KeyModifiers::SHIFT) =>
-        {
+        (KeyCode::F(12), _) => {
             app.prompt_clear_sigillink_pins();
         }
         (KeyCode::Char('r'), mods) if mods.contains(KeyModifiers::CONTROL) => {
@@ -2358,7 +2353,7 @@ fn draw(frame: &mut Frame<'_>, app: &mut App) {
         let header = Row::new(vec![
             mod_header_cell("On", ModSortColumn::Enabled, app.mod_sort, &theme),
             mod_header_cell(" # ", ModSortColumn::Order, app.mod_sort, &theme),
-            mod_header_cell("N", ModSortColumn::Native, app.mod_sort, &theme),
+            mod_header_cell(" N ", ModSortColumn::Native, app.mod_sort, &theme),
             mod_header_cell("Kind", ModSortColumn::Kind, app.mod_sort, &theme),
             mod_header_cell_static("Dep", &theme),
             mod_header_cell_static(" ", &theme),
@@ -6873,6 +6868,7 @@ fn explorer_line(
 struct ModCounts {
     total: usize,
     enabled: usize,
+    #[allow(dead_code)]
     visible_total: usize,
 }
 
@@ -7548,6 +7544,7 @@ fn pad_lines(lines: Vec<Line<'static>>, left_pad: usize, top_pad: usize) -> Vec<
     out
 }
 
+#[allow(dead_code)]
 fn push_truncated_prefixed(
     lines: &mut Vec<Line<'static>>,
     prefix: &str,
@@ -8612,7 +8609,7 @@ fn hotkey_rows_for_focus(focus: Focus) -> HotkeyRows {
                     action: "Reset SigiLink Pin".to_string(),
                 },
                 LegendRow {
-                    key: "Ctrl+Shift+R".to_string(),
+                    key: "F12".to_string(),
                     action: "Reset All SigiLink Pins".to_string(),
                 },
             ]);
@@ -8660,6 +8657,7 @@ fn hotkey_rows(app: &App) -> HotkeyRows {
     hotkey_rows_for_focus(app.hotkey_focus)
 }
 
+#[allow(dead_code)]
 fn legend_line_count(legend: &[LegendRow], hotkeys: &HotkeyRows) -> usize {
     let mut count = 0usize;
     let legend_rows = legend.len().max(5).min(5);
@@ -8779,7 +8777,9 @@ fn format_context_rows(
 
     rows.iter()
         .map(|row| {
-            let spacing = if row.key == "!" {
+            let spacing = if row.key == "👻" {
+                1usize
+            } else if row.key == "!" {
                 2usize
             } else if row.key == "⛓" || row.key == "⛕" {
                 3usize
@@ -9093,7 +9093,7 @@ fn help_sections() -> Vec<HelpSection> {
                     action: "Reset SigiLink Pin For Selected Mod.".to_string(),
                 },
                 LegendRow {
-                    key: "Ctrl+Shift+R".to_string(),
+                    key: "F12".to_string(),
                     action: "Reset All SigiLink Pins (Confirm).".to_string(),
                 },
                 LegendRow {

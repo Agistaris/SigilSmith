@@ -1,74 +1,72 @@
-# SigilSmith v0.8.5
+# SigilSmith v0.9.0
 
-SigilSmith is a Linux-first TUI mod manager for Baldur's Gate 3. Drag-drop mods,
-manage profiles, resolve overrides, and deploy with confidence. Multi-game support
-is coming next via an open adapter template.
+Linux-first TUI mod manager for Baldur's Gate 3.
 
-## Highlights
+SigilSmith is a keyboard-first terminal UI for managing BG3 mods on Linux.
+Drag-drop imports, profiles, overrides, SigiLink cache deploys, and intelligent ordering in one place.
 
-- SigiLink cache with hardlink/symlink deploys (no full-copy fallback).
-- Auto deploy (debounced) or manual deploy on demand.
-- SigiLink Intelligent Ranking with onboarding, unlinked pins, and diff previews.
-- Mod list interop: JSON export/import and modsettings.lsx export/import.
-- Missing mod placeholders with safe enable/disable dependency prompts.
-- Overrides panel redesigned for fast selection and scrollable lists.
+## Requirements
 
-## What's New Since 0.5.0
+- Baldur's Gate 3 installed (Steam native or Proton)
+- Linux terminal (Konsole, GNOME Terminal, etc.)
 
-- SigiLink cache and index (fast, safe deploys with recovery tools).
-- Ranking preview + auto-ranking with unlinked pins and restore hotkeys.
-- Mod list import preview with missing/ambiguous handling.
-- Dependency dialogs for enable/disable cascades and missing files.
-- Dep counts (missing vs disabled) in the mod stack at a glance.
-- Auto deploy toggle and refined status feedback.
-- Refined UI: aligned panels, wider settings, richer help, and better overlays.
+## Features
 
-## Creator Note
-
-I worked tirelessly day and night on the new SigiLink cache and ranking system,
-polishing the UX, correcting bugs, and testing edge cases. This release is ready,
-and I have more planned snapshots (and a few secrets) waiting for the next one.
-
-## Screenshots
-
-![Overview](docs/01-hero-overview.png)
-![Profiles](docs/02-explorer-profiles.png)
-![Search](docs/02.5-search-names.png)
-![Sort](docs/02.8_sort_by_name.png)
-![Overrides](docs/03-overrides-mode.png)
-![SigiLink Ranking](docs/04-smart-ranking.png)
-![Settings](docs/05-settings-menu.png)
-![Directory Select](docs/07_directory_select.png)
-![Mod List Preview](docs/06-modlist-preview.png)
-![Export Menu](docs/06-export-menu.png)
+- Fast, readable TUI layout with clear focus states and full-width striping
+- Drag & drop import: .zip/.7z/.pak (and folders), with automatic target detection
+- Profile explorer: create/rename/duplicate + import/export mod lists
+- Overrides panel redesigned for conflict resolution: scrollable lists, fast winner selection
+- SigiLink cache: hardlink/symlink deploys for fast updates (no full-copy fallback)
+- Deploy control: debounced auto-deploy toggle + manual deploy on demand
+- SigiLink Intelligent Ranking: onboarding, diff preview, "unlinked" pins, restore/reset hotkeys
+- Mod list interop: SigilSmith JSON (full fidelity) + modsettings.lsx import/export (interop)
+- Missing mod placeholders ("ghost" entries) to preserve intended order + safe dependency prompts
+- Native mod.io entries shown inline alongside manual installs
+- Auto-update checks with clear release notes
+- Per-deploy backups with rollback support
 
 ## Install
 
-Prebuilt Linux packages are attached to this release (AppImage, `.deb`, `.rpm`,
-`.tar.gz`).
+Recommended (AppImage)
+- chmod +x sigilsmith-0.9.0-x86_64.AppImage
+- ./sigilsmith-0.9.0-x86_64.AppImage
 
-Quick start:
+Alternate formats
+- sigilsmith-0.9.0-linux-x86_64.tar.gz
+- sigilsmith_0.9.0-1_amd64.deb
+- sigilsmith-0.9.0-1.x86_64.rpm
 
-```bash
-chmod +x SigilSmith-*.AppImage
-./SigilSmith-*.AppImage
-```
+From source
+- cargo build --release
+- ./target/release/sigilsmith
 
-From source:
+## GitHub Release / Checksums
 
-```bash
-cargo build --release
-./target/release/sigilsmith
-```
+https://github.com/Agistaris/SigilSmith/releases/tag/v0.9.0
 
-Checksums are included in `SHA256SUMS.txt`.
+Every release includes SHA256SUMS.txt.
 
 ## Notes
 
 - SigilSmith only manages files you provide; no game assets are bundled.
-- Deploy uses the SigiLink cache with hardlink/symlink targets (no full-copy fallback).
-- Loose files deploy to `Data/Generated` (or `Data`), and `.pak` files deploy to the Larian `Mods` directory.
+- Deploy uses the SigiLink cache and links files into the game directories (hardlink same-drive, symlink cross-drive).
+- Loose files deploy to Data/Generated (or Data).
+- .pak files deploy to the Larian Mods directory.
+- Bin overrides deploy to BG3/bin when applicable.
+- If paths are not detected: press Esc -> Configure game paths (browser opens).
+  Use arrows to navigate, Enter to open/select, Backspace to go up, Tab to edit the path directly, S to select current folder.
+- Full source is available on GitHub with a permission-required, source-available license.
 
-## Changelog
+## Roadmap
 
-See `CHANGELOG.md` for the full list of changes.
+- Multi-game support via an open adapter template (coming next).
+
+## Known Issues
+
+- None known. If you hit anything, report it on GitHub.
+
+## Credits
+
+- Larian Studios for Baldur's Gate 3
+- BG3 modding community for inspiration and testing
+- saghm for the larian_formats crate used for BG3 LSPK + modsettings parsing

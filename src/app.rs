@@ -58,7 +58,9 @@ pub enum InputPurpose {
     CreateProfile,
     RenameProfile { original: String },
     DuplicateProfile { source: String },
+    #[allow(dead_code)]
     ExportProfile { profile: String, kind: ExportKind },
+    #[allow(dead_code)]
     ImportProfile,
     FilterMods,
 }
@@ -195,8 +197,11 @@ pub enum DialogKind {
     SigilLinkRankPrompt,
     SigilLinkClearPins,
     SigilLinkPinNotice,
+    #[allow(dead_code)]
     EnableAllVisible,
+    #[allow(dead_code)]
     DisableAllVisible,
+    #[allow(dead_code)]
     InvertVisible,
 }
 
@@ -755,7 +760,9 @@ pub struct ExportMenu {
 
 #[derive(Debug, Clone)]
 pub struct OverrideSwap {
+    #[allow(dead_code)]
     pub from: String,
+    #[allow(dead_code)]
     pub to: String,
 }
 
@@ -763,12 +770,15 @@ pub struct OverrideSwap {
 pub struct PendingOverride {
     pub conflict_index: usize,
     pub winner_id: String,
+    #[allow(dead_code)]
     pub from: String,
+    #[allow(dead_code)]
     pub to: String,
     pub last_input: Instant,
 }
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct OverrideSwapInfo {
     pub from: String,
     pub to: String,
@@ -843,12 +853,15 @@ pub enum ModListMatchMethod {
 pub enum ModListMatchOutcome {
     Matched {
         resolved_id: String,
+        #[allow(dead_code)]
         resolved_name: String,
+        #[allow(dead_code)]
         method: ModListMatchMethod,
     },
     Missing,
     Ambiguous {
         candidates: Vec<String>,
+        #[allow(dead_code)]
         method: ModListMatchMethod,
     },
 }
@@ -1814,6 +1827,7 @@ impl App {
         self.open_smart_rank_preview();
     }
 
+    #[allow(dead_code)]
     pub(crate) fn clear_system_caches(&mut self) {
         self.clear_framework_caches();
         self.clear_sigillink_caches();
@@ -1940,6 +1954,7 @@ impl App {
         self.start_smart_rank_scan(mode, smart_rank::SmartRankRefreshMode::Incremental);
     }
 
+    #[allow(dead_code)]
     pub fn clear_smart_rank_cache(&mut self) {
         self.smart_rank_cache = None;
         self.clear_smart_rank_cache_file();
@@ -2152,7 +2167,7 @@ impl App {
         let message = format!(
             "\"{name}\" is now unlinked from SigiLink auto ranking.\n\
 SigiLink will not move it automatically, but other mods may shift around it.\n\
-Use Ctrl+R to reset this mod or Ctrl+Shift+R to reset all pins."
+Use Ctrl+R to reset this mod or F12 to reset all pins."
         );
         self.open_dialog(Dialog {
             title: "SigiLink Manual Pin".to_string(),
@@ -2393,10 +2408,12 @@ Use Ctrl+R to reset this mod or Ctrl+Shift+R to reset all pins."
         true
     }
 
+    #[allow(dead_code)]
     fn smart_rank_cache_missing_ids(&self, cache: &SmartRankCache) -> Vec<String> {
         Self::smart_rank_cache_missing_ids_for(&self.library, cache)
     }
 
+    #[allow(dead_code)]
     fn smart_rank_cache_missing_ids_for(library: &Library, cache: &SmartRankCache) -> Vec<String> {
         let mut missing = Vec::new();
         let Some(profile) = library.active_profile() else {
@@ -2885,6 +2902,7 @@ Use Ctrl+R to reset this mod or Ctrl+Shift+R to reset all pins."
         self.startup_pending
     }
 
+    #[allow(dead_code)]
     pub fn override_swap_info(&self) -> Option<OverrideSwapInfo> {
         if self.focus != Focus::Conflicts {
             return None;
@@ -5219,6 +5237,7 @@ Use Ctrl+R to reset this mod or Ctrl+Shift+R to reset all pins."
         }
     }
 
+    #[allow(dead_code)]
     fn sigilsmith_dir(&self) -> PathBuf {
         std::env::var("APPIMAGE")
             .ok()
@@ -10022,6 +10041,7 @@ Use Ctrl+R to reset this mod or Ctrl+Shift+R to reset all pins."
         }
     }
 
+    #[allow(dead_code)]
     fn remove_mod_root(&mut self, id: &str) {
         let mod_root = self.config.sigillink_mods_root().join(id);
         if !mod_root.exists() {
