@@ -229,7 +229,7 @@ where
     let profile = library.active_profile().context("active profile not set")?;
     let mod_map = library.index_by_id();
     let mut warnings = Vec::new();
-    let native_pak_index = native_pak::build_native_pak_index(&paths.larian_mods_dir);
+    let native_pak_index = native_pak::build_native_pak_index_cached(&paths.larian_mods_dir);
     let mut items = Vec::new();
     let mut cache_out = SmartRankCacheData::default();
     let mut missing = 0usize;

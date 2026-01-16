@@ -17,31 +17,77 @@ Multi-game support is coming next via an open adapter template (BG3-first today,
 ![Overrides](docs/03-overrides-mode.png)
 ![Smart Ranking](docs/04-smart-ranking.png)
 ![Settings](docs/05-settings-menu.png)
+![Mod List Preview](docs/06-modlist-preview.png)
+![Export Menu](docs/06-export-menu.png)
 ![Directory Select](docs/07_directory_select.png)
 
 ## Highlights
 
 - Drag & drop `.zip/.7z/.pak` or folders; automatic target detection.
 - SigiLink cache with hardlink/symlink deploys (no full copies).
-- SigiLink Intelligent Ranking with pins, diffs, and safe auto-runs.
-- Mod list interop: JSON export/import + modsettings.lsx export/import.
+- Auto deploy (debounced) with a manual deploy escape hatch.
+- SigiLink Intelligent Ranking with onboarding, unlinked pins, and diff previews.
+- Mod list interop: JSON (full fidelity) + modsettings.lsx (interop).
 - Overrides panel for fast conflict resolution with inline winners.
 - Missing mod placeholders + dependency dialogs to keep order clean.
 - Native mod.io entries alongside manual installs.
 - Auto-update checks with clear release notes.
 
-## What's New (0.5.0+)
+## What's New (0.5.0 → 0.8.x)
 
-- SigiLink cache: transactional imports, hardlink/symlink deploy, and cache tools.
-- SigiLink Intelligent Ranking: onboarding, pins, auto-rank, and clear diff views.
-- Mod list interop: JSON + modsettings.lsx import/export with preview.
-- Dependency UX: confirm enable/disable cascades and missing file prompts.
-- D/Dep column counts: missing vs disabled dependencies in one glance.
-- Better TUI: aligned panels, wider settings, richer help, and cleaner overlays.
+### SigiLink Cache + Deploy
+- Transactional imports with staging + safe cancel.
+- Hardlink/symlink deploys (no full-copy fallback) with cache relocation.
+- Clear cache tools for safe recovery and refresh.
+
+### SigiLink Intelligent Ranking
+- Onboarding, auto-ranking after import/enable, and solo runs.
+- Unlinked pins with reset hotkeys and clearer diff previews.
+- Auto-accept diffs option for hands-off ordering.
+
+### Mod List Interop
+- JSON export/import with order + enabled state + overrides.
+- modsettings.lsx import/export for BG3MM/Vortex workflows.
+- Preview modal with missing/ambiguous handling.
+
+### UX + Workflow
+- Override panel redesign for fast conflict resolution.
+- Dependency dialogs for enable/disable cascades.
+- Cleaner layout, help, and export/import flows.
 
 Creator note: I worked tirelessly day and night on the new SigiLink cache and ranking
 system, chasing edge cases and polishing the UX. This release is finally ready, and
 I have more planned snapshots (and a few secrets) for the next release.
+
+## How It Works
+
+### Library vs Deploy
+Imports go into the SigilSmith library first. Deploy writes modsettings.lsx and
+places files into the game directories in profile order. You can deploy manually
+with `d`, or enable auto deploy (debounced) so changes apply automatically.
+
+### SigiLink Cache
+SigiLink keeps a cache for fast deploys using hardlinks (same drive) or symlinks
+(different drives). No copy fallback is used. You can move or clear the cache in
+Settings when you need a clean refresh.
+
+### SigiLink Intelligent Ranking
+When enabled, SigiLink auto-ranks mods after imports or enables, using heuristics
+that consider relevance and conflicts. Manual moves create “unlinked” pins so
+SigiLink respects your chosen positions until you reset them.
+
+### Mod List Import/Export
+SigilSmith JSON is full fidelity (order + enabled + overrides). modsettings.lsx
+is for interop with other managers, but it cannot represent disabled state.
+All imports show a preview before apply.
+
+### Overrides
+The overrides panel lets you choose the winning mod per file quickly. Changes
+queue a conflict scan and deploy (if auto deploy is enabled).
+
+### Missing Mods / Ghost Entries
+Missing files are kept as “ghost” entries so profile order stays intact. SigilSmith
+shows a clear missing-mod dialog and offers Nexus search links to re-import.
 
 ## Requirements
 

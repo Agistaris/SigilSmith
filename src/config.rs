@@ -12,6 +12,8 @@ pub struct AppConfig {
     #[serde(default = "default_true")]
     pub confirm_mod_delete: bool,
     #[serde(default = "default_true")]
+    pub auto_deploy_enabled: bool,
+    #[serde(default = "default_true")]
     pub enable_mods_after_import: bool,
     #[serde(default = "default_false")]
     pub delete_mod_files_on_remove: bool,
@@ -36,6 +38,8 @@ pub struct AppConfig {
     #[serde(default = "default_false")]
     pub sigillink_pin_notice_dismissed: bool,
     #[serde(default)]
+    pub last_whats_new_version: Option<String>,
+    #[serde(default)]
     pub default_sort_column: Option<String>,
 }
 
@@ -58,6 +62,7 @@ impl AppConfig {
             active_game: GameId::default(),
             confirm_profile_delete: true,
             confirm_mod_delete: true,
+            auto_deploy_enabled: true,
             enable_mods_after_import: true,
             delete_mod_files_on_remove: false,
             downloads_dir: default_downloads_dir(),
@@ -70,6 +75,7 @@ impl AppConfig {
             sigillink_ranking_enabled: false,
             sigillink_auto_preview: true,
             sigillink_pin_notice_dismissed: false,
+            last_whats_new_version: None,
             default_sort_column: None,
         };
         config.save()?;

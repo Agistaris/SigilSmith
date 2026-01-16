@@ -3,6 +3,9 @@ use larian_formats::lspk;
 use lz4_flex::block::decompress;
 use quick_xml::{events::Event, Reader};
 use serde_json::Value;
+use std::collections::HashMap;
+use std::sync::Mutex;
+use std::time::UNIX_EPOCH;
 use std::{
     fs,
     io::{Read, Seek, SeekFrom},
@@ -35,6 +38,57 @@ pub struct JsonModInfo {
     pub name: Option<String>,
     pub created_at: Option<i64>,
     pub dependencies: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+struct PakMetaCacheEntry {
+    size: u64,
+    modified: Option<i64>,
+    meta: ModMeta,
+}
+
+#[derive(Debug, Default)]
+pub struct PakMetaCache {
+    inner: Mutex<HashMap<PathBuf, PakMetaCacheEntry>>,
+}
+
+impl PakMetaCache {
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+fn pak_signature(path: &Path) -> Option<(u64, Option<i64>)> {
+    let meta = fs::metadata(path).ok()?;
+    let size = meta.len();
+    let modified = meta
+        .modified()
+        .ok()
+        .and_then(|modified| modified.duration_since(UNIX_EPOCH).ok())
+        .map(|duration| duration.as_secs() as i64);
+    Some((size, modified))
+}
+
+pub fn read_meta_lsx_from_pak_cached(cache: &PakMetaCache, path: &Path) -> Option<ModMeta> {
+    let (size, modified) = pak_signature(path)?;
+    if let Ok(mut cache) = cache.inner.lock() {
+        if let Some(entry) = cache.get(path) {
+            if entry.size == size && entry.modified == modified {
+                return Some(entry.meta.clone());
+            }
+        }
+        let parsed = read_meta_lsx_from_pak(path)?;
+        cache.insert(
+            path.to_path_buf(),
+            PakMetaCacheEntry {
+                size,
+                modified,
+                meta: parsed.clone(),
+            },
+        );
+        return Some(parsed);
+    }
+    read_meta_lsx_from_pak(path)
 }
 
 pub fn parse_meta_lsx(bytes: &[u8]) -> ModMeta {

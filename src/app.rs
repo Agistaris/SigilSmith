@@ -209,6 +209,7 @@ pub struct Dialog {
     pub choice: DialogChoice,
     pub kind: DialogKind,
     pub toggle: Option<DialogToggle>,
+    pub toggle_alt: Option<DialogToggle>,
     pub scroll: usize,
 }
 
@@ -618,6 +619,8 @@ pub struct App {
     pub input_mode: InputMode,
     pub help_open: bool,
     pub help_scroll: usize,
+    pub whats_new_open: bool,
+    pub whats_new_scroll: usize,
     pub paths_overlay_open: bool,
     pub should_quit: bool,
     pub move_mode: bool,
@@ -653,6 +656,8 @@ pub struct App {
     sigillink_rank_pending_import: bool,
     sigillink_rank_debounce_until: Option<Instant>,
     sigillink_onboarding_pending: bool,
+    whats_new_pending: bool,
+    whats_new_block_until: Option<Instant>,
     pub smart_rank_progress: Option<smart_rank::SmartRankProgress>,
     smart_rank_cache: Option<SmartRankCache>,
     smart_rank_active: bool,
@@ -708,6 +713,7 @@ pub struct App {
     sigillink_missing_paks_ignored: HashSet<String>,
     dependency_cache: HashMap<String, Vec<String>>,
     dependency_cache_ready: bool,
+    pak_meta_cache: Arc<metadata::PakMetaCache>,
     pending_delete_mod: Option<(String, String)>,
     import_failures: Vec<importer::ImportFailure>,
     import_progress: Option<importer::ImportProgress>,
@@ -1043,6 +1049,12 @@ impl App {
 
         let sigillink_onboarding_pending =
             !app_config.sigillink_onboarded && !library.mods.is_empty();
+        let current_version = env!("CARGO_PKG_VERSION");
+        let whats_new_pending = app_config
+            .last_whats_new_version
+            .as_deref()
+            .map(|version| version != current_version)
+            .unwrap_or(true);
         let mut app = Self {
             app_config,
             game_id,
@@ -1053,6 +1065,8 @@ impl App {
             input_mode: InputMode::Normal,
             help_open: false,
             help_scroll: 0,
+            whats_new_open: false,
+            whats_new_scroll: 0,
             paths_overlay_open: false,
             should_quit: false,
             move_mode: false,
@@ -1088,6 +1102,8 @@ impl App {
             sigillink_rank_pending_import: false,
             sigillink_rank_debounce_until: None,
             sigillink_onboarding_pending,
+            whats_new_pending,
+            whats_new_block_until: None,
             smart_rank_progress: None,
             smart_rank_active: false,
             smart_rank_mode: None,
@@ -1143,6 +1159,7 @@ impl App {
             sigillink_missing_paks_ignored: HashSet::new(),
             dependency_cache: HashMap::new(),
             dependency_cache_ready: false,
+            pak_meta_cache: Arc::new(metadata::PakMetaCache::new()),
             pending_delete_mod: None,
             import_failures: Vec::new(),
             import_progress: None,
@@ -1599,6 +1616,51 @@ impl App {
         self.help_open = false;
     }
 
+    pub fn open_whats_new(&mut self) {
+        self.whats_new_open = true;
+        self.whats_new_scroll = 0;
+        self.whats_new_pending = false;
+        self.whats_new_block_until = Some(Instant::now() + Duration::from_secs(3));
+    }
+
+    pub fn close_whats_new(&mut self) {
+        self.whats_new_open = false;
+        self.whats_new_scroll = 0;
+        self.whats_new_block_until = None;
+        let current_version = env!("CARGO_PKG_VERSION");
+        if self
+            .app_config
+            .last_whats_new_version
+            .as_deref()
+            .map(|version| version != current_version)
+            .unwrap_or(true)
+        {
+            self.app_config
+                .last_whats_new_version
+                .replace(current_version.to_string());
+            let _ = self.app_config.save();
+        }
+    }
+
+    pub fn whats_new_remaining_secs(&self) -> u64 {
+        let Some(until) = self.whats_new_block_until else {
+            return 0;
+        };
+        let now = Instant::now();
+        if until <= now {
+            0
+        } else {
+            until
+                .saturating_duration_since(now)
+                .as_secs()
+                .saturating_add(1)
+        }
+    }
+
+    pub fn whats_new_can_close(&self) -> bool {
+        self.whats_new_remaining_secs() == 0
+    }
+
     pub fn open_paths_overlay(&mut self) {
         self.paths_overlay_open = true;
     }
@@ -1628,6 +1690,18 @@ impl App {
             "disabled"
         };
         self.status = format!("Confirm mod delete {state}");
+        Ok(())
+    }
+
+    pub fn toggle_auto_deploy(&mut self) -> Result<()> {
+        self.app_config.auto_deploy_enabled = !self.app_config.auto_deploy_enabled;
+        self.app_config.save()?;
+        let state = if self.app_config.auto_deploy_enabled {
+            "enabled"
+        } else {
+            "disabled"
+        };
+        self.status = format!("Auto deploy {state}");
         Ok(())
     }
 
@@ -2059,6 +2133,7 @@ impl App {
             choice: DialogChoice::No,
             kind: DialogKind::SigilLinkClearPins,
             toggle: None,
+            toggle_alt: None,
             scroll: 0,
         });
     }
@@ -2090,6 +2165,7 @@ Use Ctrl+R to reset this mod or Ctrl+Shift+R to reset all pins."
                 label: "Don't show again".to_string(),
                 checked: false,
             }),
+            toggle_alt: None,
             scroll: 0,
         });
     }
@@ -2424,6 +2500,7 @@ Use Ctrl+R to reset this mod or Ctrl+Shift+R to reset all pins."
             choice: DialogChoice::Yes,
             kind: DialogKind::StartupDependencyNotice,
             toggle: None,
+            toggle_alt: None,
             scroll: 0,
         });
     }
@@ -3369,6 +3446,7 @@ Use Ctrl+R to reset this mod or Ctrl+Shift+R to reset all pins."
                 label: "Don't ask again for this action?".to_string(),
                 checked: false,
             }),
+            toggle_alt: None,
             scroll: 0,
         });
     }
@@ -3411,6 +3489,7 @@ Use Ctrl+R to reset this mod or Ctrl+Shift+R to reset all pins."
                 dependents,
             },
             toggle,
+            toggle_alt: None,
             scroll: 0,
         });
     }
@@ -3579,6 +3658,7 @@ Use Ctrl+R to reset this mod or Ctrl+Shift+R to reset all pins."
                 clear_filter,
             },
             toggle: None,
+            toggle_alt: None,
             scroll: 0,
         });
     }
@@ -3598,6 +3678,7 @@ Use Ctrl+R to reset this mod or Ctrl+Shift+R to reset all pins."
                 label: "Remember import choice".to_string(),
                 checked: false,
             }),
+            toggle_alt: None,
             scroll: 0,
         });
     }
@@ -4595,6 +4676,7 @@ Use Ctrl+R to reset this mod or Ctrl+Shift+R to reset all pins."
                 choice: DialogChoice::No,
                 kind: DialogKind::SigilLinkRankPrompt,
                 toggle: None,
+                toggle_alt: None,
                 scroll: 0,
             });
         }
@@ -4714,6 +4796,7 @@ Use Ctrl+R to reset this mod or Ctrl+Shift+R to reset all pins."
         self.maybe_debounce_mod_filter();
         self.update_hotkey_transition();
         self.maybe_show_sigillink_onboarding();
+        self.maybe_show_whats_new();
         self.maybe_start_sigillink_rank_pending();
         self.maybe_return_to_settings_menu();
 
@@ -4783,15 +4866,52 @@ Use Ctrl+R to reset this mod or Ctrl+Shift+R to reset all pins."
         self.sigillink_onboarding_pending = false;
         self.open_dialog(Dialog {
             title: "SigiLink Intelligent Ranking".to_string(),
-            message: "SigilSmith can manage your mod order using SigiLink heuristics that analyze file relevance and conflicts.\n\nWhen enabled, SigiLink automatically reorders mods after imports or enables, and uses a link-based cache (hardlinks/symlinks) to keep deploys fast. You can disable this anytime."
+            message:
+                "SigilSmith can manage your mod order using SigiLink heuristics that analyze file relevance and conflicts.\n\nWhen enabled, SigiLink automatically reorders mods after imports or enables,\nand uses a link-based cache (hardlinks/symlinks) to keep deploys fast.\nYou can disable this anytime.\n\nAuto deploy applies changes after a short debounce. Auto accept diffs skips the preview each time SigiLink ranks (recommended); turn it off if you want to review every change (can be noisy). You can change both later in Settings."
                 .to_string(),
             yes_label: "Use SigiLink".to_string(),
             no_label: "I like mod chaos".to_string(),
             choice: DialogChoice::Yes,
             kind: DialogKind::SigilLinkOnboarding,
-            toggle: None,
+            toggle: Some(DialogToggle {
+                label: "Auto Deploy After Changes".to_string(),
+                checked: self.app_config.auto_deploy_enabled,
+            }),
+            toggle_alt: Some(DialogToggle {
+                label: "Auto Accept Diffs".to_string(),
+                checked: self.app_config.sigillink_auto_preview,
+            }),
             scroll: 0,
         });
+    }
+
+    fn maybe_show_whats_new(&mut self) {
+        if !self.whats_new_pending || self.whats_new_open {
+            return;
+        }
+        if self.sigillink_onboarding_pending {
+            return;
+        }
+        if self.dialog.is_some()
+            || !matches!(self.input_mode, InputMode::Normal)
+            || self.settings_menu.is_some()
+            || self.export_menu.is_some()
+            || self.mod_list_preview.is_some()
+            || self.smart_rank_preview.is_some()
+            || self.help_open
+            || self.paths_overlay_open
+            || self.import_summary_pending
+            || self.import_active.is_some()
+            || !self.import_batches.is_empty()
+            || !self.import_queue.is_empty()
+            || self.pending_duplicate.is_some()
+            || !self.duplicate_queue.is_empty()
+            || self.dependency_queue.is_some()
+            || self.startup_pending
+        {
+            return;
+        }
+        self.open_whats_new();
     }
 
     fn maybe_start_sigillink_rank_pending(&mut self) {
@@ -5955,6 +6075,7 @@ Use Ctrl+R to reset this mod or Ctrl+Shift+R to reset all pins."
             choice: DialogChoice::No,
             kind: DialogKind::OverrideDependencies,
             toggle: None,
+            toggle_alt: None,
             scroll: 0,
         });
     }
@@ -5994,6 +6115,7 @@ Use Ctrl+R to reset this mod or Ctrl+Shift+R to reset all pins."
                         label: "Remember my choice".to_string(),
                         checked: false,
                     }),
+                    toggle_alt: None,
                     scroll: 0,
                 });
             }
@@ -6827,8 +6949,10 @@ Use Ctrl+R to reset this mod or Ctrl+Shift+R to reset all pins."
         let config = self.config.clone();
         let library = self.library.clone();
         let game_id = self.game_id;
+        let pak_cache = self.pak_meta_cache.clone();
         thread::spawn(move || {
-            let result = collect_metadata_updates(game_id, &config, &library, Some(&tx));
+            let result =
+                collect_metadata_updates(game_id, &config, &library, pak_cache.as_ref(), Some(&tx));
             let message = match result {
                 Ok(_) => MetadataMessage::Completed,
                 Err(err) => MetadataMessage::Failed {
@@ -6948,8 +7072,10 @@ Use Ctrl+R to reset this mod or Ctrl+Shift+R to reset all pins."
         let config = self.config.clone();
         let library = self.library.clone();
         let game_id = self.game_id;
+        let pak_cache = self.pak_meta_cache.clone();
         thread::spawn(move || {
-            match sync_native_mods_delta(game_id, &config, &library, Some(&tx)) {
+            match sync_native_mods_delta(game_id, &config, &library, pak_cache.as_ref(), Some(&tx))
+            {
                 Ok(delta) => {
                     let _ = tx.send(NativeSyncMessage::Completed(delta));
                 }
@@ -6961,7 +7087,13 @@ Use Ctrl+R to reset this mod or Ctrl+Shift+R to reset all pins."
     }
 
     fn run_native_sync_inline(&mut self) {
-        match sync_native_mods_delta(self.game_id, &self.config, &self.library, None) {
+        match sync_native_mods_delta(
+            self.game_id,
+            &self.config,
+            &self.library,
+            self.pak_meta_cache.as_ref(),
+            None,
+        ) {
             Ok(delta) => {
                 self.apply_native_sync_delta(delta);
             }
@@ -7670,7 +7802,9 @@ Use Ctrl+R to reset this mod or Ctrl+Shift+R to reset all pins."
                 Some(&self.config.game_root),
                 Some(&self.config.larian_dir),
             ) {
-                native_index = Some(native_pak::build_native_pak_index(&paths.larian_mods_dir));
+                native_index = Some(native_pak::build_native_pak_index_cached(
+                    &paths.larian_mods_dir,
+                ));
                 native_paths = Some(paths);
             }
         }
@@ -7703,7 +7837,7 @@ Use Ctrl+R to reset this mod or Ctrl+Shift+R to reset all pins."
                     }
                 }
                 if !pak_path.exists() && use_managed_root {
-                    let index = native_pak::build_native_pak_index(&mod_root);
+                    let index = native_pak::build_native_pak_index_cached(&mod_root);
                     if let Some(info) = mod_entry.targets.iter().find_map(|target| {
                         if let InstallTarget::Pak { info, .. } = target {
                             Some(info)
@@ -9091,6 +9225,7 @@ Use Ctrl+R to reset this mod or Ctrl+Shift+R to reset all pins."
             choice: DialogChoice::Yes,
             kind: DialogKind::ImportSummary,
             toggle: None,
+            toggle_alt: None,
             scroll: 0,
         });
     }
@@ -9310,6 +9445,7 @@ Use Ctrl+R to reset this mod or Ctrl+Shift+R to reset all pins."
                 label: "Apply this choice to all remaining duplicates".to_string(),
                 checked: false,
             }),
+            toggle_alt: None,
             scroll: 0,
         });
     }
@@ -9382,6 +9518,7 @@ Use Ctrl+R to reset this mod or Ctrl+Shift+R to reset all pins."
             choice: DialogChoice::No,
             kind: DialogKind::Unrecognized { path, label },
             toggle: None,
+            toggle_alt: None,
             scroll: 0,
         });
     }
@@ -9403,6 +9540,7 @@ Use Ctrl+R to reset this mod or Ctrl+Shift+R to reset all pins."
             choice: DialogChoice::Yes,
             kind: DialogKind::SigilLinkRelocation { target_root },
             toggle: None,
+            toggle_alt: None,
             scroll: 0,
         });
     }
@@ -9643,6 +9781,12 @@ Use Ctrl+R to reset this mod or Ctrl+Shift+R to reset all pins."
             }
             DialogKind::SigilLinkOnboarding => {
                 self.app_config.sigillink_onboarded = true;
+                if let Some(toggle) = dialog.toggle {
+                    self.app_config.auto_deploy_enabled = toggle.checked;
+                }
+                if let Some(toggle) = dialog.toggle_alt {
+                    self.app_config.sigillink_auto_preview = toggle.checked;
+                }
                 if matches!(choice, DialogChoice::Yes) {
                     self.app_config.sigillink_ranking_enabled = true;
                     let _ = self.app_config.save();
@@ -9847,7 +9991,7 @@ Use Ctrl+R to reset this mod or Ctrl+Shift+R to reset all pins."
             self.log_warn("Native mod file remove skipped: missing pak info".to_string());
             return;
         };
-        let native_pak_index = native_pak::build_native_pak_index(&paths.larian_mods_dir);
+        let native_pak_index = native_pak::build_native_pak_index_cached(&paths.larian_mods_dir);
         let file_name = mod_entry
             .targets
             .iter()
@@ -10162,7 +10306,7 @@ Use Ctrl+R to reset this mod or Ctrl+Shift+R to reset all pins."
             let mut has_pak_target = false;
             let mod_root = library_mod_root(&self.config.sigillink_cache_root()).join(id);
             let pak_index = if mod_root.exists() {
-                Some(native_pak::build_native_pak_index(&mod_root))
+                Some(native_pak::build_native_pak_index_cached(&mod_root))
             } else {
                 None
             };
@@ -10388,6 +10532,7 @@ Use Ctrl+R to reset this mod or Ctrl+Shift+R to reset all pins."
                         reason: "enable toggle".to_string(),
                     },
                     toggle: None,
+                    toggle_alt: None,
                     scroll: 0,
                 });
             }
@@ -10553,6 +10698,7 @@ Use Ctrl+R to reset this mod or Ctrl+Shift+R to reset all pins."
                     dependencies,
                 },
                 toggle: None,
+                toggle_alt: None,
                 scroll: 0,
             });
             return;
@@ -10639,7 +10785,7 @@ Use Ctrl+R to reset this mod or Ctrl+Shift+R to reset all pins."
         .ok();
         let native_index = paths
             .as_ref()
-            .map(|paths| native_pak::build_native_pak_index(&paths.larian_mods_dir));
+            .map(|paths| native_pak::build_native_pak_index_cached(&paths.larian_mods_dir));
 
         let mut items = Vec::new();
         for id in ids {
@@ -11136,6 +11282,7 @@ Use Ctrl+R to reset this mod or Ctrl+Shift+R to reset all pins."
                     reason: "disable all".to_string(),
                 },
                 toggle: None,
+                toggle_alt: None,
                 scroll: 0,
             });
             return;
@@ -11194,6 +11341,7 @@ Use Ctrl+R to reset this mod or Ctrl+Shift+R to reset all pins."
                     reason: "invert selection".to_string(),
                 },
                 toggle: None,
+                toggle_alt: None,
                 scroll: 0,
             });
             return;
@@ -11252,6 +11400,10 @@ Use Ctrl+R to reset this mod or Ctrl+Shift+R to reset all pins."
 
     fn queue_auto_deploy(&mut self, reason: &str) {
         if !self.allow_persistence() {
+            return;
+        }
+        if !self.app_config.auto_deploy_enabled {
+            self.queue_conflict_scan(reason);
             return;
         }
         self.queue_deploy(&format!("auto: {reason}"));
@@ -12708,12 +12860,13 @@ fn collect_metadata_updates(
     game_id: GameId,
     config: &GameConfig,
     library: &Library,
+    pak_cache: &metadata::PakMetaCache,
     progress: Option<&Sender<MetadataMessage>>,
 ) -> Result<Vec<MetadataUpdate>> {
     let paths = game::detect_paths(game_id, Some(&config.game_root), Some(&config.larian_dir)).ok();
     let native_index = paths
         .as_ref()
-        .map(|paths| native_pak::build_native_pak_index(&paths.larian_mods_dir));
+        .map(|paths| native_pak::build_native_pak_index_cached(&paths.larian_mods_dir));
 
     let mut updates = Vec::new();
     let total = library.mods.len();
@@ -12737,7 +12890,7 @@ fn collect_metadata_updates(
             paths.as_ref(),
             native_index.as_deref(),
         ) {
-            if let Some(meta) = metadata::read_meta_lsx_from_pak(&pak_path) {
+            if let Some(meta) = metadata::read_meta_lsx_from_pak_cached(pak_cache, &pak_path) {
                 if let Some(created) = meta.created_at {
                     meta_created = Some(match meta_created {
                         Some(existing) => existing.min(created),
@@ -12914,12 +13067,13 @@ fn sync_native_mods_delta(
     game_id: GameId,
     config: &GameConfig,
     library: &Library,
+    pak_cache: &metadata::PakMetaCache,
     progress: Option<&Sender<NativeSyncMessage>>,
 ) -> Result<NativeSyncDelta, String> {
     let paths = game::detect_paths(game_id, Some(&config.game_root), Some(&config.larian_dir))
         .map_err(|err| err.to_string())?;
     let modsettings_exists = paths.modsettings_path.exists();
-    let native_pak_index = native_pak::build_native_pak_index(&paths.larian_mods_dir);
+    let native_pak_index = native_pak::build_native_pak_index_cached(&paths.larian_mods_dir);
 
     let snapshot = deploy::read_modsettings_snapshot(&paths.modsettings_path)
         .map_err(|err| err.to_string())?;
@@ -13003,7 +13157,7 @@ fn sync_native_mods_delta(
 
         let pak_path = paths.larian_mods_dir.join(&filename);
         let modsettings_created = module_created_by_uuid.get(&mod_entry.id).copied().flatten();
-        let pak_meta = metadata::read_meta_lsx_from_pak(&pak_path);
+        let pak_meta = metadata::read_meta_lsx_from_pak_cached(pak_cache, &pak_path);
         let meta_created = pak_meta.as_ref().and_then(|meta| meta.created_at);
         let mut dependencies = pak_meta
             .as_ref()
@@ -13090,7 +13244,7 @@ fn sync_native_mods_delta(
         let filename = native_pak::resolve_native_pak_filename(info, &native_pak_index)
             .unwrap_or_else(|| format!("{}.pak", info.folder));
         let pak_path = paths.larian_mods_dir.join(&filename);
-        let pak_meta = metadata::read_meta_lsx_from_pak(&pak_path);
+        let pak_meta = metadata::read_meta_lsx_from_pak_cached(pak_cache, &pak_path);
         let meta_created = pak_meta.as_ref().and_then(|meta| meta.created_at);
         let mut dependencies = pak_meta
             .as_ref()
@@ -13156,7 +13310,7 @@ fn sync_native_mods_delta(
         let filename = native_pak::resolve_native_pak_filename(&info, &native_pak_index)
             .unwrap_or_else(|| format!("{}.pak", info.folder));
         let pak_path = paths.larian_mods_dir.join(&filename);
-        let pak_meta = metadata::read_meta_lsx_from_pak(&pak_path);
+        let pak_meta = metadata::read_meta_lsx_from_pak_cached(pak_cache, &pak_path);
         let meta_created = pak_meta.as_ref().and_then(|meta| meta.created_at);
         let mut dependencies = pak_meta
             .as_ref()
@@ -13245,7 +13399,7 @@ fn resolve_pak_paths(
             if path.exists() {
                 push_unique(path);
             } else if let Some(index) = if mods_root.join(&mod_entry.id).exists() {
-                Some(native_pak::build_native_pak_index(
+                Some(native_pak::build_native_pak_index_cached(
                     &mods_root.join(&mod_entry.id),
                 ))
             } else {

@@ -1,4 +1,4 @@
-# SigilSmith v0.7.9
+# SigilSmith v0.8.5
 
 SigilSmith is a Linux-first TUI mod manager for Baldur's Gate 3. Drag-drop mods,
 manage profiles, resolve overrides, and deploy with confidence. Multi-game support
@@ -7,8 +7,8 @@ is coming next via an open adapter template.
 ## Highlights
 
 - SigiLink cache with hardlink/symlink deploys (no full-copy fallback).
-- Transactional imports with clear stage progress and safe cancel.
-- SigiLink Intelligent Ranking with onboarding, pins, and deterministic diffs.
+- Auto deploy (debounced) or manual deploy on demand.
+- SigiLink Intelligent Ranking with onboarding, unlinked pins, and diff previews.
 - Mod list interop: JSON export/import and modsettings.lsx export/import.
 - Missing mod placeholders with safe enable/disable dependency prompts.
 - Overrides panel redesigned for fast selection and scrollable lists.
@@ -16,10 +16,11 @@ is coming next via an open adapter template.
 ## What's New Since 0.5.0
 
 - SigiLink cache and index (fast, safe deploys with recovery tools).
-- Ranking preview + auto-ranking with pins and restore hotkeys.
+- Ranking preview + auto-ranking with unlinked pins and restore hotkeys.
 - Mod list import preview with missing/ambiguous handling.
 - Dependency dialogs for enable/disable cascades and missing files.
 - Dep counts (missing vs disabled) in the mod stack at a glance.
+- Auto deploy toggle and refined status feedback.
 - Refined UI: aligned panels, wider settings, richer help, and better overlays.
 
 ## Creator Note
@@ -38,6 +39,8 @@ and I have more planned snapshots (and a few secrets) waiting for the next one.
 ![SigiLink Ranking](docs/04-smart-ranking.png)
 ![Settings](docs/05-settings-menu.png)
 ![Directory Select](docs/07_directory_select.png)
+![Mod List Preview](docs/06-modlist-preview.png)
+![Export Menu](docs/06-export-menu.png)
 
 ## Install
 

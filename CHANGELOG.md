@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.8.5
+
+- Add auto-deploy onboarding + settings toggle and reflect it in the context panel.
+- Expand README/release docs with deeper feature explanations and updated screenshots.
+
 ## 0.8.4
 
 - Replace the log status bar animation with a compact braille spinner.

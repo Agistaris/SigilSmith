@@ -1,4 +1,7 @@
 use crate::library::PakInfo;
+use std::collections::HashMap;
+use std::sync::{Mutex, OnceLock};
+use std::time::UNIX_EPOCH;
 use std::{
     fs,
     path::{Path, PathBuf},
@@ -8,6 +11,23 @@ use std::{
 pub struct NativePakEntry {
     pub path: PathBuf,
     normalized: String,
+}
+
+#[derive(Debug, Clone)]
+struct NativePakIndexCacheEntry {
+    modified: Option<i64>,
+    entries: Vec<NativePakEntry>,
+}
+
+static NATIVE_PAK_INDEX_CACHE: OnceLock<Mutex<HashMap<PathBuf, NativePakIndexCacheEntry>>> =
+    OnceLock::new();
+
+fn dir_modified_timestamp(path: &Path) -> Option<i64> {
+    let meta = fs::metadata(path).ok()?;
+    meta.modified()
+        .ok()
+        .and_then(|modified| modified.duration_since(UNIX_EPOCH).ok())
+        .map(|duration| duration.as_secs() as i64)
 }
 
 pub fn build_native_pak_index(larian_mods_dir: &Path) -> Vec<NativePakEntry> {
@@ -31,6 +51,28 @@ pub fn build_native_pak_index(larian_mods_dir: &Path) -> Vec<NativePakEntry> {
         entries.push(NativePakEntry { path, normalized });
     }
     entries
+}
+
+pub fn build_native_pak_index_cached(larian_mods_dir: &Path) -> Vec<NativePakEntry> {
+    let stamp = dir_modified_timestamp(larian_mods_dir);
+    let cache = NATIVE_PAK_INDEX_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    if let Ok(mut cache) = cache.lock() {
+        if let Some(entry) = cache.get(larian_mods_dir) {
+            if entry.modified == stamp {
+                return entry.entries.clone();
+            }
+        }
+        let entries = build_native_pak_index(larian_mods_dir);
+        cache.insert(
+            larian_mods_dir.to_path_buf(),
+            NativePakIndexCacheEntry {
+                modified: stamp,
+                entries: entries.clone(),
+            },
+        );
+        return entries;
+    }
+    build_native_pak_index(larian_mods_dir)
 }
 
 pub fn resolve_native_pak_filename(

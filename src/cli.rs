@@ -982,7 +982,7 @@ fn collect_dependencies(app: &App, mod_entry: &ModEntry, paths: Option<&GamePath
         mod_root.clone()
     };
     let native_index = if mod_entry.is_native() {
-        paths.map(|paths| native_pak::build_native_pak_index(&paths.larian_mods_dir))
+        paths.map(|paths| native_pak::build_native_pak_index_cached(&paths.larian_mods_dir))
     } else {
         None
     };

@@ -211,6 +211,9 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Result<()> {
     if app.paths_overlay_open {
         return handle_paths_overlay(app, key);
     }
+    if app.whats_new_open {
+        return handle_whats_new_mode(app, key);
+    }
     if app.help_open {
         return handle_help_mode(app, key);
     }
@@ -316,6 +319,13 @@ fn handle_dialog_mode(app: &mut App, key: KeyEvent) -> Result<()> {
                 }
             }
         }
+        KeyCode::Char('a') | KeyCode::Char('A') => {
+            if let Some(dialog) = &mut app.dialog {
+                if let Some(toggle) = &mut dialog.toggle_alt {
+                    toggle.checked = !toggle.checked;
+                }
+            }
+        }
         KeyCode::Enter | KeyCode::Char(' ') => {
             app.dialog_confirm();
         }
@@ -362,6 +372,36 @@ fn handle_help_mode(app: &mut App, key: KeyEvent) -> Result<()> {
         }
         KeyCode::End => {
             app.help_scroll = usize::MAX;
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+fn handle_whats_new_mode(app: &mut App, key: KeyEvent) -> Result<()> {
+    match key.code {
+        KeyCode::Esc | KeyCode::Enter | KeyCode::Char(' ') => {
+            if app.whats_new_can_close() {
+                app.close_whats_new();
+            }
+        }
+        KeyCode::Up | KeyCode::Char('k') | KeyCode::Char('K') => {
+            app.whats_new_scroll = app.whats_new_scroll.saturating_sub(1);
+        }
+        KeyCode::Down | KeyCode::Char('j') | KeyCode::Char('J') => {
+            app.whats_new_scroll = app.whats_new_scroll.saturating_add(1);
+        }
+        KeyCode::PageUp => {
+            app.whats_new_scroll = app.whats_new_scroll.saturating_sub(6);
+        }
+        KeyCode::PageDown => {
+            app.whats_new_scroll = app.whats_new_scroll.saturating_add(6);
+        }
+        KeyCode::Home => {
+            app.whats_new_scroll = 0;
+        }
+        KeyCode::End => {
+            app.whats_new_scroll = usize::MAX;
         }
         _ => {}
     }
@@ -545,6 +585,7 @@ enum SettingsItemKind {
     ActionClearSigilLinkPins,
     ToggleModDelete,
     ToggleProfileDelete,
+    ToggleAutoDeploy,
     ToggleEnableModsAfterImport,
     ToggleDeleteModFilesOnRemove,
     ToggleDependencyDownloads,
@@ -552,6 +593,7 @@ enum SettingsItemKind {
     ToggleStartupDependencyNotice,
     DefaultSortColumn,
     ActionCheckUpdates,
+    ActionWhatsNew,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -599,6 +641,12 @@ fn settings_items(app: &App) -> Vec<SettingsItem> {
             label: "Clear Framework Caches".to_string(),
             kind: SettingsItemKind::ActionClearFrameworkCaches,
             checked: None,
+            selectable: true,
+        },
+        SettingsItem {
+            label: "Auto Deploy".to_string(),
+            kind: SettingsItemKind::ToggleAutoDeploy,
+            checked: Some(app.app_config.auto_deploy_enabled),
             selectable: true,
         },
         SettingsItem {
@@ -760,6 +808,12 @@ fn settings_items(app: &App) -> Vec<SettingsItem> {
             checked: None,
             selectable: true,
         },
+        SettingsItem {
+            label: "What's New?".to_string(),
+            kind: SettingsItemKind::ActionWhatsNew,
+            checked: None,
+            selectable: true,
+        },
     ]);
 
     items
@@ -910,6 +964,12 @@ fn handle_settings_menu(app: &mut App, key: KeyEvent) -> Result<()> {
                             app.log_error(format!("Settings update failed: {err}"));
                         }
                     }
+                    SettingsItemKind::ToggleAutoDeploy => {
+                        if let Err(err) = app.toggle_auto_deploy() {
+                            app.status = format!("Settings update failed: {err}");
+                            app.log_error(format!("Settings update failed: {err}"));
+                        }
+                    }
                     SettingsItemKind::ToggleEnableModsAfterImport => {
                         if let Err(err) = app.toggle_enable_mods_after_import() {
                             app.status = format!("Settings update failed: {err}");
@@ -1000,6 +1060,11 @@ fn handle_settings_menu(app: &mut App, key: KeyEvent) -> Result<()> {
                         app.request_settings_menu_return();
                         app.close_settings_menu();
                         app.open_log_export();
+                    }
+                    SettingsItemKind::ActionWhatsNew => {
+                        app.request_settings_menu_return();
+                        app.close_settings_menu();
+                        app.open_whats_new();
                     }
                     SettingsItemKind::ActionCheckUpdates => {
                         if matches!(app.update_status, UpdateStatus::Available { .. }) {
@@ -2598,7 +2663,7 @@ fn draw(frame: &mut Frame<'_>, app: &mut App) {
         context_label_width,
         Style::default().fg(theme.muted),
     ));
-    let auto_deploy_enabled = true;
+    let auto_deploy_enabled = app.app_config.auto_deploy_enabled;
     let auto_row = KvRow {
         label: "Auto-Deploy".to_string(),
         value: if auto_deploy_enabled {
@@ -2852,6 +2917,9 @@ fn draw(frame: &mut Frame<'_>, app: &mut App) {
     }
     if app.help_open {
         draw_help_menu(frame, app, &theme);
+    }
+    if app.whats_new_open {
+        draw_whats_new(frame, app, &theme);
     }
     draw_import_overlay(frame, app, &theme);
     draw_startup_overlay(frame, app, &theme);
@@ -3500,9 +3568,11 @@ fn draw_dialog(frame: &mut Frame<'_>, app: &mut App, theme: &Theme) {
         Line::from(""),
     ];
     let mut footer_lines = Vec::new();
+    if dialog.toggle.is_some() || dialog.toggle_alt.is_some() {
+        footer_lines.push(Line::from(""));
+    }
     if let Some(toggle) = &dialog.toggle {
         let marker = if toggle.checked { "[x]" } else { "[ ]" };
-        footer_lines.push(Line::from(""));
         footer_lines.push(Line::from(vec![
             Span::styled(marker, Style::default().fg(theme.accent)),
             Span::raw(" "),
@@ -3510,6 +3580,18 @@ fn draw_dialog(frame: &mut Frame<'_>, app: &mut App, theme: &Theme) {
         ]));
         footer_lines.push(Line::from(Span::styled(
             "Press D to toggle",
+            Style::default().fg(theme.muted),
+        )));
+    }
+    if let Some(toggle) = &dialog.toggle_alt {
+        let marker = if toggle.checked { "[x]" } else { "[ ]" };
+        footer_lines.push(Line::from(vec![
+            Span::styled(marker, Style::default().fg(theme.accent)),
+            Span::raw(" "),
+            Span::styled(toggle.label.clone(), Style::default().fg(theme.text)),
+        ]));
+        footer_lines.push(Line::from(Span::styled(
+            "Press A to toggle",
             Style::default().fg(theme.muted),
         )));
     }
@@ -4049,6 +4131,111 @@ fn draw_help_menu(frame: &mut Frame<'_>, app: &mut App, theme: &Theme) {
             .thumb_style(Style::default().fg(theme.accent));
         frame.render_stateful_widget(scrollbar, help_chunks[1], &mut scroll_state);
     }
+}
+
+fn draw_whats_new(frame: &mut Frame<'_>, app: &mut App, theme: &Theme) {
+    if !app.whats_new_open {
+        return;
+    }
+
+    let area = frame.size();
+    let max_width = area.width.saturating_sub(4).max(1);
+    let width = max_width.clamp(64, 110);
+    let max_height = area.height.saturating_sub(2).max(1);
+    let content_width = width.saturating_sub(2) as usize;
+    let mut lines = build_whats_new_lines(theme, content_width);
+    let content_height = lines.len().max(1) as u16;
+    let mut height = content_height.saturating_add(3).max(14);
+    if height > max_height {
+        height = max_height;
+    }
+    let (outer_area, modal) = padded_modal(area, width, height, 2, 1);
+
+    render_modal_backdrop(frame, outer_area, theme);
+    let panel_block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(theme.accent_soft))
+        .style(Style::default().bg(theme.header_bg))
+        .title(Span::styled(
+            "What's New?!",
+            Style::default()
+                .fg(theme.accent)
+                .add_modifier(Modifier::BOLD),
+        ));
+    let inner = panel_block.inner(modal);
+    frame.render_widget(panel_block, modal);
+
+    let footer_height = 1;
+    let body_height = inner.height.saturating_sub(footer_height);
+    let body_rect = Rect {
+        x: inner.x,
+        y: inner.y,
+        width: inner.width,
+        height: body_height,
+    };
+    let footer_rect = Rect {
+        x: inner.x,
+        y: inner.y.saturating_add(body_height),
+        width: inner.width,
+        height: footer_height,
+    };
+
+    let view_height = body_rect.height.max(1) as usize;
+    let max_scroll = lines.len().saturating_sub(view_height);
+    if app.whats_new_scroll > max_scroll {
+        app.whats_new_scroll = max_scroll;
+    }
+    let show_scroll = max_scroll > 0;
+    let body_chunks = if show_scroll {
+        Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Min(1), Constraint::Length(1)])
+            .split(body_rect)
+    } else {
+        Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Min(1), Constraint::Length(0)])
+            .split(body_rect)
+    };
+    let content_width = body_chunks[0].width.max(1) as usize;
+    lines = build_whats_new_lines(theme, content_width);
+    let view_height = body_chunks[0].height.max(1) as usize;
+    let max_scroll = lines.len().saturating_sub(view_height);
+    if app.whats_new_scroll > max_scroll {
+        app.whats_new_scroll = max_scroll;
+    }
+    let body_widget = Paragraph::new(lines)
+        .scroll((app.whats_new_scroll as u16, 0))
+        .style(Style::default().fg(theme.text).bg(theme.header_bg));
+    frame.render_widget(body_widget, body_chunks[0]);
+    if show_scroll && body_chunks[1].width > 0 {
+        let scroll_len = max_scroll.saturating_add(1);
+        let mut scroll_state = ScrollbarState::new(scroll_len)
+            .position(app.whats_new_scroll)
+            .viewport_content_length(view_height);
+        let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
+            .track_symbol(Some("░"))
+            .thumb_symbol("▓")
+            .begin_symbol(Some("▲"))
+            .end_symbol(Some("▼"))
+            .track_style(Style::default().fg(theme.border))
+            .thumb_style(Style::default().fg(theme.accent));
+        frame.render_stateful_widget(scrollbar, body_chunks[1], &mut scroll_state);
+    }
+
+    let remaining = app.whats_new_remaining_secs();
+    let footer_text = if remaining > 0 {
+        format!("Continue in {remaining}s")
+    } else {
+        "Enter/Esc to close".to_string()
+    };
+    let footer_widget = Paragraph::new(Line::from(Span::styled(
+        footer_text,
+        Style::default().fg(theme.muted),
+    )))
+    .alignment(Alignment::Right);
+    frame.render_widget(footer_widget, footer_rect);
 }
 
 fn dependency_status_label(status: DependencyStatus) -> &'static str {
@@ -5891,6 +6078,9 @@ fn build_settings_menu_lines(
     lines.push(Line::from(""));
 
     let items = settings_items(app);
+    let whats_new_index = items
+        .iter()
+        .position(|item| matches!(item.kind, SettingsItemKind::ActionWhatsNew));
     let content_width = content_width.unwrap_or(0);
     let key_limit = content_width.saturating_sub(10).max(1);
     let clamp_key = |width: usize| {
@@ -5910,6 +6100,7 @@ fn build_settings_menu_lines(
                         | SettingsItemKind::ToggleDeleteModFilesOnRemove
                         | SettingsItemKind::ToggleProfileDelete
                         | SettingsItemKind::ToggleModDelete
+                        | SettingsItemKind::ToggleAutoDeploy
                         | SettingsItemKind::ToggleDependencyDownloads
                         | SettingsItemKind::ToggleDependencyWarnings
                         | SettingsItemKind::ToggleStartupDependencyNotice
@@ -5956,6 +6147,9 @@ fn build_settings_menu_lines(
     );
 
     for (index, item) in items.iter().enumerate() {
+        if matches!(item.kind, SettingsItemKind::ActionWhatsNew) {
+            continue;
+        }
         if matches!(
             item.kind,
             SettingsItemKind::SigilLinkHeader
@@ -6001,6 +6195,10 @@ fn build_settings_menu_lines(
                 .add_modifier(Modifier::BOLD)
         } else if !item.selectable {
             Style::default().fg(theme.muted)
+        } else if matches!(item.kind, SettingsItemKind::ActionWhatsNew) {
+            Style::default()
+                .fg(theme.accent)
+                .add_modifier(Modifier::BOLD)
         } else {
             Style::default().fg(theme.text)
         };
@@ -6017,7 +6215,8 @@ fn build_settings_menu_lines(
             | SettingsItemKind::ActionCopyLogTail
             | SettingsItemKind::ActionCopyLogAll
             | SettingsItemKind::ActionExportLogFile
-            | SettingsItemKind::ActionCheckUpdates => {
+            | SettingsItemKind::ActionCheckUpdates
+            | SettingsItemKind::ActionWhatsNew => {
                 lines.push(menu_row(
                     index == selected,
                     MenuRowKind::Action,
@@ -6041,6 +6240,7 @@ fn build_settings_menu_lines(
             | SettingsItemKind::SigilLinkAutoPreview
             | SettingsItemKind::ToggleProfileDelete
             | SettingsItemKind::ToggleModDelete
+            | SettingsItemKind::ToggleAutoDeploy
             | SettingsItemKind::ToggleDependencyDownloads
             | SettingsItemKind::ToggleDependencyWarnings
             | SettingsItemKind::ToggleStartupDependencyNotice => {
@@ -6127,6 +6327,27 @@ fn build_settings_menu_lines(
         ),
         theme,
     ));
+
+    if let Some(index) = whats_new_index {
+        if let Some(item) = items.get(index) {
+            lines.push(Line::from(""));
+            let style = if index == selected {
+                Style::default()
+                    .fg(theme.success)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default()
+                    .fg(theme.accent)
+                    .add_modifier(Modifier::BOLD)
+            };
+            lines.push(menu_row(
+                index == selected,
+                MenuRowKind::Action,
+                Span::styled(item.label.to_string(), style),
+                theme,
+            ));
+        }
+    }
 
     lines.push(Line::from(""));
     let footer_style = Style::default().fg(theme.accent);
@@ -9014,6 +9235,165 @@ fn build_help_lines(theme: &Theme, width: usize) -> Vec<Line<'static>> {
         lines.extend(format_legend_rows(&section.rows, width, key_width, theme));
         lines.push(Line::from(""));
     }
+
+    while matches!(lines.last(), Some(line) if line.to_string().is_empty()) {
+        lines.pop();
+    }
+
+    lines
+}
+
+fn build_whats_new_lines(theme: &Theme, width: usize) -> Vec<Line<'static>> {
+    if width == 0 {
+        return Vec::new();
+    }
+
+    let mut lines = Vec::new();
+    let header_style = Style::default()
+        .fg(theme.accent)
+        .add_modifier(Modifier::BOLD);
+    let body_style = Style::default().fg(theme.text);
+    let muted_style = Style::default().fg(theme.muted);
+
+    let banner = [
+        "  .::--==++**##%%##**++==--::.  ",
+        " /::==++**##%%%%%%%%##**++==::\\ ",
+        "|::==++**##%%%%%%%%##**++==::||",
+        " \\::==++**##%%%%%%%%##**++==::/ ",
+        "  '::--==++**##%%##**++==--::'  ",
+        "     ..::--==++++==--::..       ",
+    ];
+    for line in banner {
+        lines.push(Line::from(Span::styled(
+            truncate_text(line, width),
+            header_style,
+        )));
+    }
+    lines.push(Line::from(""));
+
+    fn push_section(lines: &mut Vec<Line<'static>>, title: &str, width: usize, theme: &Theme) {
+        lines.push(section_header_line(title, width, theme));
+    }
+
+    fn push_bullet(lines: &mut Vec<Line<'static>>, width: usize, text: &str, style: Style) {
+        let mut current = String::from("- ");
+        for word in text.split_whitespace() {
+            let add_len = if current.ends_with(' ') {
+                word.chars().count()
+            } else {
+                1 + word.chars().count()
+            };
+            if current.chars().count() + add_len > width {
+                lines.push(Line::from(Span::styled(
+                    truncate_text(&current, width),
+                    style,
+                )));
+                current = format!("  {word}");
+            } else {
+                if !current.ends_with(' ') {
+                    current.push(' ');
+                }
+                current.push_str(word);
+            }
+        }
+        lines.push(Line::from(Span::styled(
+            truncate_text(&current, width),
+            style,
+        )));
+    }
+
+    push_section(&mut lines, "SigiLink Cache + Deploy", width, theme);
+    push_bullet(
+        &mut lines,
+        width,
+        "Transactional imports with staging and safe cancel.",
+        body_style,
+    );
+    push_bullet(
+        &mut lines,
+        width,
+        "Hardlink/symlink deploys (no full-copy fallback).",
+        body_style,
+    );
+    push_bullet(
+        &mut lines,
+        width,
+        "Auto deploy (debounced) or manual deploy on demand.",
+        body_style,
+    );
+    lines.push(Line::from(""));
+
+    push_section(&mut lines, "SigiLink Intelligent Ranking", width, theme);
+    push_bullet(
+        &mut lines,
+        width,
+        "Onboarding toggle + auto-ranking after import/enable.",
+        body_style,
+    );
+    push_bullet(
+        &mut lines,
+        width,
+        "Unlinked pins for manual order control.",
+        body_style,
+    );
+    push_bullet(
+        &mut lines,
+        width,
+        "Auto accept diffs option for hands-off ordering.",
+        body_style,
+    );
+    lines.push(Line::from(""));
+
+    push_section(&mut lines, "Mod List Interop", width, theme);
+    push_bullet(
+        &mut lines,
+        width,
+        "SigilSmith JSON import/export with order + enabled + overrides.",
+        body_style,
+    );
+    push_bullet(
+        &mut lines,
+        width,
+        "modsettings.lsx import/export for BG3MM/Vortex interop.",
+        body_style,
+    );
+    push_bullet(
+        &mut lines,
+        width,
+        "Preview modal with missing/ambiguous handling.",
+        body_style,
+    );
+    lines.push(Line::from(""));
+
+    push_section(&mut lines, "Overrides + UX", width, theme);
+    push_bullet(
+        &mut lines,
+        width,
+        "Overrides panel redesigned for fast left/right selection.",
+        body_style,
+    );
+    push_bullet(
+        &mut lines,
+        width,
+        "Dependency prompts for safe enable/disable cascades.",
+        body_style,
+    );
+    push_bullet(
+        &mut lines,
+        width,
+        "Cleaner layouts, richer help, and export/import workflows.",
+        body_style,
+    );
+    lines.push(Line::from(""));
+
+    lines.push(Line::from(Span::styled(
+        "Tip: Use JSON for full fidelity. modsettings.lsx cannot store disabled state.",
+        muted_style,
+    )));
+    lines.push(Line::from(Span::styled(
+        "You can reopen this panel in Esc → What's New?.",
+        muted_style,
+    )));
 
     while matches!(lines.last(), Some(line) if line.to_string().is_empty()) {
         lines.pop();
