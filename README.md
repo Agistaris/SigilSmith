@@ -12,14 +12,14 @@ Multi-game support is coming next via an open adapter template (BG3-first today,
 
 ![Overview](docs/01-hero-overview.png)
 ![Profiles](docs/02-explorer-profiles.png)
-![Search](docs/02.5-search-names.png)
-![Sort](docs/02.8_sort_by_name.png)
-![Overrides](docs/03-overrides-mode.png)
-![Smart Ranking](docs/04-smart-ranking.png)
-![Settings](docs/05-settings-menu.png)
-![Mod List Preview](docs/06-modlist-preview.png)
-![Export Menu](docs/06-export-menu.png)
-![Directory Select](docs/07_directory_select.png)
+![Search](docs/03-search-names.png)
+![Sort](docs/04-sort-name.png)
+![Smart Ranking](docs/05-smart-ranking.png)
+![Overrides](docs/06overrides-mode.png)
+![Settings](docs/07-settings-menu.png)
+![Directory Select](docs/08_directory_select.png)
+![Export Mod List](docs/09-export-mod-list.png)
+![Help](docs/10-question-menu.png)
 
 ## Highlights
 

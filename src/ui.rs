@@ -1295,12 +1295,15 @@ fn handle_mods_mode(app: &mut App, key: KeyEvent) -> Result<()> {
         {
             app.enter_mod_filter();
         }
-        (KeyCode::Char('R') | KeyCode::Char('r'), mods)
+        (KeyCode::Char('R'), mods) if mods.contains(KeyModifiers::CONTROL) => {
+            app.prompt_clear_sigillink_pins();
+        }
+        (KeyCode::Char('r'), mods)
             if mods.contains(KeyModifiers::CONTROL) && mods.contains(KeyModifiers::SHIFT) =>
         {
             app.prompt_clear_sigillink_pins();
         }
-        (KeyCode::Char('R') | KeyCode::Char('r'), mods) if mods.contains(KeyModifiers::CONTROL) => {
+        (KeyCode::Char('r'), mods) if mods.contains(KeyModifiers::CONTROL) => {
             app.restore_sigillink_rank_for_selected();
         }
         (KeyCode::Char('/'), _) => app.enter_mod_filter(),
@@ -7338,7 +7341,7 @@ fn row_for_entry(
 
 fn sigillink_link_cell(app: &App, mod_id: &str, theme: &Theme) -> Cell<'static> {
     if app.sigillink_missing_pak(mod_id) {
-        return Cell::from("!".to_string()).style(Style::default().fg(theme.warning));
+        return Cell::from("👻".to_string()).style(Style::default().fg(theme.warning));
     }
     if !app.sigillink_ranking_enabled() {
         return Cell::from(" ".to_string()).style(Style::default().fg(theme.muted));
@@ -8484,7 +8487,7 @@ fn legend_rows_for_focus(focus: Focus) -> Vec<LegendRow> {
                 action: "Manual Pin".to_string(),
             });
             legend.push(LegendRow {
-                key: "!".to_string(),
+                key: "👻".to_string(),
                 action: "Missing Mod File".to_string(),
             });
         }
