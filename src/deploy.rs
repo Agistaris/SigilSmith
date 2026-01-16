@@ -297,6 +297,7 @@ pub struct ModSettingsModule {
 pub struct ModSettingsSnapshot {
     pub modules: Vec<ModSettingsModule>,
     pub order: Vec<String>,
+    pub enabled: HashSet<String>,
 }
 
 pub fn deploy_with_options(
@@ -460,6 +461,7 @@ pub fn read_modsettings_snapshot(path: &Path) -> Result<ModSettingsSnapshot> {
 
     let mut base_uuids = HashSet::new();
     let mut modules = Vec::new();
+    let mut enabled = HashSet::new();
     for node in nodes {
         let uuid = match module_attr(&node, "UUID") {
             Some(uuid) => uuid,
@@ -482,6 +484,12 @@ pub fn read_modsettings_snapshot(path: &Path) -> Result<ModSettingsSnapshot> {
             .or_else(|| module_attr(&node, "CreatedOn"))
             .and_then(|value| metadata::parse_created_at_value(&value));
 
+        let is_enabled = module_attr(&node, "Enabled")
+            .map(|value| value == "1" || value.eq_ignore_ascii_case("true"))
+            .unwrap_or(true);
+        if is_enabled {
+            enabled.insert(uuid.clone());
+        }
         modules.push(ModSettingsModule {
             info: PakInfo {
                 uuid,
@@ -517,7 +525,11 @@ pub fn read_modsettings_snapshot(path: &Path) -> Result<ModSettingsSnapshot> {
         })
         .unwrap_or_default();
 
-    Ok(ModSettingsSnapshot { modules, order })
+    Ok(ModSettingsSnapshot {
+        modules,
+        order,
+        enabled,
+    })
 }
 
 fn update_modsettings(

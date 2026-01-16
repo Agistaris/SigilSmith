@@ -533,6 +533,9 @@ enum SettingsItemKind {
     ActionCopyLogTail,
     ActionCopyLogAll,
     ActionExportLogFile,
+    ProfilesHeader,
+    ActionExportModList,
+    ActionImportModList,
     SigilLinkHeader,
     SigilLinkDebugHeader,
     SigilLinkToggle,
@@ -705,6 +708,24 @@ fn settings_items(app: &App) -> Vec<SettingsItem> {
         SettingsItem {
             label: "Move SigiLink Cache".to_string(),
             kind: SettingsItemKind::ActionMoveSigilLinkCache,
+            checked: None,
+            selectable: true,
+        },
+        SettingsItem {
+            label: "Profiles".to_string(),
+            kind: SettingsItemKind::ProfilesHeader,
+            checked: None,
+            selectable: false,
+        },
+        SettingsItem {
+            label: "Export Mod List".to_string(),
+            kind: SettingsItemKind::ActionExportModList,
+            checked: None,
+            selectable: true,
+        },
+        SettingsItem {
+            label: "Import Mod List".to_string(),
+            kind: SettingsItemKind::ActionImportModList,
             checked: None,
             selectable: true,
         },
@@ -940,6 +961,17 @@ fn handle_settings_menu(app: &mut App, key: KeyEvent) -> Result<()> {
                         app.close_settings_menu();
                         app.prompt_clear_sigillink_pins();
                     }
+                    SettingsItemKind::ActionExportModList => {
+                        let active = app.library.active_profile.clone();
+                        app.request_settings_menu_return();
+                        app.close_settings_menu();
+                        app.enter_export_profile(&active);
+                    }
+                    SettingsItemKind::ActionImportModList => {
+                        app.request_settings_menu_return();
+                        app.close_settings_menu();
+                        app.enter_import_profile();
+                    }
                     SettingsItemKind::ActionSigilLinkSoloRank => {
                         app.request_settings_menu_return();
                         app.close_settings_menu();
@@ -965,6 +997,7 @@ fn handle_settings_menu(app: &mut App, key: KeyEvent) -> Result<()> {
                     }
                     SettingsItemKind::SigilLinkHeader
                     | SettingsItemKind::SigilLinkDebugHeader
+                    | SettingsItemKind::ProfilesHeader
                     | SettingsItemKind::SigilLinkInfo => {}
                 }
             }
@@ -1145,6 +1178,35 @@ fn ignore_repeat_toggle(key: &KeyEvent) -> bool {
 
 fn handle_mods_mode(app: &mut App, key: KeyEvent) -> Result<()> {
     if ignore_repeat_toggle(&key) {
+        return Ok(());
+    }
+    if app.move_mode {
+        match key.code {
+            KeyCode::Char('m') | KeyCode::Char('M') => app.toggle_move_mode(),
+            KeyCode::Char('k')
+            | KeyCode::Char('K')
+            | KeyCode::Up
+            | KeyCode::Char('u')
+            | KeyCode::Char('U') => {
+                if app.mod_filter_active() || !app.mod_sort.is_order_default() {
+                    app.prompt_move_blocked(true);
+                } else {
+                    app.move_selected_up();
+                }
+            }
+            KeyCode::Char('j')
+            | KeyCode::Char('J')
+            | KeyCode::Down
+            | KeyCode::Char('n')
+            | KeyCode::Char('N') => {
+                if app.mod_filter_active() || !app.mod_sort.is_order_default() {
+                    app.prompt_move_blocked(true);
+                } else {
+                    app.move_selected_down();
+                }
+            }
+            _ => {}
+        }
         return Ok(());
     }
     match (key.code, key.modifiers) {
@@ -1366,7 +1428,8 @@ fn handle_browser_mode(app: &mut App, key: KeyEvent, browser: &mut PathBrowser) 
             }
             KeyCode::Char('v') | KeyCode::Char('V')
                 if key.modifiers.contains(KeyModifiers::CONTROL)
-                    && key.modifiers.contains(KeyModifiers::ALT) =>
+                    && (key.modifiers.contains(KeyModifiers::SHIFT)
+                        || key.modifiers.contains(KeyModifiers::ALT)) =>
             {
                 paste_clipboard_into(app, &mut browser.path_input);
                 browser.entries = app.build_path_browser_entries(
@@ -1425,30 +1488,15 @@ fn handle_browser_mode(app: &mut App, key: KeyEvent, browser: &mut PathBrowser) 
                 browser.focus = PathBrowserFocus::PathInput;
                 sync_path_input_for_browser(app, browser);
             }
-            KeyCode::Left | KeyCode::Backspace => {
+            KeyCode::Left
+            | KeyCode::Backspace
+            | KeyCode::Char('\u{7f}')
+            | KeyCode::Char('\u{8}') => {
                 if let Some(parent) = browser.current.parent() {
                     path_browser_set_current(app, browser, parent.to_path_buf());
                 }
             }
-            KeyCode::Char('s') | KeyCode::Char('S') => {
-                if let Some(select) = browser
-                    .entries
-                    .iter()
-                    .find(|entry| entry.kind == PathBrowserEntryKind::Select)
-                {
-                    if select.selectable {
-                        app.apply_path_browser_selection(
-                            &browser.purpose,
-                            select.path.clone(),
-                            None,
-                        )?;
-                        return Ok(true);
-                    }
-                    app.status = invalid_hint.to_string();
-                    app.set_toast(invalid_hint, ToastLevel::Warn, Duration::from_secs(2));
-                }
-            }
-            KeyCode::Enter => {
+            KeyCode::Enter | KeyCode::Char(' ') => {
                 if let Some(entry) = browser.entries.get(browser.selected) {
                     match entry.kind {
                         PathBrowserEntryKind::Select => {
@@ -1921,7 +1969,7 @@ fn draw(frame: &mut Frame<'_>, app: &mut App) {
     let initial_available = header_line_area.width as usize;
     let min_middle = 1usize;
     let min_left = 20usize;
-    let max_status = STATUS_WIDTH as usize;
+    let max_status = 0usize;
     let mut status_width = if initial_available > min_left + min_middle {
         max_status.min(initial_available.saturating_sub(min_left + min_middle))
     } else {
@@ -1930,24 +1978,7 @@ fn draw(frame: &mut Frame<'_>, app: &mut App) {
     if status_width > initial_available {
         status_width = initial_available;
     }
-    let mut status_area = Rect::default();
-    if status_width > 0 && (header_line_area.width as usize) > status_width.saturating_add(1) {
-        let status_x = header_line_area
-            .x
-            .saturating_add(header_line_area.width.saturating_sub(status_width as u16));
-        let status_y = header_line_area.y;
-        status_area = Rect {
-            x: status_x,
-            y: status_y,
-            width: status_width as u16,
-            height: 1,
-        };
-        header_line_area.width = header_line_area
-            .width
-            .saturating_sub(status_width as u16 + 1);
-    } else {
-        status_width = 0;
-    }
+    let status_area = Rect::default();
     let available = header_line_area.width as usize;
     let left_available = available.saturating_sub(status_width);
     let mut left_width = title_text.chars().count().min(left_available);
@@ -2590,6 +2621,7 @@ fn draw(frame: &mut Frame<'_>, app: &mut App) {
     frame.render_widget(overrides, context_chunks[1]);
 
     let log_area = lower_chunks[1];
+    let overrides_focused = app.focus == Focus::Conflicts;
     let log_bg = theme.log_bg;
     let log_block = theme
         .panel("Log")
@@ -2601,10 +2633,40 @@ fn draw(frame: &mut Frame<'_>, app: &mut App) {
         .style(Style::default().bg(log_bg));
     let log_inner = log_block.inner(log_area);
     frame.render_widget(log_block, log_area);
+    let mut status_area = status_badge_area(log_inner, &status_text);
+    let status_band = if status_area.height > 0 {
+        let band_y = log_inner
+            .y
+            .saturating_add(log_inner.height.saturating_sub(status_area.height))
+            .saturating_add(1);
+        let max_y = log_area
+            .y
+            .saturating_add(log_area.height.saturating_sub(status_area.height));
+        let band_y = band_y.min(max_y);
+        status_area.y = band_y;
+        Rect {
+            x: log_inner.x,
+            y: status_area.y,
+            width: log_inner.width,
+            height: status_area.height,
+        }
+    } else {
+        Rect::default()
+    };
+    let log_content = if status_band.height > 0 {
+        Rect {
+            x: log_inner.x,
+            y: log_inner.y,
+            width: log_inner.width,
+            height: status_area.y.saturating_sub(log_inner.y),
+        }
+    } else {
+        log_inner
+    };
     let log_chunks = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([Constraint::Min(10), Constraint::Length(1)])
-        .split(log_inner);
+        .split(log_content);
     let log_total = app.logs.len();
     let log_view = log_chunks[0].height.max(1) as usize;
     let max_scroll = log_total.saturating_sub(log_view);
@@ -2612,11 +2674,13 @@ fn draw(frame: &mut Frame<'_>, app: &mut App) {
         app.log_scroll = max_scroll;
     }
     let log_lines = build_log_lines(app, &theme, log_view);
-    let log = Paragraph::new(log_lines).style(Style::default().fg(theme.text).bg(log_bg));
-    frame.render_widget(log, log_chunks[0]);
+    if log_content.height > 0 {
+        let log = Paragraph::new(log_lines).style(Style::default().fg(theme.text).bg(log_bg));
+        frame.render_widget(log, log_chunks[0]);
+    }
     let scroll = app.log_scroll;
     let log_start = log_total.saturating_sub(log_view + scroll);
-    if log_total > log_view && log_view > 0 {
+    if log_total > log_view && log_view > 0 && log_content.height > 0 {
         let scroll_len = log_total.saturating_sub(log_view).saturating_add(1);
         let mut scroll_state = ScrollbarState::new(scroll_len)
             .position(log_start)
@@ -2631,8 +2695,30 @@ fn draw(frame: &mut Frame<'_>, app: &mut App) {
         frame.render_stateful_widget(scrollbar, log_chunks[1], &mut scroll_state);
     }
 
+    if status_area.width > 0 && status_area.height > 0 {
+        frame.render_widget(
+            Block::default().style(Style::default().bg(theme.header_bg)),
+            status_band,
+        );
+        frame.render_widget(
+            Block::default()
+                .borders(Borders::TOP)
+                .border_style(Style::default().fg(theme.border))
+                .style(Style::default().bg(theme.header_bg)),
+            status_band,
+        );
+        draw_status_panel(
+            frame,
+            app,
+            &theme,
+            status_area,
+            &status_text,
+            status_color,
+            overrides_focused,
+        );
+    }
+
     let status_row = chunks[3];
-    let overrides_focused = app.focus == Focus::Conflicts;
     if status_row.height > 0 && status_row.width > 0 {
         let conflict_area = Rect {
             x: chunks[2].x.saturating_add(SIDE_PANEL_WIDTH),
@@ -2889,6 +2975,34 @@ fn status_color_text(status: &str, theme: &Theme) -> Color {
     theme.accent
 }
 
+fn status_badge_area(area: Rect, status_text: &str) -> Rect {
+    if area.width == 0 || area.height == 0 {
+        return Rect::default();
+    }
+    let text_width = status_text.chars().count() as u16;
+    let desired = text_width.saturating_add(4);
+    let max_width = STATUS_WIDTH.min(area.width);
+    if max_width == 0 {
+        return Rect::default();
+    }
+    let min_width = 18u16;
+    let width = if max_width < min_width {
+        max_width
+    } else {
+        desired.clamp(min_width, max_width)
+    };
+    let height = if area.height >= 3 { 3 } else { area.height };
+    if height == 0 {
+        return Rect::default();
+    }
+    Rect {
+        x: area.x + area.width.saturating_sub(width),
+        y: area.y + area.height.saturating_sub(height),
+        width,
+        height,
+    }
+}
+
 fn draw_status_panel(
     frame: &mut Frame<'_>,
     app: &App,
@@ -2902,15 +3016,8 @@ fn draw_status_panel(
         return;
     }
     let status_bg = theme.header_bg;
-    let use_border = area.height >= 3;
     let status_block = Block::default()
-        .borders(if use_border {
-            Borders::ALL
-        } else {
-            Borders::NONE
-        })
-        .border_type(BorderType::Rounded)
-        .border_style(Style::default().fg(status_color))
+        .borders(Borders::NONE)
         .style(Style::default().bg(status_bg))
         .padding(Padding {
             left: 1,
@@ -2958,7 +3065,12 @@ fn draw_status_panel(
         );
     }
     let status_text = truncate_text(status_text, status_inner.width as usize);
-    let status_widget = Paragraph::new(status_text)
+    let status_lines = if status_inner.height >= 3 {
+        vec![Line::from(""), Line::from(status_text), Line::from("")]
+    } else {
+        vec![Line::from(status_text)]
+    };
+    let status_widget = Paragraph::new(status_lines)
         .style(Style::default().fg(status_color))
         .alignment(Alignment::Center);
     frame.render_widget(status_widget, status_inner);
@@ -4578,7 +4690,7 @@ fn draw_sigillink_missing_queue(frame: &mut Frame<'_>, app: &mut App, theme: &Th
     frame.render_widget(footer_widget, chunks[2]);
 }
 
-fn draw_path_browser(frame: &mut Frame<'_>, _app: &App, theme: &Theme, browser: &PathBrowser) {
+fn draw_path_browser(frame: &mut Frame<'_>, app: &App, theme: &Theme, browser: &PathBrowser) {
     let area = frame.size();
     let width = (area.width.saturating_sub(4)).clamp(46, 86);
     let height = (area.height.saturating_sub(4)).clamp(12, 22);
@@ -4655,12 +4767,18 @@ fn draw_path_browser(frame: &mut Frame<'_>, _app: &App, theme: &Theme, browser: 
         current_label,
         Style::default().fg(theme.muted),
     ));
-    let selectable = browser
-        .entries
-        .iter()
-        .find(|entry| entry.kind == PathBrowserEntryKind::Select)
-        .map(|entry| entry.selectable)
-        .unwrap_or(false);
+    let raw_input = browser.path_input.trim();
+    let selectable_path = match &browser.purpose {
+        PathBrowserPurpose::Setup(_) => browser.current.clone(),
+        _ => expand_tilde(raw_input),
+    };
+    let selectable = if matches!(browser.purpose, PathBrowserPurpose::ImportProfile)
+        && raw_input.trim_start().starts_with('{')
+    {
+        true
+    } else {
+        app.path_browser_selectable(&browser.purpose, &selectable_path)
+    };
     let (valid_label, invalid_label) = match &browser.purpose {
         PathBrowserPurpose::Setup(SetupStep::GameRoot) => (
             " BG3 install root valid ",
@@ -4706,27 +4824,31 @@ fn draw_path_browser(frame: &mut Frame<'_>, _app: &App, theme: &Theme, browser: 
     let header = Paragraph::new(vec![path_line, current_line, status_line, Line::from("")]);
     frame.render_widget(header, chunks[0]);
 
-    let entries: Vec<ListItem> = browser
-        .entries
-        .iter()
-        .map(|entry| {
-            let style = match entry.kind {
-                PathBrowserEntryKind::Select => {
-                    if entry.selectable {
-                        Style::default()
-                            .fg(theme.success)
-                            .add_modifier(Modifier::BOLD)
-                    } else {
-                        Style::default().fg(theme.warning)
-                    }
+    let hide_select = matches!(
+        browser.purpose,
+        PathBrowserPurpose::ImportProfile | PathBrowserPurpose::ExportProfile { .. }
+    );
+    let mut entries: Vec<ListItem> = Vec::new();
+    if hide_select {
+        entries.push(ListItem::new(Line::from("")));
+    }
+    entries.extend(browser.entries.iter().map(|entry| {
+        let style = match entry.kind {
+            PathBrowserEntryKind::Select => {
+                if entry.selectable {
+                    Style::default()
+                        .fg(theme.success)
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(theme.warning)
                 }
-                PathBrowserEntryKind::Parent => Style::default().fg(theme.muted),
-                PathBrowserEntryKind::Dir => Style::default().fg(theme.text),
-                PathBrowserEntryKind::File => Style::default().fg(theme.text),
-            };
-            ListItem::new(Line::from(Span::styled(entry.label.clone(), style)))
-        })
-        .collect();
+            }
+            PathBrowserEntryKind::Parent => Style::default().fg(theme.muted),
+            PathBrowserEntryKind::Dir => Style::default().fg(theme.text),
+            PathBrowserEntryKind::File => Style::default().fg(theme.text),
+        };
+        ListItem::new(Line::from(Span::styled(entry.label.clone(), style)))
+    }));
     let highlight_style = if browser.focus == PathBrowserFocus::List {
         Style::default()
             .bg(theme.accent_soft)
@@ -4748,11 +4870,16 @@ fn draw_path_browser(frame: &mut Frame<'_>, _app: &App, theme: &Theme, browser: 
 
     let mut state = ListState::default();
     let view_height = list_chunks[1].height as usize;
-    let total = browser.entries.len();
+    let list_offset = if hide_select { 1usize } else { 0usize };
+    let total = browser.entries.len().saturating_add(list_offset);
+    let selected = browser
+        .selected
+        .min(browser.entries.len().saturating_sub(1));
+    let display_selected = selected.saturating_add(list_offset);
     let mut offset = 0usize;
     if total > view_height && view_height > 0 {
-        if browser.selected >= view_height {
-            offset = browser.selected + 1 - view_height;
+        if display_selected >= view_height {
+            offset = display_selected + 1 - view_height;
         }
         let max_offset = total.saturating_sub(view_height);
         if offset > max_offset {
@@ -4760,8 +4887,7 @@ fn draw_path_browser(frame: &mut Frame<'_>, _app: &App, theme: &Theme, browser: 
         }
     }
     if total > 0 {
-        let selected = browser.selected.saturating_sub(offset);
-        state.select(Some(selected));
+        state.select(Some(display_selected));
         *state.offset_mut() = offset;
     }
     frame.render_stateful_widget(list, list_chunks[1], &mut state);
@@ -4791,36 +4917,25 @@ fn draw_path_browser(frame: &mut Frame<'_>, _app: &App, theme: &Theme, browser: 
     let spacer = Paragraph::new(Line::from("")).style(Style::default().bg(theme.header_bg));
     frame.render_widget(spacer, chunks[2]);
 
-    let footer_plain =
-        "[Tab] Enter Path  [Enter] Open/Select  [Backspace] Parent  [S] Select  [Esc] Cancel";
-    let footer_widget = if footer_plain.chars().count() > footer_area.width as usize {
-        let footer_line = truncate_text(footer_plain, footer_area.width as usize);
-        Paragraph::new(Line::from(Span::styled(
-            footer_line,
-            Style::default().fg(theme.muted),
-        )))
-        .alignment(Alignment::Center)
-    } else {
-        let key_style = Style::default()
-            .fg(theme.accent)
-            .add_modifier(Modifier::BOLD);
-        let text_style = Style::default().fg(theme.muted);
-        let footer_line = Line::from(vec![
-            Span::styled("[Tab]", key_style),
-            Span::styled(" Enter Path  ", text_style),
-            Span::styled("[Enter]", key_style),
-            Span::styled(" Open/Select  ", text_style),
-            Span::styled("[Backspace]", key_style),
-            Span::styled(" Parent  ", text_style),
-            Span::styled("[S]", key_style),
-            Span::styled(" Select  ", text_style),
-            Span::styled("[Esc]", key_style),
-            Span::styled(" Cancel", text_style),
-        ]);
-        Paragraph::new(footer_line)
-            .style(Style::default().fg(theme.muted))
-            .alignment(Alignment::Center)
-    };
+    let tab_label = if path_focus { "Browse Folder" } else { "Path" };
+    let key_style = Style::default()
+        .fg(theme.accent)
+        .add_modifier(Modifier::BOLD);
+    let text_style = Style::default().fg(theme.muted);
+    let footer_parts = vec![
+        ("[Tab]".to_string(), key_style),
+        (format!(" {tab_label}  "), text_style),
+        ("[Enter/Space]".to_string(), key_style),
+        (" Open/Select  ".to_string(), text_style),
+        ("[Backspace]".to_string(), key_style),
+        (" Parent  ".to_string(), text_style),
+        ("[Esc]".to_string(), key_style),
+        (" Cancel".to_string(), text_style),
+    ];
+    let footer_line = Line::from(truncate_spans(footer_parts, footer_area.width as usize));
+    let footer_widget = Paragraph::new(footer_line)
+        .style(Style::default().fg(theme.muted))
+        .alignment(Alignment::Center);
     frame.render_widget(footer_widget, footer_area);
 }
 
@@ -5618,7 +5733,7 @@ fn build_settings_menu_lines(
     content_width: Option<usize>,
 ) -> Vec<Line<'static>> {
     let mut lines = Vec::new();
-    let muted = Style::default().fg(theme.muted);
+    let _muted = Style::default().fg(theme.muted);
     let header_style = Style::default()
         .fg(theme.accent)
         .add_modifier(Modifier::BOLD);
@@ -5628,17 +5743,8 @@ fn build_settings_menu_lines(
         .split_once(": ")
         .map(|(_, value)| value)
         .unwrap_or(updates_line.as_str());
+    lines.push(Line::from(""));
     lines.push(centered_line("Settings", content_width, header_style));
-    lines.push(centered_line(
-        &format!("Version : {version_value}"),
-        content_width,
-        muted,
-    ));
-    lines.push(centered_line(
-        &format!("Updates : {updates_value}"),
-        content_width,
-        muted,
-    ));
     lines.push(Line::from(""));
 
     let items = settings_items(app);
@@ -5708,13 +5814,21 @@ fn build_settings_menu_lines(
     for (index, item) in items.iter().enumerate() {
         if matches!(
             item.kind,
-            SettingsItemKind::SigilLinkHeader | SettingsItemKind::SigilLinkDebugHeader
+            SettingsItemKind::SigilLinkHeader
+                | SettingsItemKind::SigilLinkDebugHeader
+                | SettingsItemKind::ProfilesHeader
         ) {
             lines.push(Line::from(""));
         }
         if !item.selectable && !matches!(item.kind, SettingsItemKind::SigilLinkInfo) {
             let (label, style) = match item.kind {
                 SettingsItemKind::SigilLinkHeader => (
+                    item.label.to_string(),
+                    Style::default()
+                        .fg(theme.accent)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                SettingsItemKind::ProfilesHeader => (
                     item.label.to_string(),
                     Style::default()
                         .fg(theme.accent)
@@ -5754,6 +5868,8 @@ fn build_settings_menu_lines(
             | SettingsItemKind::ActionClearSigilLinkCaches
             | SettingsItemKind::ActionClearSigilLinkPins
             | SettingsItemKind::ActionSigilLinkSoloRank
+            | SettingsItemKind::ActionExportModList
+            | SettingsItemKind::ActionImportModList
             | SettingsItemKind::ActionCopyLogTail
             | SettingsItemKind::ActionCopyLogAll
             | SettingsItemKind::ActionExportLogFile
@@ -5801,6 +5917,7 @@ fn build_settings_menu_lines(
             }
             SettingsItemKind::SigilLinkHeader
             | SettingsItemKind::SigilLinkDebugHeader
+            | SettingsItemKind::ProfilesHeader
             | SettingsItemKind::SigilLinkInfo => {
                 let (key, value) = item
                     .label
@@ -5855,6 +5972,19 @@ fn build_settings_menu_lines(
             Style::default().fg(theme.muted),
         ),
         theme,
+    ));
+
+    lines.push(Line::from(""));
+    let footer_style = Style::default().fg(theme.accent);
+    lines.push(centered_line(
+        &format!("Updates : {updates_value}"),
+        Some(content_width),
+        footer_style,
+    ));
+    lines.push(centered_line(
+        &format!("Version : {version_value}"),
+        Some(content_width),
+        footer_style,
     ));
 
     lines
@@ -6729,7 +6859,7 @@ fn row_for_entry(
             _ => Style::default().fg(theme.text),
         };
         let native_marker = if mod_entry.is_native() {
-            "  ✓"
+            " ✓ "
         } else {
             "   "
         };
@@ -6842,6 +6972,30 @@ fn truncate_text(value: &str, max_width: usize) -> String {
     let take = max_width.saturating_sub(3);
     let mut out = value.chars().take(take).collect::<String>();
     out.push_str("...");
+    out
+}
+
+fn truncate_spans(parts: Vec<(String, Style)>, max_width: usize) -> Vec<Span<'static>> {
+    if max_width == 0 {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    let mut used = 0usize;
+    for (text, style) in parts {
+        let len = text.chars().count();
+        if used + len <= max_width {
+            out.push(Span::styled(text, style));
+            used += len;
+            continue;
+        }
+        let remaining = max_width.saturating_sub(used);
+        if remaining == 0 {
+            break;
+        }
+        let truncated = truncate_text(&text, remaining);
+        out.push(Span::styled(truncated, style));
+        break;
+    }
     out
 }
 

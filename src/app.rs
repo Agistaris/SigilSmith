@@ -3565,8 +3565,14 @@ impl App {
             .iter()
             .position(|candidate| candidate.mod_id == current_id)
             .unwrap_or(0);
-        let len = conflict.candidates.len() as i32;
-        let next_index = (current_index as i32 + delta).rem_euclid(len) as usize;
+        let len = conflict.candidates.len();
+        let next_index = if delta < 0 {
+            current_index.saturating_sub(1)
+        } else if delta > 0 {
+            (current_index + 1).min(len.saturating_sub(1))
+        } else {
+            current_index
+        };
         let winner_id = conflict.candidates[next_index].mod_id.clone();
         self.schedule_conflict_winner(winner_id);
     }
@@ -3986,6 +3992,7 @@ impl App {
             .into_iter()
             .map(|module| (module.info.uuid.clone(), module))
             .collect();
+        let enabled_set = snapshot.enabled;
         let mut entries = Vec::new();
         let mut seen = HashSet::new();
         for uuid in snapshot.order {
@@ -3993,10 +4000,11 @@ impl App {
                 continue;
             }
             if let Some(module) = modules_by_uuid.remove(&uuid) {
+                let enabled = enabled_set.contains(&uuid);
                 entries.push(ModListEntry {
                     id: uuid,
                     name: module.info.name,
-                    enabled: true,
+                    enabled,
                 });
             } else {
                 warnings.push(format!("Missing module entry for {uuid}"));
@@ -4011,10 +4019,11 @@ impl App {
             if !seen.insert(module.info.uuid.clone()) {
                 continue;
             }
+            let enabled = enabled_set.contains(&module.info.uuid);
             entries.push(ModListEntry {
                 id: module.info.uuid,
                 name: module.info.name,
-                enabled: false,
+                enabled,
             });
         }
         Ok(ModListImport {
@@ -4823,10 +4832,7 @@ impl App {
                 SigilLinkCacheAction::Relocate { .. } => "Select SigiLink Cache Folder",
             },
         };
-        let focus = match &purpose {
-            PathBrowserPurpose::Setup(_) | PathBrowserPurpose::ExportLog => PathBrowserFocus::List,
-            _ => PathBrowserFocus::PathInput,
-        };
+        let focus = PathBrowserFocus::List;
         self.input_mode = InputMode::Browsing(PathBrowser {
             purpose,
             current,
@@ -5050,31 +5056,33 @@ impl App {
         path_input: &str,
     ) -> Vec<PathBrowserEntry> {
         let mut entries = Vec::new();
-        let select_label = match purpose {
+        let show_select = matches!(
+            purpose,
             PathBrowserPurpose::Setup(_)
-            | PathBrowserPurpose::ExportLog
-            | PathBrowserPurpose::SigilLinkCache { .. } => "[ Select this folder ]",
-            PathBrowserPurpose::ImportProfile => "[ Use entered path ]",
-            PathBrowserPurpose::ExportProfile { .. } => "[ Export to entered path ]",
-        };
-        let raw_input = path_input.trim();
-        let selectable_path = match purpose {
-            PathBrowserPurpose::Setup(_) => current.clone(),
-            _ => expand_tilde(raw_input),
-        };
-        let selectable = if matches!(purpose, PathBrowserPurpose::ImportProfile)
-            && raw_input.trim_start().starts_with('{')
-        {
-            true
-        } else {
-            self.path_browser_selectable(purpose, &selectable_path)
-        };
-        entries.push(PathBrowserEntry {
-            label: select_label.to_string(),
-            path: selectable_path,
-            kind: PathBrowserEntryKind::Select,
-            selectable,
-        });
+                | PathBrowserPurpose::ExportLog
+                | PathBrowserPurpose::SigilLinkCache { .. }
+        );
+        if show_select {
+            let select_label = "[ Select this folder ]";
+            let raw_input = path_input.trim();
+            let selectable_path = match purpose {
+                PathBrowserPurpose::Setup(_) => current.clone(),
+                _ => expand_tilde(raw_input),
+            };
+            let selectable = if matches!(purpose, PathBrowserPurpose::ImportProfile)
+                && raw_input.trim_start().starts_with('{')
+            {
+                true
+            } else {
+                self.path_browser_selectable(purpose, &selectable_path)
+            };
+            entries.push(PathBrowserEntry {
+                label: select_label.to_string(),
+                path: selectable_path,
+                kind: PathBrowserEntryKind::Select,
+                selectable,
+            });
+        }
         if let Some(parent) = current.parent() {
             entries.push(PathBrowserEntry {
                 label: "..".to_string(),
@@ -12581,7 +12589,7 @@ fn collect_metadata_updates(
 
 fn modsettings_fingerprint(snapshot: &deploy::ModSettingsSnapshot) -> String {
     let mut hasher = Hasher::new();
-    hasher.update(b"modsettings-v1");
+    hasher.update(b"modsettings-v2");
     let mut module_ids: Vec<&str> = snapshot
         .modules
         .iter()
@@ -12589,6 +12597,12 @@ fn modsettings_fingerprint(snapshot: &deploy::ModSettingsSnapshot) -> String {
         .collect();
     module_ids.sort();
     for id in module_ids {
+        hasher.update(id.as_bytes());
+    }
+    let mut enabled_ids: Vec<&str> = snapshot.enabled.iter().map(|id| id.as_str()).collect();
+    enabled_ids.sort();
+    hasher.update(b"|enabled|");
+    for id in enabled_ids {
         hasher.update(id.as_bytes());
     }
     hasher.update(b"|order|");
@@ -12611,11 +12625,16 @@ fn sync_native_mods_delta(
 
     let snapshot = deploy::read_modsettings_snapshot(&paths.modsettings_path)
         .map_err(|err| err.to_string())?;
-    let deploy::ModSettingsSnapshot { modules, order } = snapshot;
+    let deploy::ModSettingsSnapshot {
+        modules,
+        order,
+        enabled,
+    } = snapshot;
     let modsettings_hash = if modsettings_exists {
         Some(modsettings_fingerprint(&deploy::ModSettingsSnapshot {
             modules: modules.clone(),
             order: order.clone(),
+            enabled: enabled.clone(),
         }))
     } else {
         None
@@ -12625,7 +12644,9 @@ fn sync_native_mods_delta(
         .map(|module| module.info.uuid.clone())
         .collect();
     let order_set: HashSet<String> = order.iter().cloned().collect();
-    let enabled_set: HashSet<String> = if order.is_empty() {
+    let enabled_set: HashSet<String> = if !enabled.is_empty() {
+        enabled
+    } else if order.is_empty() {
         modules_set.clone()
     } else {
         order_set

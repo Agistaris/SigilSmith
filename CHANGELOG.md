@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.8.1
+
+- Update path browser UX (list-first focus, Enter/Space select, dynamic tab label, better paste handling).
+- Respect Enabled flags in modsettings imports and native sync.
+- Move the status badge into the log footer with a subtle separator.
+
 ## 0.8.0
 
 - Adjust mod stack spacing and header status layout polish.
