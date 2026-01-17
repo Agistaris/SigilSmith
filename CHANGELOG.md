@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.9.1
+
+- Update license to SigilSmith Community License v1.0 (non-commercial; no redistribution/hosting).
+
 ## 0.9.0
 
 - Refresh release docs and screenshots for the 0.9.0 rollout.

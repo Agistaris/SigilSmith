@@ -1,13 +1,30 @@
-SigilSmith License (Permission Required)
+SigilSmith Community License v1.0
 
 Copyright (c) 2025 Agistaris. All rights reserved.
 
-This software and its source code are made available for viewing and evaluation
-only. No license is granted to use, copy, modify, merge, publish, distribute,
-sublicense, or sell this software or derivative works, in whole or in part,
-without prior written permission from the copyright holder.
+Permission Grant (Non-Commercial, No Redistribution)
+Subject to the terms below, you are granted a non-exclusive, non-transferable,
+revocable license to use, copy, and modify the Software for your personal or
+internal, non-commercial use.
 
-For licensing inquiries, contact the copyright holder.
+Restrictions
+1. No Redistribution. You may not distribute, publish, or otherwise make the
+   Software or any Modified Version available to any third party, in source or
+   binary form, whether publicly or privately, without prior written permission.
+2. No Commercial Use. You may not sell, license, sublicense, rent, lease, or
+   otherwise commercialize the Software or any Modified Version, nor use it to
+   provide a hosted service, SaaS, API, or other service to third parties,
+   whether for a fee or for free.
+3. No Removal of Notices. You may not remove or alter this license, copyright
+   notices, or attribution notices in the Software.
+
+Definitions
+"Software" means the SigilSmith source code and binaries.
+"Modified Version" means any derivative work or modification of the Software.
+
+Permissions
+For commercial use, redistribution rights, or other permissions, contact the
+copyright holder.
 
 Third-party components are subject to their own licenses.
 

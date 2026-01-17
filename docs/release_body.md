@@ -55,7 +55,8 @@ Every release includes SHA256SUMS.txt.
 - Bin overrides deploy to BG3/bin when applicable.
 - If paths are not detected: press Esc -> Configure game paths (browser opens).
   Use arrows to navigate, Enter to open/select, Backspace to go up, Tab to edit the path directly, S to select current folder.
-- Full source is available on GitHub with a permission-required, source-available license.
+- Full source is available on GitHub under the SigilSmith Community License v1.0
+  (non-commercial use only; no redistribution or hosted services without permission).
 
 ## Roadmap
 

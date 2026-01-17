@@ -193,10 +193,11 @@ Support links (Ko-fi + GitHub Sponsors) are coming next update.
 
 ## License & Trademarks
 
-SigilSmith is source-available and permission is required to use, copy, modify, or
-distribute it, including for any commercial or paid use. Contact Agistaris for
-licensing. The SigilSmith name and logo are trademarks of Agistaris; see
-`TRADEMARKS.md` for details.
+SigilSmith is source-available under the SigilSmith Community License v1.0. You
+may use and modify it for personal or internal, non-commercial use, but you may
+not redistribute modified copies or offer hosted/commercial services without
+permission. Contact Agistaris for licensing. The SigilSmith name and logo are
+trademarks of Agistaris; see `TRADEMARKS.md` for details.
 
 ## Library Location
 
