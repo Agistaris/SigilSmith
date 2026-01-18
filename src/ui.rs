@@ -163,6 +163,7 @@ fn run_loop(terminal: &mut Terminal<impl Backend>, app: &mut App) -> Result<()> 
         }
         app.poll_imports();
         app.poll_metadata_refresh();
+        app.poll_missing_pak_scan();
         app.poll_smart_rank();
         app.poll_updates();
         app.clamp_selection();
@@ -7664,9 +7665,18 @@ fn build_details(app: &App, theme: &Theme, width: usize, height: usize) -> Vec<L
         }
     }
     if mod_entry.is_native() {
+        let is_modio = mod_entry.targets.iter().any(|target| match target {
+            InstallTarget::Pak { info, .. } => info.publish_handle.is_some(),
+            _ => false,
+        });
+        let source_value = if is_modio {
+            "Native (mod.io)"
+        } else {
+            "Native (Larian Mods)"
+        };
         rows.push(KvRow {
             label: "Source".to_string(),
-            value: "Native (mod.io)".to_string(),
+            value: source_value.to_string(),
             label_style,
             value_style: Style::default().fg(theme.accent),
         });

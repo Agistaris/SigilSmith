@@ -56,10 +56,17 @@ pub enum ExportKind {
 pub enum InputPurpose {
     ImportPath,
     CreateProfile,
-    RenameProfile { original: String },
-    DuplicateProfile { source: String },
+    RenameProfile {
+        original: String,
+    },
+    DuplicateProfile {
+        source: String,
+    },
     #[allow(dead_code)]
-    ExportProfile { profile: String, kind: ExportKind },
+    ExportProfile {
+        profile: String,
+        kind: ExportKind,
+    },
     #[allow(dead_code)]
     ImportProfile,
     FilterMods,
@@ -387,6 +394,7 @@ enum ImportMessage {
         path: PathBuf,
         error: String,
     },
+    ApplyCompleted(ImportApplyOutcome),
 }
 
 enum DeployMessage {
@@ -403,6 +411,13 @@ struct MetadataUpdate {
     dependencies: Vec<String>,
 }
 
+struct ImportApplyOutcome {
+    source: importer::ImportSource,
+    applied: Vec<ModEntry>,
+    failures: Vec<importer::ImportFailure>,
+    warnings: Vec<String>,
+}
+
 enum MetadataMessage {
     Progress {
         update: MetadataUpdate,
@@ -413,6 +428,10 @@ enum MetadataMessage {
     Failed {
         error: String,
     },
+}
+
+enum MissingPakMessage {
+    Completed(Vec<SigilLinkMissingItem>),
 }
 
 enum ConflictMessage {
@@ -691,6 +710,10 @@ pub struct App {
     metadata_total: usize,
     metadata_processed_ids: HashSet<String>,
     metadata_dirty: bool,
+    missing_pak_tx: Sender<MissingPakMessage>,
+    missing_pak_rx: Receiver<MissingPakMessage>,
+    missing_pak_active: bool,
+    missing_pak_pending: bool,
     update_tx: Sender<UpdateMessage>,
     update_rx: Receiver<UpdateMessage>,
     update_active: bool,
@@ -703,6 +726,7 @@ pub struct App {
     hotkey_fade_until: Option<Instant>,
     import_queue: VecDeque<PathBuf>,
     import_active: Option<PathBuf>,
+    import_apply_active: bool,
     import_tx: Sender<ImportMessage>,
     import_rx: Receiver<ImportMessage>,
     import_batches: VecDeque<importer::ImportBatch>,
@@ -1057,6 +1081,7 @@ impl App {
         let (smart_rank_tx, smart_rank_rx) = mpsc::channel();
         let (native_sync_tx, native_sync_rx) = mpsc::channel();
         let (metadata_tx, metadata_rx) = mpsc::channel();
+        let (missing_pak_tx, missing_pak_rx) = mpsc::channel();
         let (update_tx, update_rx) = mpsc::channel();
         let log_path = config.data_dir.join("sigilsmith.log");
 
@@ -1145,6 +1170,10 @@ impl App {
             metadata_total: 0,
             metadata_processed_ids: HashSet::new(),
             metadata_dirty: false,
+            missing_pak_tx,
+            missing_pak_rx,
+            missing_pak_active: false,
+            missing_pak_pending: matches!(mode, StartupMode::Ui),
             update_tx,
             update_rx,
             update_active: false,
@@ -1157,6 +1186,7 @@ impl App {
             hotkey_fade_until: None,
             import_queue: VecDeque::new(),
             import_active: None,
+            import_apply_active: false,
             import_tx,
             import_rx,
             import_batches: VecDeque::new(),
@@ -1234,7 +1264,9 @@ impl App {
         if matches!(mode, StartupMode::Cli) {
             app.finish_startup();
         }
-        app.refresh_sigillink_missing_paks();
+        if !matches!(mode, StartupMode::Ui) {
+            app.refresh_sigillink_missing_paks();
+        }
         Ok(app)
     }
 
@@ -2890,6 +2922,7 @@ Use Ctrl+R to reset this mod or F12 to reset all pins."
         self.startup_pending
             || self.native_sync_active
             || self.import_active.is_some()
+            || self.import_apply_active
             || self.deploy_active
             || self.deploy_pending
             || self.conflict_active
@@ -3139,7 +3172,11 @@ Use Ctrl+R to reset this mod or F12 to reset all pins."
             return Ok(());
         }
 
-        if self.import_active.is_some() || self.deploy_active || self.deploy_pending {
+        if self.import_active.is_some()
+            || self.import_apply_active
+            || self.deploy_active
+            || self.deploy_pending
+        {
             self.status = "Game switch blocked: active tasks".to_string();
             self.log_warn("Game switch blocked: active tasks".to_string());
             return Ok(());
@@ -4830,6 +4867,8 @@ Use Ctrl+R to reset this mod or F12 to reset all pins."
                 }
             }
         }
+
+        self.maybe_start_missing_pak_scan();
     }
 
     fn maybe_return_to_settings_menu(&mut self) {
@@ -4873,6 +4912,7 @@ Use Ctrl+R to reset this mod or F12 to reset all pins."
             || self.paths_overlay_open
             || self.import_summary_pending
             || self.import_active.is_some()
+            || self.import_apply_active
             || !self.import_batches.is_empty()
             || !self.import_queue.is_empty()
             || self.pending_duplicate.is_some()
@@ -4920,6 +4960,7 @@ Use Ctrl+R to reset this mod or F12 to reset all pins."
             || self.paths_overlay_open
             || self.import_summary_pending
             || self.import_active.is_some()
+            || self.import_apply_active
             || !self.import_batches.is_empty()
             || !self.import_queue.is_empty()
             || self.pending_duplicate.is_some()
@@ -4956,6 +4997,7 @@ Use Ctrl+R to reset this mod or F12 to reset all pins."
             || self.paths_overlay_open
             || self.import_summary_pending
             || self.import_active.is_some()
+            || self.import_apply_active
             || !self.import_batches.is_empty()
             || !self.import_queue.is_empty()
             || self.pending_duplicate.is_some()
@@ -5017,7 +5059,7 @@ Use Ctrl+R to reset this mod or F12 to reset all pins."
     }
 
     pub fn import_overlay_active(&self) -> bool {
-        self.import_active.is_some() || self.import_progress.is_some()
+        self.import_active.is_some() || self.import_apply_active || self.import_progress.is_some()
     }
 
     pub fn import_progress(&self) -> Option<&importer::ImportProgress> {
@@ -6264,6 +6306,15 @@ Use Ctrl+R to reset this mod or F12 to reset all pins."
                 );
                 return true;
             }
+            if self.import_apply_active {
+                self.status = format!("Import applying: {action} blocked");
+                self.set_toast(
+                    "Import finalizing - please wait",
+                    ToastLevel::Warn,
+                    Duration::from_secs(2),
+                );
+                return true;
+            }
             return false;
         }
         self.status = format!("Startup sync running: {action} blocked");
@@ -6296,6 +6347,9 @@ Use Ctrl+R to reset this mod or F12 to reset all pins."
                 return true;
             }
             if self.import_active.is_some() {
+                return true;
+            }
+            if self.import_apply_active {
                 return true;
             }
             return false;
@@ -6682,23 +6736,50 @@ Use Ctrl+R to reset this mod or F12 to reset all pins."
                 }
 
                 if !approved.is_empty() {
-                    match self.apply_mod_entries(approved) {
-                        Ok(count) => {
-                            path_imported = path_imported.saturating_add(count);
-                        }
-                        Err(err) => {
-                            failures.push(importer::ImportFailure {
-                                source: batch.source.clone(),
-                                error: err.to_string(),
-                            });
-                            if options.verbosity != CliVerbosity::Quiet {
-                                eprintln!(
-                                    "Import apply failed: {} ({})",
-                                    batch.source.label,
-                                    summarize_error(&err.to_string())
-                                );
+                    let outcome = run_import_apply_io(
+                        approved,
+                        batch.source.clone(),
+                        self.config.sigillink_cache_root(),
+                        None,
+                    );
+                    let ImportApplyOutcome {
+                        applied,
+                        failures: outcome_failures,
+                        warnings,
+                        ..
+                    } = outcome;
+                    for warning in warnings {
+                        self.log_warn(warning);
+                    }
+                    if !applied.is_empty() {
+                        match self.apply_imported_mod_entries(applied) {
+                            Ok(count) => {
+                                path_imported = path_imported.saturating_add(count);
+                            }
+                            Err(err) => {
+                                failures.push(importer::ImportFailure {
+                                    source: batch.source.clone(),
+                                    error: err.to_string(),
+                                });
+                                if options.verbosity != CliVerbosity::Quiet {
+                                    eprintln!(
+                                        "Import apply failed: {} ({})",
+                                        batch.source.label,
+                                        summarize_error(&err.to_string())
+                                    );
+                                }
                             }
                         }
+                    }
+                    if !outcome_failures.is_empty() {
+                        if options.verbosity != CliVerbosity::Quiet {
+                            let first = outcome_failures
+                                .first()
+                                .map(|failure| summarize_error(&failure.error))
+                                .unwrap_or_else(|| "unknown error".to_string());
+                            eprintln!("Import apply failed: {} ({first})", batch.source.label);
+                        }
+                        failures.extend(outcome_failures);
                     }
                 }
             }
@@ -6799,7 +6880,7 @@ Use Ctrl+R to reset this mod or F12 to reset all pins."
 
         // Manual dependency handling: no background download watching.
 
-        if self.import_active.is_none() {
+        if self.import_active.is_none() && !self.import_apply_active {
             self.process_next_import_batch();
             self.start_next_import();
             self.resume_pending_import_batch();
@@ -6812,6 +6893,7 @@ Use Ctrl+R to reset this mod or F12 to reset all pins."
 
         if self.dependency_queue.is_none()
             && self.import_active.is_none()
+            && !self.import_apply_active
             && self.import_queue.is_empty()
             && self.import_batches.is_empty()
             && self.pending_duplicate.is_none()
@@ -7342,6 +7424,34 @@ Use Ctrl+R to reset this mod or F12 to reset all pins."
         }
     }
 
+    pub fn poll_missing_pak_scan(&mut self) {
+        loop {
+            match self.missing_pak_rx.try_recv() {
+                Ok(message) => {
+                    self.missing_pak_active = false;
+                    match message {
+                        MissingPakMessage::Completed(items) => {
+                            let missing: HashSet<String> =
+                                items.iter().map(|item| item.mod_id.clone()).collect();
+                            self.sigillink_missing_paks = missing.clone();
+                            self.sigillink_missing_paks_ignored
+                                .retain(|id| missing.contains(id));
+                            self.log_info(format!(
+                                "Missing .pak scan complete: {} mod(s) missing",
+                                missing.len()
+                            ));
+                        }
+                    }
+                }
+                Err(TryRecvError::Empty) => break,
+                Err(TryRecvError::Disconnected) => {
+                    self.missing_pak_active = false;
+                    break;
+                }
+            }
+        }
+    }
+
     pub fn poll_updates(&mut self) {
         loop {
             match self.update_rx.try_recv() {
@@ -7556,6 +7666,9 @@ Use Ctrl+R to reset this mod or F12 to reset all pins."
         if self.import_active.is_some() {
             return;
         }
+        if self.import_apply_active {
+            return;
+        }
         if self.dependency_queue.is_some() {
             return;
         }
@@ -7593,6 +7706,31 @@ Use Ctrl+R to reset this mod or F12 to reset all pins."
                 },
             };
             let _ = tx.send(message);
+        });
+    }
+
+    fn start_import_apply(
+        &mut self,
+        mods: Vec<importer::ImportMod>,
+        source: importer::ImportSource,
+    ) {
+        if mods.is_empty() {
+            self.process_next_import_batch();
+            return;
+        }
+        if self.import_apply_active {
+            return;
+        }
+        self.import_apply_active = true;
+        self.import_progress = None;
+        self.status = format!("Applying import from {}", source.label);
+        self.log_info(format!("Import apply started: {}", source.label));
+
+        let tx = self.import_tx.clone();
+        let cache_root = self.config.sigillink_cache_root();
+        thread::spawn(move || {
+            let outcome = run_import_apply_io(mods, source, cache_root, Some(tx.clone()));
+            let _ = tx.send(ImportMessage::ApplyCompleted(outcome));
         });
     }
 
@@ -7647,7 +7785,78 @@ Use Ctrl+R to reset this mod or F12 to reset all pins."
                 self.import_summary_pending = true;
                 self.maybe_show_import_summary();
             }
+            ImportMessage::ApplyCompleted(outcome) => {
+                self.import_apply_active = false;
+                self.import_progress = None;
+                self.handle_import_apply_outcome(outcome);
+            }
         }
+    }
+
+    fn handle_import_apply_outcome(&mut self, outcome: ImportApplyOutcome) {
+        let ImportApplyOutcome {
+            source,
+            applied,
+            failures,
+            warnings,
+        } = outcome;
+
+        for warning in warnings {
+            self.log_warn(warning);
+        }
+
+        let mut applied_count = 0usize;
+        if !applied.is_empty() {
+            match self.apply_imported_mod_entries(applied) {
+                Ok(count) => {
+                    applied_count = count;
+                    self.status = format!("Imported {count} mod(s)");
+                    self.log_info(format!(
+                        "Import complete: {count} mod(s) from {}",
+                        source.label
+                    ));
+                }
+                Err(err) => {
+                    let display = source.label.clone();
+                    let reason = summarize_error(&err.to_string());
+                    self.status = format!("Import failed: {display} ({reason})");
+                    self.log_error(format!("Import apply failed for {}: {err}", source.label));
+                    self.set_toast(
+                        &format!("Import failed: {display} ({reason})"),
+                        ToastLevel::Error,
+                        Duration::from_secs(4),
+                    );
+                    self.import_failures.push(importer::ImportFailure {
+                        source: source.clone(),
+                        error: err.to_string(),
+                    });
+                    self.import_summary_pending = true;
+                }
+            }
+        }
+
+        if !failures.is_empty() {
+            let failure_count = failures.len();
+            let first = failures
+                .first()
+                .map(|failure| summarize_error(&failure.error))
+                .unwrap_or_else(|| "unknown error".to_string());
+            if applied_count == 0 {
+                self.status = format!("Import failed: {first}");
+                self.log_error(format!("Import apply failed for {}: {first}", source.label));
+                self.set_toast(
+                    &format!("Import failed: {first}"),
+                    ToastLevel::Error,
+                    Duration::from_secs(4),
+                );
+            } else {
+                self.log_warn(format!("Import completed with {failure_count} failure(s)"));
+            }
+            self.import_failures.extend(failures);
+            self.import_summary_pending = true;
+        }
+
+        self.process_next_import_batch();
     }
 
     fn stage_imports(&mut self, mods: Vec<importer::ImportMod>, source: &importer::ImportSource) {
@@ -7700,37 +7909,12 @@ Use Ctrl+R to reset this mod or F12 to reset all pins."
             return;
         }
 
-        match self.apply_mod_entries(approved) {
-            Ok(count) => {
-                self.status = format!("Imported {} mod(s)", count);
-                self.log_info(format!(
-                    "Import complete: {} mod(s) from {}",
-                    count, source.label
-                ));
-                self.process_next_import_batch();
-            }
-            Err(err) => {
-                let display = source.label.clone();
-                let reason = summarize_error(&err.to_string());
-                self.status = format!("Import failed: {display} ({reason})");
-                self.log_error(format!("Import apply failed for {}: {err}", source.label));
-                self.set_toast(
-                    &format!("Import failed: {display} ({reason})"),
-                    ToastLevel::Error,
-                    Duration::from_secs(4),
-                );
-                self.import_failures.push(importer::ImportFailure {
-                    source: source.clone(),
-                    error: err.to_string(),
-                });
-                self.import_summary_pending = true;
-                self.process_next_import_batch();
-            }
-        }
+        self.start_import_apply(approved, source.clone());
     }
 
     fn process_next_import_batch(&mut self) {
         if self.import_active.is_some()
+            || self.import_apply_active
             || self.dependency_queue.is_some()
             || self.dialog.is_some()
             || self.pending_duplicate.is_some()
@@ -7849,6 +8033,13 @@ Use Ctrl+R to reset this mod or F12 to reset all pins."
                                         native_pak::resolve_native_pak_path(info, index)
                                     {
                                         pak_path = resolved;
+                                    } else if let Some(resolved) =
+                                        native_pak::resolve_native_pak_path_by_uuid(
+                                            &mod_entry.id,
+                                            index,
+                                        )
+                                    {
+                                        pak_path = resolved;
                                     }
                                 }
                             }
@@ -7865,6 +8056,10 @@ Use Ctrl+R to reset this mod or F12 to reset all pins."
                         }
                     }) {
                         if let Some(resolved) = native_pak::resolve_native_pak_path(info, &index) {
+                            pak_path = resolved;
+                        } else if let Some(resolved) =
+                            native_pak::resolve_native_pak_path_by_uuid(&mod_entry.id, &index)
+                        {
                             pak_path = resolved;
                         }
                     }
@@ -8749,6 +8944,7 @@ Use Ctrl+R to reset this mod or F12 to reset all pins."
         self.startup_pending = false;
         self.native_sync_active = false;
         self.import_active = None;
+        self.import_apply_active = false;
         self.deploy_active = false;
         self.deploy_pending = false;
         self.conflict_active = false;
@@ -9006,13 +9202,31 @@ Use Ctrl+R to reset this mod or F12 to reset all pins."
                 continue;
             }
             for batch in result.batches {
-                let count = match self.apply_mod_entries(batch.mods) {
+                let outcome = run_import_apply_io(
+                    batch.mods,
+                    batch.source.clone(),
+                    self.config.sigillink_cache_root(),
+                    None,
+                );
+                let ImportApplyOutcome {
+                    applied,
+                    failures,
+                    warnings,
+                    ..
+                } = outcome;
+                for warning in warnings {
+                    lines.push(format!("  warning: {warning}"));
+                }
+                let count = match self.apply_imported_mod_entries(applied) {
                     Ok(count) => count,
                     Err(err) => {
                         lines.push(format!("  apply failed: {err}"));
                         0
                     }
                 };
+                if !failures.is_empty() {
+                    lines.push(format!("  apply failures: {}", failures.len()));
+                }
                 lines.push(format!("  applied mods: {count}"));
                 run_scans(self, "post-import", &mut lines);
             }
@@ -9103,31 +9317,23 @@ Use Ctrl+R to reset this mod or F12 to reset all pins."
     }
 
     fn update_dependency_cache_for_entries(&mut self, entries: &[ModEntry]) {
-        let mut changed = false;
         for mod_entry in entries {
-            let deps = self.collect_mod_dependencies(mod_entry);
-            self.dependency_cache.insert(mod_entry.id.clone(), deps);
+            let mut deps = mod_entry.dependencies.clone();
+            deps.sort();
+            deps.dedup();
+            deps.retain(|dep| !dep.eq_ignore_ascii_case(&mod_entry.id));
+            filter_ignored_dependencies(&mut deps);
+            self.dependency_cache.insert(mod_entry.id.clone(), deps.clone());
             if let Some(entry) = self
                 .library
                 .mods
                 .iter_mut()
                 .find(|entry| entry.id == mod_entry.id)
             {
-                let deps = self
-                    .dependency_cache
-                    .get(&mod_entry.id)
-                    .cloned()
-                    .unwrap_or_default();
                 if entry.dependencies != deps {
                     entry.dependencies = deps;
-                    changed = true;
                 }
             }
-        }
-        if changed {
-            self.library.metadata_cache_key = Some(self.metadata_cache_key());
-            self.library.metadata_cache_version = METADATA_CACHE_VERSION;
-            let _ = self.library.save(&self.config.data_dir);
         }
     }
 
@@ -9153,6 +9359,7 @@ Use Ctrl+R to reset this mod or F12 to reset all pins."
             return;
         };
         if self.import_active.is_some()
+            || self.import_apply_active
             || !self.import_queue.is_empty()
             || !self.import_batches.is_empty()
             || self.pending_duplicate.is_some()
@@ -9206,6 +9413,7 @@ Use Ctrl+R to reset this mod or F12 to reset all pins."
             return;
         }
         if self.import_active.is_some()
+            || self.import_apply_active
             || !self.import_batches.is_empty()
             || !self.import_queue.is_empty()
             || self.pending_duplicate.is_some()
@@ -9249,7 +9457,7 @@ Use Ctrl+R to reset this mod or F12 to reset all pins."
         });
     }
 
-    fn apply_mod_entries(&mut self, mods: Vec<importer::ImportMod>) -> Result<usize> {
+    fn apply_imported_mod_entries(&mut self, mods: Vec<ModEntry>) -> Result<usize> {
         let count = mods.len();
         if count == 0 {
             return Ok(0);
@@ -9263,14 +9471,7 @@ Use Ctrl+R to reset this mod or F12 to reset all pins."
 
         let mut added = Vec::new();
         let mut added_ids = Vec::new();
-        for import_mod in mods {
-            let mod_entry = match self.finalize_import_mod(&import_mod) {
-                Ok(entry) => entry,
-                Err(err) => {
-                    self.cleanup_import_staging(&import_mod);
-                    return Err(err);
-                }
-            };
+        for mod_entry in mods {
             self.library.mods.retain(|entry| entry.id != mod_entry.id);
             self.library.mods.push(mod_entry.clone());
             added_ids.push(mod_entry.id.clone());
@@ -9290,9 +9491,6 @@ Use Ctrl+R to reset this mod or F12 to reset all pins."
                 }
             }
         }
-        if self.allow_persistence() {
-            self.library.save(&self.config.data_dir)?;
-        }
         self.update_dependency_cache_for_entries(&added);
         self.library.metadata_cache_key = Some(self.metadata_cache_key());
         self.library.metadata_cache_version = METADATA_CACHE_VERSION;
@@ -9307,21 +9505,28 @@ Use Ctrl+R to reset this mod or F12 to reset all pins."
             self.sigillink_onboarding_pending = true;
         }
         self.request_sigillink_auto_rank();
-        self.refresh_sigillink_missing_paks();
+        self.missing_pak_pending = true;
         Ok(count)
     }
 
-    fn finalize_import_mod(&mut self, import_mod: &importer::ImportMod) -> Result<ModEntry> {
+    fn cleanup_import_staging(&mut self, import_mod: &importer::ImportMod) {
+        import_mod.cleanup_staging();
+    }
+
+    fn finalize_import_mod_io(
+        import_mod: &importer::ImportMod,
+        mods_root: &Path,
+        cache_root: &Path,
+    ) -> Result<(ModEntry, Vec<String>)> {
         let mod_entry = import_mod.entry.clone();
         if let Some(staging_root) = &import_mod.staging_root {
             if !staging_root.exists() {
                 return Err(anyhow::anyhow!("import staging missing"));
             }
-            let mods_root = library_mod_root(&self.config.sigillink_cache_root());
-            fs::create_dir_all(&mods_root).context("create mod library root")?;
+            fs::create_dir_all(mods_root).context("create mod library root")?;
             let final_root = mods_root.join(&mod_entry.id);
             if final_root.exists() {
-                if !path_within_root(&final_root, &mods_root) {
+                if !path_within_root(&final_root, mods_root) {
                     return Err(anyhow::anyhow!("import finalize outside managed mods dir"));
                 }
                 fs::remove_dir_all(&final_root)
@@ -9331,26 +9536,19 @@ Use Ctrl+R to reset this mod or F12 to reset all pins."
                 .with_context(|| format!("finalize import {:?}", staging_root))?;
         }
 
+        let mut warnings = Vec::new();
         if let Some(index) = &import_mod.sigillink {
-            if let Err(err) = sigillink::write_sigillink_index(
-                &self.config.sigillink_cache_root(),
-                &mod_entry.id,
-                index,
-            ) {
-                self.log_warn(format!(
+            if let Err(err) = sigillink::write_sigillink_index(cache_root, &mod_entry.id, index) {
+                warnings.push(format!(
                     "SigiLink cache write failed for {}: {err}",
                     mod_entry.display_name()
                 ));
             }
         } else {
-            sigillink::remove_sigillink_index(&self.config.sigillink_cache_root(), &mod_entry.id);
+            sigillink::remove_sigillink_index(cache_root, &mod_entry.id);
         }
 
-        Ok(mod_entry)
-    }
-
-    fn cleanup_import_staging(&mut self, import_mod: &importer::ImportMod) {
-        import_mod.cleanup_staging();
+        Ok((mod_entry, warnings))
     }
 
     fn prompt_next_duplicate(&mut self) {
@@ -9376,31 +9574,13 @@ Use Ctrl+R to reset this mod or F12 to reset all pins."
                 return;
             }
 
-            match self.apply_mod_entries(approved) {
-                Ok(count) => {
-                    self.status = format!("Imported {} mod(s)", count);
-                    self.log_info(format!("Import complete: {count} mod(s)"));
-                }
-                Err(err) => {
-                    let reason = summarize_error(&err.to_string());
-                    self.status = format!("Import failed: {reason}");
-                    self.log_error(format!("Import apply failed: {err}"));
-                    self.set_toast(
-                        &format!("Import failed: {reason}"),
-                        ToastLevel::Error,
-                        Duration::from_secs(4),
-                    );
-                    self.import_failures.push(importer::ImportFailure {
-                        source: importer::ImportSource {
-                            label: "Import batch".to_string(),
-                        },
-                        error: err.to_string(),
-                    });
-                    self.import_summary_pending = true;
-                }
-            }
+            self.start_import_apply(
+                approved,
+                importer::ImportSource {
+                    label: "Import batch".to_string(),
+                },
+            );
             self.duplicate_apply_all = None;
-            self.process_next_import_batch();
             return;
         };
 
@@ -10455,7 +10635,11 @@ Use Ctrl+R to reset this mod or F12 to reset all pins."
     }
 
     pub fn rollback_last_backup(&mut self) -> Result<()> {
-        if self.import_active.is_some() || self.deploy_active || self.deploy_pending {
+        if self.import_active.is_some()
+            || self.import_apply_active
+            || self.deploy_active
+            || self.deploy_pending
+        {
             self.status = "Rollback blocked: active tasks".to_string();
             self.log_warn("Rollback blocked: active tasks".to_string());
             self.set_toast(
@@ -10778,42 +10962,46 @@ Use Ctrl+R to reset this mod or F12 to reset all pins."
         changed
     }
 
-    fn sigillink_missing_pak_for_mod(
-        &self,
+    fn sigillink_missing_pak_for_mod_with(
         mod_entry: &ModEntry,
+        cache_root: &PathBuf,
         paths: Option<&crate::bg3::GamePaths>,
         native_index: Option<&[native_pak::NativePakEntry]>,
     ) -> bool {
         if !mod_entry.has_target_kind(TargetKind::Pak) {
             return false;
         }
-        resolve_pak_paths(
-            mod_entry,
-            &self.config.sigillink_cache_root(),
-            paths,
-            native_index,
-        )
-        .is_empty()
+        resolve_pak_paths(mod_entry, cache_root, paths, native_index).is_empty()
     }
 
     fn collect_sigillink_missing_items(&self, ids: &[String]) -> Vec<SigilLinkMissingItem> {
-        let paths = game::detect_paths(
-            self.game_id,
-            Some(&self.config.game_root),
-            Some(&self.config.larian_dir),
-        )
-        .ok();
+        Self::collect_sigillink_missing_items_for(&self.library, self.game_id, &self.config, ids)
+    }
+
+    fn collect_sigillink_missing_items_for(
+        library: &Library,
+        game_id: GameId,
+        config: &GameConfig,
+        ids: &[String],
+    ) -> Vec<SigilLinkMissingItem> {
+        let paths =
+            game::detect_paths(game_id, Some(&config.game_root), Some(&config.larian_dir)).ok();
+        if paths.is_none() {
+            return Vec::new();
+        }
         let native_index = paths
             .as_ref()
             .map(|paths| native_pak::build_native_pak_index_cached(&paths.larian_mods_dir));
+        let cache_root = config.sigillink_cache_root();
 
         let mut items = Vec::new();
         for id in ids {
-            let Some(mod_entry) = self.library.mods.iter().find(|entry| entry.id == *id) else {
+            let Some(mod_entry) = library.mods.iter().find(|entry| entry.id == *id) else {
                 continue;
             };
-            if !self.sigillink_missing_pak_for_mod(
+            if !Self::sigillink_missing_pak_for_mod_with(
                 mod_entry,
+                &cache_root,
                 paths.as_ref(),
                 native_index.as_deref(),
             ) {
@@ -10851,7 +11039,37 @@ Use Ctrl+R to reset this mod or F12 to reset all pins."
         items
     }
 
+    fn maybe_start_missing_pak_scan(&mut self) {
+        if !self.missing_pak_pending || self.missing_pak_active {
+            return;
+        }
+        if !self.paths_ready() {
+            return;
+        }
+        let Some(profile) = self.library.active_profile() else {
+            self.missing_pak_pending = false;
+            return;
+        };
+        let ids: Vec<String> = profile.order.iter().map(|entry| entry.id.clone()).collect();
+        if ids.is_empty() {
+            self.missing_pak_pending = false;
+            return;
+        }
+        let library = self.library.clone();
+        let config = self.config.clone();
+        let game_id = self.game_id;
+        let tx = self.missing_pak_tx.clone();
+        self.missing_pak_pending = false;
+        self.missing_pak_active = true;
+        self.log_info("Checking for missing .pak files...".to_string());
+        thread::spawn(move || {
+            let items = App::collect_sigillink_missing_items_for(&library, game_id, &config, &ids);
+            let _ = tx.send(MissingPakMessage::Completed(items));
+        });
+    }
+
     fn refresh_sigillink_missing_paks(&mut self) -> Vec<SigilLinkMissingItem> {
+        self.missing_pak_pending = false;
         let Some(profile) = self.library.active_profile() else {
             self.sigillink_missing_paks.clear();
             self.sigillink_missing_paks_ignored.clear();
@@ -10884,6 +11102,7 @@ Use Ctrl+R to reset this mod or F12 to reset all pins."
         }
         if matches!(trigger, SigilLinkMissingTrigger::Auto)
             && (self.import_active.is_some()
+                || self.import_apply_active
                 || self.pending_import_batch.is_some()
                 || self.mod_list_preview.is_some())
         {
@@ -11490,7 +11709,7 @@ Use Ctrl+R to reset this mod or F12 to reset all pins."
         if !self.conflict_pending || self.conflict_active {
             return;
         }
-        if self.import_active.is_some() || self.deploy_active {
+        if self.import_active.is_some() || self.import_apply_active || self.deploy_active {
             return;
         }
 
@@ -11517,6 +11736,7 @@ Use Ctrl+R to reset this mod or F12 to reset all pins."
             return;
         }
         if self.import_active.is_some()
+            || self.import_apply_active
             || self.dialog.is_some()
             || self.pending_duplicate.is_some()
             || !self.duplicate_queue.is_empty()
@@ -12204,6 +12424,86 @@ fn display_path(path: &PathBuf) -> String {
         .and_then(|name| name.to_str())
         .map(|name| name.to_string())
         .unwrap_or_else(|| path.display().to_string())
+}
+
+fn import_apply_progress(
+    label: &str,
+    index: usize,
+    total: usize,
+    detail: Option<String>,
+) -> importer::ImportProgress {
+    let total = total.max(1);
+    let current = index.max(1).min(total);
+    let overall_progress = (current as f32) / (total as f32);
+    importer::ImportProgress {
+        label: label.to_string(),
+        unit_index: current,
+        unit_count: total,
+        stage: importer::ImportStage::Finalizing,
+        stage_current: current,
+        stage_total: total,
+        overall_progress: overall_progress.clamp(0.0, 1.0),
+        detail,
+    }
+}
+
+fn run_import_apply_io(
+    mods: Vec<importer::ImportMod>,
+    source: importer::ImportSource,
+    cache_root: PathBuf,
+    progress_tx: Option<Sender<ImportMessage>>,
+) -> ImportApplyOutcome {
+    let mods_root = library_mod_root(&cache_root);
+    if let Err(err) = fs::create_dir_all(&mods_root) {
+        for import_mod in mods {
+            import_mod.cleanup_staging();
+        }
+        return ImportApplyOutcome {
+            source: source.clone(),
+            applied: Vec::new(),
+            failures: vec![importer::ImportFailure {
+                source,
+                error: err.to_string(),
+            }],
+            warnings: Vec::new(),
+        };
+    }
+
+    let total = mods.len().max(1);
+    let mut applied = Vec::new();
+    let mut failures = Vec::new();
+    let mut warnings = Vec::new();
+
+    for (index, import_mod) in mods.into_iter().enumerate() {
+        if let Some(tx) = &progress_tx {
+            let detail = Some(format!("Applying {}", import_mod.entry.display_name()));
+            let progress = import_apply_progress(&source.label, index + 1, total, detail);
+            let _ = tx.send(ImportMessage::Progress(progress));
+        }
+
+        match App::finalize_import_mod_io(&import_mod, &mods_root, &cache_root) {
+            Ok((mod_entry, mut note)) => {
+                if !note.is_empty() {
+                    warnings.append(&mut note);
+                }
+                applied.push(mod_entry);
+            }
+            Err(err) => {
+                import_mod.cleanup_staging();
+                failures.push(importer::ImportFailure {
+                    source: source.clone(),
+                    error: err.to_string(),
+                });
+            }
+        }
+    }
+
+    ImportApplyOutcome {
+        source,
+        applied,
+        failures,
+        warnings,
+    }
 }
 
 fn duplicate_default_overwrite(new_mod: &ModEntry, existing: &ModEntry) -> Option<bool> {
@@ -13421,6 +13721,10 @@ fn resolve_pak_paths(
             }
             if let Some(index) = native_index {
                 if let Some(path) = native_pak::resolve_native_pak_path(info, index) {
+                    push_unique(path);
+                } else if let Some(path) =
+                    native_pak::resolve_native_pak_path_by_uuid(&mod_entry.id, index)
+                {
                     push_unique(path);
                 }
             }

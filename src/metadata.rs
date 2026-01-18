@@ -350,23 +350,18 @@ pub fn read_meta_lsx(path: &Path) -> Option<ModMeta> {
 }
 
 pub fn read_meta_lsx_from_pak(path: &Path) -> Option<ModMeta> {
-    if let Some(mut meta) = read_meta_lsx_from_pak_custom(path) {
-        fill_dependency_fallback(&mut meta, path);
+    if let Some(meta) = read_meta_lsx_from_pak_custom(path) {
         return Some(meta);
     }
     if let Ok(file) = fs::File::open(path) {
         if let Ok(lspk) = lspk::Reader::new(file).and_then(|mut reader| reader.read()) {
             if let Ok(meta) = lspk.extract_meta_lsx() {
-                let mut parsed = parse_meta_lsx(&meta.decompressed_bytes);
-                fill_dependency_fallback(&mut parsed, path);
+                let parsed = parse_meta_lsx(&meta.decompressed_bytes);
                 return Some(parsed);
             }
         }
     }
-    read_meta_lsx_from_pak_fuzzy(path).map(|mut meta| {
-        fill_dependency_fallback(&mut meta, path);
-        meta
-    })
+    read_meta_lsx_from_pak_fuzzy(path)
 }
 
 fn read_meta_lsx_from_pak_fuzzy(path: &Path) -> Option<ModMeta> {
@@ -383,150 +378,9 @@ fn read_meta_lsx_from_pak_fuzzy(path: &Path) -> Option<ModMeta> {
     {
         return Some(meta);
     }
-    read_meta_lsx_from_pak_raw(&bytes)
+    None
 }
 
-fn read_meta_lsx_from_pak_raw(bytes: &[u8]) -> Option<ModMeta> {
-    let deps = scan_dependency_refs(bytes);
-    if deps.is_empty() {
-        return None;
-    }
-    Some(ModMeta {
-        dependencies: deps,
-        ..ModMeta::default()
-    })
-}
-
-fn scan_dependency_refs(bytes: &[u8]) -> Vec<String> {
-    let mut out = Vec::new();
-    let needle = b"Dependencies";
-    let window_size = 4096usize;
-    let mut offset = 0usize;
-    while let Some(index) = find_bytes(&bytes[offset..], needle) {
-        let start = offset + index;
-        let end = (start + window_size).min(bytes.len());
-        let window = &bytes[start..end];
-        let mut found = extract_dependency_label_strings(window);
-        if found.is_empty() {
-            found = extract_uuid_suffix_strings(window);
-        }
-        if found.is_empty() {
-            found = extract_uuid_strings(window);
-        }
-        out.extend(found);
-        offset = start + needle.len();
-    }
-    out.sort();
-    out.dedup();
-    out.retain(|dep| !is_base_dependency_uuid(dep));
-    out.retain(|dep| !is_base_dependency_label(dep));
-    out
-}
-
-fn extract_dependency_label_strings(bytes: &[u8]) -> Vec<String> {
-    let mut out = Vec::new();
-    let len = bytes.len();
-    let uuid_len = 36;
-    let mut i = 0usize;
-    while i + uuid_len + 1 <= len {
-        if bytes[i] == b'_' && is_uuid_bytes(&bytes[i + 1..i + 1 + uuid_len]) {
-            let mut start = i;
-            while start > 0 {
-                let prev = bytes[start - 1];
-                if prev.is_ascii_alphanumeric() || prev == b'_' {
-                    start -= 1;
-                } else {
-                    break;
-                }
-            }
-            let prefix = &bytes[start..i];
-            let prefix = std::str::from_utf8(prefix).ok().unwrap_or("");
-            if prefix.len() >= 3 && !is_base_dependency_label(prefix) {
-                if let Ok(uuid) = std::str::from_utf8(&bytes[i + 1..i + 1 + uuid_len]) {
-                    out.push(format!("{prefix}_{uuid}"));
-                }
-            }
-            i += uuid_len + 1;
-        } else {
-            i += 1;
-        }
-    }
-    out
-}
-
-fn extract_uuid_strings(bytes: &[u8]) -> Vec<String> {
-    let mut out = Vec::new();
-    let len = bytes.len();
-    let uuid_len = 36;
-    let mut i = 0usize;
-    while i + uuid_len <= len {
-        let slice = &bytes[i..i + uuid_len];
-        if is_uuid_bytes(slice) {
-            if let Ok(value) = std::str::from_utf8(slice) {
-                out.push(value.to_ascii_lowercase());
-            }
-            i += uuid_len;
-        } else {
-            i += 1;
-        }
-    }
-    out
-}
-
-fn extract_uuid_suffix_strings(bytes: &[u8]) -> Vec<String> {
-    let mut out = Vec::new();
-    let len = bytes.len();
-    let uuid_len = 36;
-    let mut i = 0usize;
-    while i + uuid_len + 1 <= len {
-        if bytes[i] == b'_' && is_uuid_bytes(&bytes[i + 1..i + 1 + uuid_len]) {
-            if let Ok(value) = std::str::from_utf8(&bytes[i + 1..i + 1 + uuid_len]) {
-                out.push(value.to_ascii_lowercase());
-            }
-            i += uuid_len + 1;
-        } else {
-            i += 1;
-        }
-    }
-    out
-}
-
-fn is_uuid_bytes(bytes: &[u8]) -> bool {
-    const DASHES: [usize; 4] = [8, 13, 18, 23];
-    if bytes.len() != 36 {
-        return false;
-    }
-    for (i, &byte) in bytes.iter().enumerate() {
-        if DASHES.contains(&i) {
-            if byte != b'-' {
-                return false;
-            }
-        } else if !byte.is_ascii_hexdigit() {
-            return false;
-        }
-    }
-    true
-}
-
-fn fill_dependency_fallback(meta: &mut ModMeta, path: &Path) {
-    if !meta.dependencies.iter().all(|dep| is_uuid_like_str(dep)) {
-        return;
-    }
-    if let Ok(bytes) = fs::read(path) {
-        let mut deps = scan_dependency_refs(&bytes);
-        if !deps.is_empty() {
-            deps.extend(meta.dependencies.drain(..));
-            deps.sort();
-            deps.dedup();
-            meta.dependencies = deps;
-        }
-    }
-}
-
-fn is_uuid_like_str(value: &str) -> bool {
-    let bytes = value.as_bytes();
-    is_uuid_bytes(bytes)
-}
 
 pub fn find_meta_lsx(root: &Path) -> Option<PathBuf> {
     let mut candidates: Vec<(bool, usize, PathBuf)> = Vec::new();

@@ -512,7 +512,7 @@ pub fn read_modsettings_snapshot(path: &Path) -> Result<ModSettingsSnapshot> {
         });
     }
 
-    let order = save
+    let mut order = save
         .find_node_by_id("ModOrder")
         .ok()
         .and_then(|node| node.children.get(0))
@@ -530,6 +530,13 @@ pub fn read_modsettings_snapshot(path: &Path) -> Result<ModSettingsSnapshot> {
                 .collect::<Vec<String>>()
         })
         .unwrap_or_default();
+
+    if order.is_empty() {
+        order = modules
+            .iter()
+            .map(|module| module.info.uuid.clone())
+            .collect();
+    }
 
     if !saw_enabled_attr {
         enabled = order.iter().cloned().collect();
