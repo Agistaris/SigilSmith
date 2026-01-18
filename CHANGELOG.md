@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.9.2
+
+- Remove raw dependency byte-scans that caused phantom UUID requirements.
+- Improve native .pak resolution by UUID to avoid false missing-mod warnings.
+- Preserve modsettings import order when ModOrder is missing.
+- Label native mods as "Native (Larian Mods)" unless they are mod.io published.
+
 ## 0.9.1
 
 - Update license to SigilSmith Community License v1.0 (non-commercial; no redistribution/hosting).
