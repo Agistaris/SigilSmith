@@ -1259,6 +1259,19 @@ impl App {
                 ToastLevel::Info,
                 Duration::from_secs(3),
             );
+            if let Ok(meta) = fs::symlink_metadata(&app.config.larian_dir) {
+                if meta.file_type().is_symlink() {
+                    app.log_warn(
+                        "Larian data dir is a symlink. Remove symlinks with rm/unlink (no -r) to avoid deleting targets."
+                            .to_string(),
+                    );
+                    app.set_toast(
+                        "Larian data dir is symlinked: avoid rm -rf on that path.",
+                        ToastLevel::Warn,
+                        Duration::from_secs(6),
+                    );
+                }
+            }
         }
         app.ensure_setup();
         if matches!(mode, StartupMode::Cli) {
@@ -9304,6 +9317,15 @@ Use Ctrl+R to reset this mod or F12 to reset all pins."
                             lines.push(format!("Modsettings read failed: {err}"));
                         }
                     }
+                    if let Ok(raw) = fs::read_to_string(&paths.modsettings_path) {
+                        let version = Self::parse_modsettings_version(&raw)
+                            .unwrap_or_else(|| "unknown".to_string());
+                        let mods_count = raw.matches("id=\"ModuleShortDesc\"").count();
+                        let mod_order_present = raw.contains("id=\"ModOrder\"");
+                        lines.push(format!("Modsettings version: {version}"));
+                        lines.push(format!("Modsettings Mods entries: {mods_count}"));
+                        lines.push(format!("ModOrder node present: {mod_order_present}"));
+                    }
                 } else {
                     lines.push("Modsettings path missing".to_string());
                 }
@@ -9314,6 +9336,28 @@ Use Ctrl+R to reset this mod or F12 to reset all pins."
         }
 
         lines.join("\n")
+    }
+
+    #[cfg(debug_assertions)]
+    fn parse_modsettings_version(raw: &str) -> Option<String> {
+        let start = raw.find("<version")?;
+        let rest = &raw[start..];
+        let end = rest.find("/>")?;
+        let tag = &rest[..end];
+        let major = Self::parse_modsettings_attr(tag, "major")?;
+        let minor = Self::parse_modsettings_attr(tag, "minor")?;
+        let revision = Self::parse_modsettings_attr(tag, "revision")?;
+        let build = Self::parse_modsettings_attr(tag, "build")?;
+        Some(format!("{major}.{minor}.{revision}.{build}"))
+    }
+
+    #[cfg(debug_assertions)]
+    fn parse_modsettings_attr(raw: &str, key: &str) -> Option<String> {
+        let needle = format!("{key}=\"");
+        let start = raw.find(&needle)? + needle.len();
+        let rest = &raw[start..];
+        let end = rest.find('"')?;
+        Some(rest[..end].to_string())
     }
 
     fn update_dependency_cache_for_entries(&mut self, entries: &[ModEntry]) {

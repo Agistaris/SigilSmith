@@ -463,6 +463,7 @@ pub fn read_modsettings_snapshot(path: &Path) -> Result<ModSettingsSnapshot> {
     let mut modules = Vec::new();
     let mut enabled = HashSet::new();
     let mut saw_enabled_attr = false;
+    let mut mods_order = Vec::new();
     for node in nodes {
         let uuid = match module_attr(&node, "UUID") {
             Some(uuid) => uuid,
@@ -496,6 +497,7 @@ pub fn read_modsettings_snapshot(path: &Path) -> Result<ModSettingsSnapshot> {
         if is_enabled {
             enabled.insert(uuid.clone());
         }
+        mods_order.push(uuid.clone());
         modules.push(ModSettingsModule {
             info: PakInfo {
                 uuid,
@@ -512,7 +514,7 @@ pub fn read_modsettings_snapshot(path: &Path) -> Result<ModSettingsSnapshot> {
         });
     }
 
-    let mut order = save
+    let mod_order = save
         .find_node_by_id("ModOrder")
         .ok()
         .and_then(|node| node.children.get(0))
@@ -530,6 +532,12 @@ pub fn read_modsettings_snapshot(path: &Path) -> Result<ModSettingsSnapshot> {
                 .collect::<Vec<String>>()
         })
         .unwrap_or_default();
+
+    let mut order = if !mods_order.is_empty() {
+        mods_order
+    } else {
+        mod_order
+    };
 
     if order.is_empty() {
         order = modules

@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.9.4
+
+- Treat Patch 7/8 modsettings order as the `Mods` list order (ModOrder fallback only).
+- Add a startup warning when the Larian data directory is symlinked.
+- Expand debug cache output with modsettings version and ModOrder presence.
+
 ## 0.9.3
 
 - Update toolchain/dependencies for release build compatibility.
