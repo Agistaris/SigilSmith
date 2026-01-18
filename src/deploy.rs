@@ -578,27 +578,9 @@ pub(crate) fn build_modsettings_export(
 
 fn build_modsettings_save(
     mut save: Save,
-    installed_paks: &[PakInfo],
+    _installed_paks: &[PakInfo],
     enabled_paks: &[PakInfo],
 ) -> Save {
-    let existing_order_uuids: Vec<String> = save
-        .find_node_by_id("ModOrder")
-        .ok()
-        .and_then(|node| node.children.get(0))
-        .map(|child| {
-            child
-                .node
-                .iter()
-                .filter_map(|node| {
-                    node.attribute
-                        .iter()
-                        .find(|attr| attr.id == "UUID")
-                        .map(|attr| attr.value.clone())
-                })
-                .collect()
-        })
-        .unwrap_or_default();
-
     let existing_nodes: VecDeque<ModulesShortDescriptionNode> = save
         .find_node_by_id("Mods")
         .ok()
@@ -606,22 +588,8 @@ fn build_modsettings_save(
         .map(|child| child.node.clone())
         .unwrap_or_default();
 
-    let existing_by_uuid: HashMap<String, ModulesShortDescriptionNode> = existing_nodes
-        .iter()
-        .cloned()
-        .filter_map(|node| {
-            let uuid = node
-                .attribute
-                .iter()
-                .find(|attr| attr.id == "UUID")
-                .map(|attr| attr.value.clone())?;
-            Some((uuid, node))
-        })
-        .collect();
-
     let mut base_nodes = Vec::new();
     let mut base_uuid_order = Vec::new();
-    let mut base_uuids = HashSet::new();
 
     for node in &existing_nodes {
         let name = node
@@ -644,7 +612,6 @@ fn build_modsettings_save(
                 .map(|attr| attr.value.clone())
             {
                 base_uuid_order.push(uuid.clone());
-                base_uuids.insert(uuid);
             }
             base_nodes.push(node.clone());
         }
@@ -655,19 +622,7 @@ fn build_modsettings_save(
         mods_list.push_back(node.clone());
     }
 
-    let installed_uuid_set: HashSet<String> = installed_paks
-        .iter()
-        .map(|info| info.uuid.clone())
-        .collect();
-
-    for (uuid, node) in existing_by_uuid.iter() {
-        if base_uuids.contains(uuid) || installed_uuid_set.contains(uuid) {
-            continue;
-        }
-        mods_list.push_back(node.clone());
-    }
-
-    for info in installed_paks {
+    for info in enabled_paks {
         mods_list.push_back(module_short_desc_from_info(info));
     }
 
@@ -679,18 +634,8 @@ fn build_modsettings_save(
         order_list.push_back(module_order_node(uuid));
     }
 
-    let enabled_uuid_set: HashSet<String> =
-        enabled_paks.iter().map(|info| info.uuid.clone()).collect();
-
     for info in enabled_paks {
         order_list.push_back(module_order_node(&info.uuid));
-    }
-
-    for uuid in existing_order_uuids {
-        if base_uuids.contains(&uuid) || enabled_uuid_set.contains(&uuid) {
-            continue;
-        }
-        order_list.push_back(module_order_node(&uuid));
     }
 
     let mod_order_node = save.get_or_insert_node_mut_by_id("ModOrder");

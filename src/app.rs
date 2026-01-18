@@ -9395,6 +9395,64 @@ Use Ctrl+R to reset this mod or F12 to reset all pins."
         changed
     }
 
+    fn disable_native_name_duplicates(&mut self) -> usize {
+        let mod_map = self.library.index_by_id();
+        let mut managed_enabled_names = HashSet::new();
+        if let Some(profile) = self.library.active_profile() {
+            for entry in &profile.order {
+                if !entry.enabled {
+                    continue;
+                }
+                let Some(mod_entry) = mod_map.get(&entry.id) else {
+                    continue;
+                };
+                if mod_entry.source == ModSource::Managed {
+                    managed_enabled_names.insert(normalize_label(&mod_entry.name));
+                }
+            }
+        }
+        let Some(profile) = self.library.active_profile_mut() else {
+            return 0;
+        };
+        let mut disabled = 0usize;
+        let mut names = Vec::new();
+        for entry in &mut profile.order {
+            if !entry.enabled {
+                continue;
+            }
+            let Some(mod_entry) = mod_map.get(&entry.id) else {
+                continue;
+            };
+            if mod_entry.source != ModSource::Native {
+                continue;
+            }
+            let key = normalize_label(&mod_entry.name);
+            if managed_enabled_names.contains(&key) {
+                entry.enabled = false;
+                disabled += 1;
+                names.push(mod_entry.name.clone());
+            }
+        }
+        if disabled > 0 {
+            names.sort();
+            names.dedup();
+            let label = if names.len() <= 3 {
+                names.join(", ")
+            } else {
+                format!("{} (+{})", names[..3].join(", "), names.len() - 3)
+            };
+            self.log_warn(format!(
+                "Disabled {disabled} native mod(s) with duplicate names: {label}"
+            ));
+            self.set_toast(
+                &format!("Disabled native duplicates: {label}"),
+                ToastLevel::Warn,
+                Duration::from_secs(6),
+            );
+        }
+        disabled
+    }
+
     fn resume_pending_import_batch(&mut self) {
         if self.dependency_queue.is_some() {
             return;
@@ -10406,9 +10464,8 @@ Use Ctrl+R to reset this mod or F12 to reset all pins."
         let should_apply_modsettings = delta.modsettings_exists
             && modsettings_hash_changed
             && self.library.modsettings_sync_enabled;
-        if should_apply_modsettings {
-            let mod_has_pak: HashMap<String, bool> = self
-                .library
+        let mod_has_pak: HashMap<String, bool> = if should_apply_modsettings {
+            self.library
                 .mods
                 .iter()
                 .map(|mod_entry| {
@@ -10417,7 +10474,39 @@ Use Ctrl+R to reset this mod or F12 to reset all pins."
                         mod_entry.has_target_kind(TargetKind::Pak),
                     )
                 })
-                .collect();
+                .collect()
+        } else {
+            HashMap::new()
+        };
+        let enabled_pak_count = if should_apply_modsettings {
+            self.library
+                .active_profile()
+                .map(|profile| {
+                    profile
+                        .order
+                        .iter()
+                        .filter(|entry| entry.enabled)
+                        .filter(|entry| mod_has_pak.get(&entry.id).copied().unwrap_or(false))
+                        .count()
+                })
+                .unwrap_or(0)
+        } else {
+            0
+        };
+        let skip_modsettings_empty = should_apply_modsettings && delta.order.is_empty()
+            && enabled_pak_count > 0;
+        if skip_modsettings_empty {
+            self.log_warn(
+                "Native mod sync skipped: modsettings list is empty, keeping current enabled mods."
+                    .to_string(),
+            );
+            self.set_toast(
+                "Modsettings empty; keeping SigilSmith enabled mods.",
+                ToastLevel::Warn,
+                Duration::from_secs(5),
+            );
+        }
+        if should_apply_modsettings && !skip_modsettings_empty {
             let dependency_blocks = self.library.dependency_blocks.clone();
             if let Some(profile) = self.library.active_profile_mut() {
                 for entry in &mut profile.order {
@@ -10486,6 +10575,12 @@ Use Ctrl+R to reset this mod or F12 to reset all pins."
 
         if self.normalize_mod_sources() {
             changed = true;
+        }
+        let duplicate_disabled = self.disable_native_name_duplicates();
+        if duplicate_disabled > 0 {
+            updated_enabled = true;
+            changed = true;
+            self.queue_auto_deploy("native duplicate guard");
         }
         if self.resolve_missing_profile_entries() {
             changed = true;

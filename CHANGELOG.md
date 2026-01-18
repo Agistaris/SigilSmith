@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.9.5
+
+- Write Patch 7/8 modsettings using the enabled mod order (Mods list reflects active mods).
+- Skip native sync when modsettings is empty to avoid disabling all mods.
+- Auto-disable native duplicates when a managed mod with the same name is enabled.
+
 ## 0.9.4
 
 - Treat Patch 7/8 modsettings order as the `Mods` list order (ModOrder fallback only).
