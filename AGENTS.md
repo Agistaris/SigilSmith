@@ -67,6 +67,10 @@ When the user requests a UI spacing/alignment tweak (e.g., “move X left by 1 s
 - Symlink safety: treat symlinked Larian data dirs as valid; never recommend `rm -rf` on symlink paths. To remove a symlink, use `rm` or `unlink` without `-r`, or a reversible tool like `trash-cli`. Avoid trailing slashes or subpaths that follow the link.
 - When implementing destructive operations, avoid recursion into symlink targets; prefer `remove_file` on specific files and add explicit warnings when user paths are symlinked.
 
+## Release Build Checklist
+- Before pushing a release build, update the What's New dialog to include all changes since the last public release (e.g., 0.9.3 -> 0.9.6).
+- Ensure the What's New banner/version and bullets match `CHANGELOG.md` for the release range.
+
 ## Commit & Pull Request Guidelines
 - Commit messages are short and imperative (e.g., “Update lockfile”).
 - PRs should include: summary, testing notes, and screenshots for UI changes.

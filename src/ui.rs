@@ -9277,12 +9277,12 @@ fn build_whats_new_lines(theme: &Theme, width: usize) -> Vec<Line<'static>> {
     let muted_style = Style::default().fg(theme.muted);
 
     let banner = [
-        "  .::--==++**##%%##**++==--::.  ",
-        " /::==++**##%%%%%%%%##**++==::\\ ",
-        "|::==++**##%%%%%%%%##**++==::||",
-        " \\::==++**##%%%%%%%%##**++==::/ ",
-        "  '::--==++**##%%##**++==--::'  ",
-        "     ..::--==++++==--::..       ",
+        "  ____  _     _ _ _ _    ",
+        " / ___|| |__ (_) | (_)_  ",
+        " \\___ \\| '_ \\| | | | | | ",
+        "  ___) | | | | | | | | | ",
+        " |____/|_| |_|_|_|_|_|_| ",
+        "    Patch 8 Ready v0.9.6 ",
     ];
     for line in banner {
         lines.push(Line::from(Span::styled(
@@ -9323,65 +9323,65 @@ fn build_whats_new_lines(theme: &Theme, width: usize) -> Vec<Line<'static>> {
         )));
     }
 
-    push_section(&mut lines, "SigiLink Cache + Deploy", width, theme);
+    push_section(&mut lines, "Patch 8 Compatibility", width, theme);
     push_bullet(
         &mut lines,
         width,
-        "Transactional imports with staging and safe cancel.",
+        "Load order now follows the Mods list (Patch 7/8 behavior).",
         body_style,
     );
     push_bullet(
         &mut lines,
         width,
-        "Hardlink/symlink deploys (no full-copy fallback).",
+        "Enabled mods only are written to modsettings.lsx (Mods list).",
         body_style,
     );
     push_bullet(
         &mut lines,
         width,
-        "Auto deploy (debounced) or manual deploy on demand.",
-        body_style,
-    );
-    lines.push(Line::from(""));
-
-    push_section(&mut lines, "SigiLink Intelligent Ranking", width, theme);
-    push_bullet(
-        &mut lines,
-        width,
-        "Onboarding toggle + auto-ranking after import/enable.",
-        body_style,
-    );
-    push_bullet(
-        &mut lines,
-        width,
-        "Unlinked pins for manual order control.",
-        body_style,
-    );
-    push_bullet(
-        &mut lines,
-        width,
-        "Auto accept diffs option for hands-off ordering.",
+        "ModOrder stays in sync for BG3MM/Vortex interop.",
         body_style,
     );
     lines.push(Line::from(""));
 
-    push_section(&mut lines, "Mod List Interop", width, theme);
+    push_section(&mut lines, "Sync + Safety", width, theme);
     push_bullet(
         &mut lines,
         width,
-        "SigilSmith JSON import/export with order + enabled + overrides.",
+        "Skip native sync if modsettings list is empty to avoid mass disable.",
         body_style,
     );
     push_bullet(
         &mut lines,
         width,
-        "modsettings.lsx import/export for BG3MM/Vortex interop.",
+        "Startup warning when the Larian data dir is a symlink.",
         body_style,
     );
     push_bullet(
         &mut lines,
         width,
-        "Preview modal with missing/ambiguous handling.",
+        "Duplicate-name guard: prompt to disable other enabled copies.",
+        body_style,
+    );
+    lines.push(Line::from(""));
+
+    push_section(&mut lines, "Debug + Transparency", width, theme);
+    push_bullet(
+        &mut lines,
+        width,
+        "Debug cache now shows modsettings version and ModOrder presence.",
+        body_style,
+    );
+    push_bullet(
+        &mut lines,
+        width,
+        "Logs include native duplicate auto-disable events.",
+        body_style,
+    );
+    push_bullet(
+        &mut lines,
+        width,
+        "Safer native mod sync for Patch 8 mod manager.",
         body_style,
     );
     lines.push(Line::from(""));
