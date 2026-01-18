@@ -1,6 +1,6 @@
 [package]
 name = "sigilsmith"
-version = "0.9.2"
+version = "0.9.3"
 edition = "2021"
 description = "Native Linux TUI mod loader for Baldur's Gate 3."
 license-file = "LICENSE"

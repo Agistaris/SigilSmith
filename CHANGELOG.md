@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.9.3
+
+- Update toolchain/dependencies for release build compatibility.
+
 ## 0.9.2
 
 - Remove raw dependency byte-scans that caused phantom UUID requirements.
