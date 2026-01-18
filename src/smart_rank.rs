@@ -151,8 +151,11 @@ pub enum ExplainLineKind {
     Muted,
 }
 
+const MOD_CACHE_KEY_VERSION: &str = "mod-cache-v3-pak-meta-index";
+
 pub fn mod_cache_key(mod_entry: &ModEntry) -> String {
     let mut hasher = Hasher::new();
+    hasher.update(MOD_CACHE_KEY_VERSION.as_bytes());
     hasher.update(mod_entry.id.as_bytes());
     hasher.update(mod_entry.name.as_bytes());
     if let Some(label) = &mod_entry.source_label {
