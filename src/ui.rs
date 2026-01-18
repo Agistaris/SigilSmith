@@ -9276,17 +9276,19 @@ fn build_whats_new_lines(theme: &Theme, width: usize) -> Vec<Line<'static>> {
     let body_style = Style::default().fg(theme.text);
     let muted_style = Style::default().fg(theme.muted);
 
+    let banner_width = 108usize;
     let banner = [
-        "  ____  _     _ _ _ _    ",
-        " / ___|| |__ (_) | (_)_  ",
-        " \\___ \\| '_ \\| | | | | | ",
-        "  ___) | | | | | | | | | ",
-        " |____/|_| |_|_|_|_|_|_| ",
-        "    Patch 8 Ready v0.9.6 ",
+        "      .-====================-.",
+        "   .-'  *  o  *  o  *  o  *  '-.",
+        "  /  *   .-''-.  /\\  .-''-.   * \\",
+        " |  o   /  /\\  \\ || /  /\\  \\   o |",
+        "  \\ *  \\  \\/  / || \\  \\/  /  * /",
+        "   '-.  '----'  ||  '----'  .-' v0.9.6",
     ];
     for line in banner {
+        let padded = format!("{line:<banner_width$}");
         lines.push(Line::from(Span::styled(
-            truncate_text(line, width),
+            truncate_text(&padded, width),
             header_style,
         )));
     }
