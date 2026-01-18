@@ -177,6 +177,11 @@ pub enum DialogKind {
         ids: Vec<String>,
         dependencies: Vec<DependentMod>,
     },
+    EnableDuplicateMods {
+        enable_ids: Vec<String>,
+        disable_ids: Vec<String>,
+        duplicates: Vec<DuplicateModInfo>,
+    },
     DeleteProfile {
         name: String,
     },
@@ -348,6 +353,14 @@ pub struct DependentMod {
 }
 
 #[derive(Debug, Clone)]
+pub struct DuplicateModInfo {
+    pub id: String,
+    pub name: String,
+    pub source: ModSource,
+    pub enabled: bool,
+}
+
+#[derive(Debug, Clone)]
 pub struct LogEntry {
     pub level: LogLevel,
     pub message: String,
@@ -358,6 +371,13 @@ pub enum LogLevel {
     Info,
     Warn,
     Error,
+}
+
+fn duplicate_source_label(source: ModSource) -> &'static str {
+    match source {
+        ModSource::Managed => "Managed",
+        ModSource::Native => "Native",
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -9453,6 +9473,98 @@ Use Ctrl+R to reset this mod or F12 to reset all pins."
         disabled
     }
 
+    fn build_duplicate_enable_dialog(&self, enable_ids: &[String]) -> Option<Dialog> {
+        let Some(profile) = self.library.active_profile() else {
+            return None;
+        };
+        let mod_map = self.library.index_by_id();
+        let enable_set: HashSet<&str> = enable_ids.iter().map(|id| id.as_str()).collect();
+        let mut enabled_map = HashMap::new();
+        for entry in &profile.order {
+            enabled_map.insert(entry.id.clone(), entry.enabled);
+        }
+        let mut name_map: HashMap<String, Vec<String>> = HashMap::new();
+        for mod_entry in &self.library.mods {
+            let key = normalize_label(&mod_entry.name);
+            if key.is_empty() {
+                continue;
+            }
+            name_map
+                .entry(key)
+                .or_default()
+                .push(mod_entry.id.clone());
+        }
+        let mut duplicate_ids = HashSet::new();
+        for id in enable_ids {
+            let Some(mod_entry) = mod_map.get(id) else {
+                continue;
+            };
+            let key = normalize_label(&mod_entry.name);
+            let Some(ids) = name_map.get(&key) else {
+                continue;
+            };
+            if ids.len() <= 1 {
+                continue;
+            }
+            for dup_id in ids {
+                duplicate_ids.insert(dup_id.clone());
+            }
+        }
+        if duplicate_ids.len() <= 1 {
+            return None;
+        }
+        let mut duplicates: Vec<DuplicateModInfo> = duplicate_ids
+            .iter()
+            .filter_map(|id| {
+                mod_map.get(id).map(|entry| DuplicateModInfo {
+                    id: id.clone(),
+                    name: entry.name.clone(),
+                    source: entry.source,
+                    enabled: enabled_map.get(id).copied().unwrap_or(false),
+                })
+            })
+            .collect();
+        duplicates.sort_by(|a, b| a.name.cmp(&b.name));
+        let mut disable_ids = Vec::new();
+        for info in &duplicates {
+            if info.enabled && !enable_set.contains(info.id.as_str()) {
+                disable_ids.push(info.id.clone());
+            }
+        }
+        let mut lines = Vec::new();
+        let max_lines = 8usize;
+        for info in duplicates.iter().take(max_lines) {
+            let status = if info.enabled { " [enabled]" } else { "" };
+            lines.push(format!(
+                "- {} ({}){status}",
+                info.name,
+                duplicate_source_label(info.source)
+            ));
+        }
+        if duplicates.len() > max_lines {
+            lines.push(format!("...and {} more", duplicates.len() - max_lines));
+        }
+        let message = format!(
+            "Duplicate mods detected:\n{}\n\nRecommendation: keep only one enabled. Disable other enabled duplicates and continue?",
+            lines.join("\n")
+        );
+        Some(Dialog {
+            title: "Duplicate mod detected".to_string(),
+            message,
+            yes_label: "Disable duplicates".to_string(),
+            no_label: "Keep both".to_string(),
+            choice: DialogChoice::Yes,
+            kind: DialogKind::EnableDuplicateMods {
+                enable_ids: enable_ids.to_vec(),
+                disable_ids,
+                duplicates,
+            },
+            toggle: None,
+            toggle_alt: None,
+            scroll: 0,
+        })
+    }
+
     fn resume_pending_import_batch(&mut self) {
         if self.dependency_queue.is_some() {
             return;
@@ -10007,6 +10119,10 @@ Use Ctrl+R to reset this mod or F12 to reset all pins."
             }
             DialogKind::EnableRequiredDependencies { ids, .. } => {
                 if matches!(choice, DialogChoice::Yes) {
+                    if let Some(dialog) = self.build_duplicate_enable_dialog(&ids) {
+                        self.open_dialog(dialog);
+                        return;
+                    }
                     let changed = self.set_mods_enabled_in_active(&ids, true);
                     if changed == 0 {
                         self.status = "Mods already enabled".to_string();
@@ -10015,6 +10131,47 @@ Use Ctrl+R to reset this mod or F12 to reset all pins."
                     self.status = format!("Enabled {changed} mod(s)");
                     self.log_info(format!("Enabled {changed} mod(s)"));
                     self.queue_auto_deploy("enable dependencies");
+                    self.request_sigillink_auto_rank();
+                } else {
+                    self.status = "Enable canceled".to_string();
+                }
+            }
+            DialogKind::EnableDuplicateMods {
+                enable_ids,
+                disable_ids,
+                duplicates,
+            } => {
+                if matches!(choice, DialogChoice::Yes) {
+                    let disabled = if disable_ids.is_empty() {
+                        0
+                    } else {
+                        self.set_mods_enabled_in_active(&disable_ids, false)
+                    };
+                    let changed = self.set_mods_enabled_in_active(&enable_ids, true);
+                    let total = disabled + changed;
+                    if total == 0 {
+                        self.status = "Mods already enabled".to_string();
+                        return;
+                    }
+                    let mut names: Vec<String> = duplicates
+                        .iter()
+                        .map(|info| info.name.clone())
+                        .collect();
+                    names.sort();
+                    names.dedup();
+                    let label = if names.len() <= 3 {
+                        names.join(", ")
+                    } else {
+                        format!("{} (+{})", names[..3].join(", "), names.len() - 3)
+                    };
+                    if disabled > 0 {
+                        self.log_warn(format!(
+                            "Disabled {disabled} duplicate mod(s): {label}"
+                        ));
+                    }
+                    self.status = format!("Enabled {changed} mod(s)");
+                    self.log_info(format!("Enabled {changed} mod(s)"));
+                    self.queue_auto_deploy("enable duplicates");
                     self.request_sigillink_auto_rank();
                 } else {
                     self.status = "Enable canceled".to_string();
@@ -11046,6 +11203,10 @@ Use Ctrl+R to reset this mod or F12 to reset all pins."
             });
             return;
         }
+        if let Some(dialog) = self.build_duplicate_enable_dialog(&to_enable) {
+            self.open_dialog(dialog);
+            return;
+        }
         let changed = self.set_mods_enabled_in_active(&to_enable, true);
         if changed == 0 {
             self.status = "Mods already enabled".to_string();
@@ -11061,6 +11222,10 @@ Use Ctrl+R to reset this mod or F12 to reset all pins."
         let Some(ids) = self.pending_dependency_enable.take() else {
             return;
         };
+        if let Some(dialog) = self.build_duplicate_enable_dialog(&ids) {
+            self.open_dialog(dialog);
+            return;
+        }
         let changed = self.set_mods_enabled_in_active(&ids, true);
         if changed == 0 {
             self.status = "Dependencies already enabled".to_string();

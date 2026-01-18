@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.9.6
+
+- Warn when enabling duplicate-named mods and offer to disable other enabled copies.
+
 ## 0.9.5
 
 - Write Patch 7/8 modsettings using the enabled mod order (Mods list reflects active mods).
