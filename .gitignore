@@ -1,4 +1,5 @@
 /target
 /dist
+/AGENTS.md
 /squashfs-root
 **/*.swp
