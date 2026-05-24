@@ -116,6 +116,16 @@ shows a clear missing-mod dialog and offers Nexus search links to re-import.
 - BG3 installed (Steam native or Proton)
 - Linux terminal (Konsole, GNOME Terminal, etc.)
 
+### Drag-and-drop terminal compatibility
+
+Drag-drop import is delivered via bracketed paste. Most terminals forward file
+drops correctly: Konsole, GNOME Terminal, Foot, Kitty, Wave, xterm.
+
+**Alacritty does not forward file drops by default** — there is no built-in
+file-drop-to-paste handling. Either type the path with `i` (Tab completes), or
+configure an Alacritty `hint` that converts dropped paths into a keyboard
+action. Without that, drag-drop will appear to do nothing in Alacritty.
+
 ## Install
 
 Prebuilt Linux packages are published on GitHub Releases (AppImage, `.deb`, `.rpm`, and `.tar.gz`).
@@ -152,8 +162,8 @@ cargo run
 - `c` duplicate profile (Explorer)
 - `e` export mod list (Explorer)
 - `p` import mod list (Explorer)
-- `i` import a mod (file, folder, zip, or 7z)
-- drag & drop into the terminal to import (whole window)
+- `i` import a mod (file, folder, zip, or 7z) — `Tab` autocompletes the path
+- drag & drop into the terminal to import (whole window) — see terminal note below
 - `space` enable/disable (Mods)
 - `m` move mode
 - `u` move up

@@ -1263,6 +1263,7 @@ impl App {
         app.load_smart_rank_cache();
         let mod_count = app.library.mods.len();
         app.log_info(format!("Library loaded: {mod_count} mod(s)"));
+        app.log_startup_diagnostics();
         app.log_info("Detecting game paths...".to_string());
         if let Some(error) = setup_error {
             app.log_warn(format!("Path auto-detect failed: {error}"));
@@ -5737,7 +5738,7 @@ Use Ctrl+R to reset this mod or F12 to reset all pins."
             auto_submit: false,
             last_edit_at: Instant::now(),
         };
-        self.status = "Import: paste a file or folder path, then press Enter".to_string();
+        self.status = "Import: paste/type a path (Tab to complete), then press Enter".to_string();
     }
 
     pub fn enter_mod_filter(&mut self) {
@@ -7647,6 +7648,24 @@ Use Ctrl+R to reset this mod or F12 to reset all pins."
 
     pub fn log_error(&mut self, message: String) {
         self.push_log(LogLevel::Error, message);
+    }
+
+    fn log_startup_diagnostics(&mut self) {
+        let library_path = self.config.data_dir.join("library.json");
+        let library_size = fs::metadata(&library_path).map(|m| m.len()).ok();
+        let library_desc = match library_size {
+            Some(size) => format!("{} ({size} bytes)", library_path.display()),
+            None => format!("{} (missing)", library_path.display()),
+        };
+        self.log_info(format!(
+            "Startup: data_dir={}, library={}, profiles={}, active_profile={:?}, modsettings_sync_enabled={}, modsettings_hash={}",
+            self.config.data_dir.display(),
+            library_desc,
+            self.library.profiles.len(),
+            self.library.active_profile,
+            self.library.modsettings_sync_enabled,
+            self.library.modsettings_hash.as_deref().unwrap_or("none"),
+        ));
     }
 
     fn log_text(&self) -> Result<String> {
