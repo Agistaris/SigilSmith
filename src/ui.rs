@@ -567,6 +567,7 @@ fn handle_override_picker(app: &mut App, key: KeyEvent) -> Result<()> {
 #[derive(Debug, Clone, Copy)]
 enum SettingsItemKind {
     ActionSetupPaths,
+    ActionSetupLarianDir,
     ActionShowPaths,
     ActionMoveSigilLinkCache,
     ActionClearFrameworkCaches,
@@ -629,6 +630,12 @@ fn settings_items(app: &App) -> Vec<SettingsItem> {
         SettingsItem {
             label: "Configure Game Paths".to_string(),
             kind: SettingsItemKind::ActionSetupPaths,
+            checked: None,
+            selectable: true,
+        },
+        SettingsItem {
+            label: "Configure Larian Data Dir".to_string(),
+            kind: SettingsItemKind::ActionSetupLarianDir,
             checked: None,
             selectable: true,
         },
@@ -947,6 +954,11 @@ fn handle_settings_menu(app: &mut App, key: KeyEvent) -> Result<()> {
                         app.request_settings_menu_return();
                         app.close_settings_menu();
                         app.enter_setup_game_root();
+                    }
+                    SettingsItemKind::ActionSetupLarianDir => {
+                        app.request_settings_menu_return();
+                        app.close_settings_menu();
+                        app.enter_setup_larian_dir();
                     }
                     SettingsItemKind::ActionShowPaths => {
                         app.request_settings_menu_return();
@@ -1462,6 +1474,18 @@ fn handle_browser_mode(app: &mut App, key: KeyEvent, browser: &mut PathBrowser) 
                 return Ok(true);
             }
             KeyCode::Tab => {
+                if let Some(completed) = complete_path_input(&browser.path_input) {
+                    if completed != browser.path_input {
+                        browser.path_input = completed;
+                        browser.entries = app.build_path_browser_entries(
+                            &browser.purpose,
+                            &browser.current,
+                            &browser.path_input,
+                        );
+                    }
+                }
+            }
+            KeyCode::BackTab => {
                 browser.focus = PathBrowserFocus::List;
             }
             KeyCode::Enter => {
@@ -1669,6 +1693,74 @@ fn sync_path_input_for_browser(app: &App, browser: &mut PathBrowser) {
         app.build_path_browser_entries(&browser.purpose, &browser.current, &browser.path_input);
 }
 
+fn complete_path_input(input: &str) -> Option<String> {
+    let expanded = expand_tilde(input);
+    let (search_dir, name_prefix, kept) = if input.is_empty() || input.ends_with('/') {
+        (expanded.clone(), String::new(), input.to_string())
+    } else {
+        let parent = expanded
+            .parent()
+            .map(|p| {
+                if p.as_os_str().is_empty() {
+                    PathBuf::from(".")
+                } else {
+                    p.to_path_buf()
+                }
+            })
+            .unwrap_or_else(|| PathBuf::from("."));
+        let name = expanded
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("")
+            .to_string();
+        let cut = input.rfind('/').map(|i| i + 1).unwrap_or(0);
+        (parent, name, input[..cut].to_string())
+    };
+    if !search_dir.is_dir() {
+        return None;
+    }
+    let mut matches: Vec<String> = std::fs::read_dir(&search_dir)
+        .ok()?
+        .filter_map(|entry| entry.ok())
+        .filter_map(|entry| entry.file_name().into_string().ok())
+        .filter(|name| name.starts_with(&name_prefix))
+        .collect();
+    if matches.is_empty() {
+        return None;
+    }
+    matches.sort();
+    let completion = if matches.len() == 1 {
+        let candidate = search_dir.join(&matches[0]);
+        if candidate.is_dir() {
+            format!("{}/", matches[0])
+        } else {
+            matches[0].clone()
+        }
+    } else {
+        longest_common_prefix(&matches)
+    };
+    if completion.len() <= name_prefix.len() {
+        return None;
+    }
+    Some(format!("{}{}", kept, completion))
+}
+
+fn longest_common_prefix(strings: &[String]) -> String {
+    let Some((first, rest)) = strings.split_first() else {
+        return String::new();
+    };
+    let mut prefix = first.clone();
+    for s in rest {
+        while !s.starts_with(&prefix) {
+            prefix.pop();
+            if prefix.is_empty() {
+                return String::new();
+            }
+        }
+    }
+    prefix
+}
+
 fn path_input_backspace(app: &mut App, browser: &mut PathBrowser) {
     if browser.path_input.is_empty() {
         return;
@@ -1791,6 +1883,19 @@ fn handle_input_mode(
         {
             if paste_clipboard_into(app, buffer) {
                 *last_edit_at = std::time::Instant::now();
+            }
+        }
+        KeyCode::Tab
+            if matches!(
+                purpose,
+                InputPurpose::ImportPath | InputPurpose::ImportProfile
+            ) =>
+        {
+            if let Some(completed) = complete_path_input(buffer) {
+                if completed != *buffer {
+                    *buffer = completed;
+                    *last_edit_at = std::time::Instant::now();
+                }
             }
         }
         KeyCode::Char(c) => {
@@ -5153,21 +5258,33 @@ fn draw_path_browser(frame: &mut Frame<'_>, app: &App, theme: &Theme, browser: &
     let spacer = Paragraph::new(Line::from("")).style(Style::default().bg(theme.header_bg));
     frame.render_widget(spacer, chunks[2]);
 
-    let tab_label = if path_focus { "Browse Folder" } else { "Path" };
     let key_style = Style::default()
         .fg(theme.accent)
         .add_modifier(Modifier::BOLD);
     let text_style = Style::default().fg(theme.muted);
-    let footer_parts = vec![
-        ("[Tab]".to_string(), key_style),
-        (format!(" {tab_label}  "), text_style),
-        ("[Enter/Space]".to_string(), key_style),
-        (" Open/Select  ".to_string(), text_style),
-        ("[Backspace]".to_string(), key_style),
-        (" Parent  ".to_string(), text_style),
-        ("[Esc]".to_string(), key_style),
-        (" Cancel".to_string(), text_style),
-    ];
+    let footer_parts = if path_focus {
+        vec![
+            ("[Tab]".to_string(), key_style),
+            (" Complete  ".to_string(), text_style),
+            ("[Shift+Tab]".to_string(), key_style),
+            (" Folder  ".to_string(), text_style),
+            ("[Enter]".to_string(), key_style),
+            (" Open/Select  ".to_string(), text_style),
+            ("[Esc]".to_string(), key_style),
+            (" Cancel".to_string(), text_style),
+        ]
+    } else {
+        vec![
+            ("[Tab]".to_string(), key_style),
+            (" Path  ".to_string(), text_style),
+            ("[Enter/Space]".to_string(), key_style),
+            (" Open/Select  ".to_string(), text_style),
+            ("[Backspace]".to_string(), key_style),
+            (" Parent  ".to_string(), text_style),
+            ("[Esc]".to_string(), key_style),
+            (" Cancel".to_string(), text_style),
+        ]
+    };
     let footer_line = Line::from(truncate_spans(footer_parts, footer_area.width as usize));
     let footer_widget = Paragraph::new(footer_line)
         .style(Style::default().fg(theme.muted))
@@ -6211,6 +6328,7 @@ fn build_settings_menu_lines(
         };
         match item.kind {
             SettingsItemKind::ActionSetupPaths
+            | SettingsItemKind::ActionSetupLarianDir
             | SettingsItemKind::ActionShowPaths
             | SettingsItemKind::ActionMoveSigilLinkCache
             | SettingsItemKind::ActionClearFrameworkCaches
@@ -9283,7 +9401,7 @@ fn build_whats_new_lines(theme: &Theme, width: usize) -> Vec<Line<'static>> {
         "  /  *   .-''-.  /\\  .-''-.   * \\",
         " |  o   /  /\\  \\ || /  /\\  \\   o |",
         "  \\ *  \\  \\/  / || \\  \\/  /  * /",
-        "   '-.  '----'  ||  '----'  .-' v0.9.6",
+        "   '-.  '----'  ||  '----'  .-' v0.9.7",
     ];
     for line in banner {
         let padded = format!("{line:<banner_width$}");

@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.9.7
+
+- Add "Configure Larian Data Dir" entry to the Settings menu so the user mods directory can be re-pointed without going through the Game Root re-detect flow.
+- Add Tab path completion in the Path Browser input and the `i` Import path prompt (Shift+Tab in the Path Browser switches focus to the folder list).
+- Log resolved data dir, library.json size, profile count, active profile, and modsettings sync state on every startup to aid diagnosing missing-mod reports.
+- Document Alacritty's lack of file-drop bracketed-paste support in the README.
+
 ## 0.9.6
 
 - Warn when enabling duplicate-named mods and offer to disable other enabled copies.
