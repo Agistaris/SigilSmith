@@ -1,5 +1,7 @@
 # SigilSmith
 
+Contributor task routes and checks: [docs/WORKFLOW.md](docs/WORKFLOW.md).
+
 SigilSmith is a keyboard-first, Linux-first TUI mod manager for Baldur's Gate 3. Drag-drop imports, profiles,
 overrides, SigiLink cache deploys, and intelligent ordering in one place. It focuses on native file-based mod
 deployment:

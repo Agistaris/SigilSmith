@@ -52,4 +52,6 @@ git push --tags
 
 ## 6) Publish to Mod Sites
 
-Follow `docs/PUBLISH.md` to post the same release on Nexus Mods and other BG3 channels.
+This checkout has no maintained mod-site publishing runbook. Prepare the
+site-specific steps and obtain explicit user authorization before publication;
+the workflow boundaries are in [WORKFLOW.md](WORKFLOW.md).
