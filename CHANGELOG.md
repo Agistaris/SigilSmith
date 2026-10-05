@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- Pick the Larian data dir from Steam's per-game compatibility tool: BG3 forced to Proton uses its compatdata prefix; native runs keep `~/.local/share/Larian Studios`.
+- Search every Steam library, plus Flatpak and Snap Steam, for the game and its Proton prefix.
+- Warn at startup when the configured Larian data dir is not the one Steam launches BG3 with.
+
 ## 0.9.6
 
 - Warn when enabling duplicate-named mods and offer to disable other enabled copies.

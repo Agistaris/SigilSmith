@@ -1292,6 +1292,20 @@ impl App {
                     );
                 }
             }
+            if let Some(expected) =
+                game::user_dir_mismatch(app.game_id, &app.config.game_root, &app.config.larian_dir)
+            {
+                app.log_warn(format!(
+                    "Steam launches BG3 with Larian data in {}, but SigilSmith is set to {}. Use Esc → Configure Game Paths to switch.",
+                    expected.display(),
+                    app.config.larian_dir.display()
+                ));
+                app.set_toast(
+                    "Larian data dir differs from the one BG3 uses: see log",
+                    ToastLevel::Warn,
+                    Duration::from_secs(8),
+                );
+            }
         }
         app.ensure_setup();
         if matches!(mode, StartupMode::Cli) {
@@ -5233,13 +5247,24 @@ Use Ctrl+R to reset this mod or F12 to reset all pins."
                 candidates.push(home.join(".local/share/Steam/steamapps/common"));
             }
             PathBrowserPurpose::Setup(SetupStep::LarianDir) => {
+                let game_root = Some(self.config.game_root.as_path())
+                    .filter(|path| !path.as_os_str().is_empty());
+                if let Some(game_root) = game_root {
+                    candidates.extend(game::user_dir_mismatch(
+                        self.game_id,
+                        game_root,
+                        &self.config.larian_dir,
+                    ));
+                }
                 if !self.config.larian_dir.as_os_str().is_empty() {
                     candidates.push(self.config.larian_dir.clone());
                 }
+                candidates.extend(
+                    game::user_dir_candidates(self.game_id, game_root)
+                        .into_iter()
+                        .filter(|path| game::looks_like_user_dir(self.game_id, path)),
+                );
                 candidates.push(home.join(".local/share/Larian Studios"));
-                candidates.push(home.join(
-                    ".local/share/Steam/steamapps/compatdata/1086940/pfx/drive_c/users/steamuser/AppData/Local/Larian Studios",
-                ));
             }
             PathBrowserPurpose::Setup(SetupStep::DownloadsDir) => {
                 if !self.app_config.downloads_dir.as_os_str().is_empty() {

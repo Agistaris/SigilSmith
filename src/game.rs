@@ -1,7 +1,7 @@
 use crate::bg3;
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -60,5 +60,18 @@ pub fn looks_like_game_root(game: GameId, path: &Path) -> bool {
 pub fn looks_like_user_dir(game: GameId, path: &Path) -> bool {
     match game {
         GameId::Bg3 => bg3::looks_like_larian_dir(path),
+    }
+}
+
+pub fn user_dir_candidates(game: GameId, game_root: Option<&Path>) -> Vec<PathBuf> {
+    match game {
+        GameId::Bg3 => bg3::larian_dir_candidates(game_root),
+    }
+}
+
+/// The user dir the game actually reads, when it differs from `user_dir`.
+pub fn user_dir_mismatch(game: GameId, game_root: &Path, user_dir: &Path) -> Option<PathBuf> {
+    match game {
+        GameId::Bg3 => bg3::larian_dir_mismatch(game_root, user_dir),
     }
 }

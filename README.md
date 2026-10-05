@@ -230,8 +230,10 @@ Global app config (active game) lives at:
 ~/.local/share/sigilsmith/config.json
 ```
 
-On first launch SigilSmith auto-detects your BG3 paths. If it cannot find them,
-open the menu with `Esc` and choose "Configure game paths".
+On first launch SigilSmith auto-detects your BG3 paths. If Steam is set to run
+BG3 through Proton (Properties → Compatibility), it uses the Larian data in the
+game's Proton prefix; otherwise it uses `~/.local/share/Larian Studios`. If it
+cannot find them, open the menu with `Esc` and choose "Configure game paths".
 You can also edit the config files directly if BG3 is installed in a non-standard path.
 
 If auto-detect fails, SigilSmith opens a path browser. Use arrows to navigate,
