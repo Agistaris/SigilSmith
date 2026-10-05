@@ -9283,7 +9283,7 @@ fn build_whats_new_lines(theme: &Theme, width: usize) -> Vec<Line<'static>> {
         "  /  *   .-''-.  /\\  .-''-.   * \\",
         " |  o   /  /\\  \\ || /  /\\  \\   o |",
         "  \\ *  \\  \\/  / || \\  \\/  /  * /",
-        "   '-.  '----'  ||  '----'  .-' v0.9.6",
+        "   '-.  '----'  ||  '----'  .-' v0.9.7",
     ];
     for line in banner {
         let padded = format!("{line:<banner_width$}");
@@ -9324,6 +9324,27 @@ fn build_whats_new_lines(theme: &Theme, width: usize) -> Vec<Line<'static>> {
             style,
         )));
     }
+
+    push_section(&mut lines, "Steam + Proton Paths", width, theme);
+    push_bullet(
+        &mut lines,
+        width,
+        "Larian data dir follows Steam's compatibility setting: Proton prefix when forced, native otherwise.",
+        body_style,
+    );
+    push_bullet(
+        &mut lines,
+        width,
+        "Finds BG3 in every Steam library, plus Flatpak and Snap Steam.",
+        body_style,
+    );
+    push_bullet(
+        &mut lines,
+        width,
+        "Startup warning when the saved Larian data dir is not the one BG3 uses.",
+        body_style,
+    );
+    lines.push(Line::from(""));
 
     push_section(&mut lines, "Patch 8 Compatibility", width, theme);
     push_bullet(

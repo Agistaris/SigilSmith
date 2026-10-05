@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.9.7
 
 - Pick the Larian data dir from Steam's per-game compatibility tool: BG3 forced to Proton uses its compatdata prefix; native runs keep `~/.local/share/Larian Studios`.
 - Search every Steam library, plus Flatpak and Snap Steam, for the game and its Proton prefix.
