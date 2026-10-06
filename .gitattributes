@@ -1,0 +1,7 @@
+# Keep GitHub source archives minimal (git archive / Source code zip)
+AGENTS.md export-ignore
+dist/ export-ignore
+target/ export-ignore
+docs/ export-ignore
+test-fixtures/ export-ignore
+packaging/ export-ignore

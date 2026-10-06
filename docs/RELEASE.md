@@ -12,14 +12,27 @@ This repo uses Cargo for versioning and `packaging/` for Linux artifacts.
 
 ```bash
 cargo check -q
-./packaging/build-packages.sh
+VERSION=$(rg -m1 '^version\s*=\s*"' Cargo.toml | sed -E 's/.*"([^"]+)".*/\1/')
+DIST_DIR="dist/v$VERSION" ./packaging/build-packages.sh
+
+# Nexus upload zips (requires 7z/7zz)
+rm -rf "dist/current build zips"
+mkdir -p "dist/current build zips"
+artifacts=(
+  "dist/v$VERSION/sigilsmith-${VERSION}-linux-x86_64.tar.gz"
+  "dist/v$VERSION/sigilsmith-${VERSION}-x86_64.AppImage"
+  "dist/v$VERSION/sigilsmith_${VERSION}-1_amd64.deb"
+  "dist/v$VERSION/sigilsmith-${VERSION}-1.x86_64.rpm"
+)
+for artifact in "${artifacts[@]}"; do
+  7z a -t7z "dist/current build zips/$(basename "$artifact").7z" \
+    "$artifact" "dist/v$VERSION/SHA256SUMS.txt"
+done
 ```
 
-Artifacts land in `dist/`:
-- `sigilsmith-<version>-linux-x86_64.tar.gz`
-- `sigilsmith-<version>-x86_64.AppImage`
-- `.deb` and `.rpm`
-- `SHA256SUMS.txt`
+Artifacts land in:
+- `dist/v<version>/` (release assets + `SHA256SUMS.txt`)
+- `dist/current build zips/` (only the current release, each `.7z` includes the artifact + `SHA256SUMS.txt`)
 
 ## 3) Git Tag + Push
 
@@ -33,10 +46,7 @@ git push
 git push --tags
 ```
 
-## 4) GitHub Release (Source + CI)
-
-The public repo includes the full source and a GitHub Actions workflow that builds
-release artifacts and publishes them when you push a version tag.
+## 4) GitHub Release (Source + Assets)
 
 1) Push your commits and tag:
 
@@ -46,8 +56,9 @@ git tag vX.Y.Z
 git push --tags
 ```
 
-2) The `release` workflow builds and uploads artifacts in `dist/`.
-3) Edit the GitHub Release notes if needed (optional).
+2) Create a GitHub Release for the tag.
+3) Upload assets from `dist/vX.Y.Z/`.
+4) Edit the GitHub Release notes if needed (optional).
 
 
 ## 6) Publish to Mod Sites

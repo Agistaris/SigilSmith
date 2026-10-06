@@ -1,5 +1,6 @@
 /target
 /dist
 /AGENTS.md
+/packaging/build-release.sh
 /squashfs-root
 **/*.swp
