@@ -5,7 +5,8 @@
 - Enable/disable dependency prompts get an "Only this mod" button (`O`) that changes just the selected mod(s), leaving dependents or required dependencies as they are. The prompt warns that the mod or its dependents may not work; the default stays the safe choice.
 - Duplicate and similar-mod import prompts get a "Keep both" button (`O`) that adds the new mod next to the existing one when their IDs differ; the command-line import prompt gains `[b]oth`.
 - Treat DiceSet_05 and DiceSet_07 as built-in game modules, so mods that list them no longer report missing dependencies.
-- Drop a trailing mod UUID from names taken from pak file names (e.g. `AlfiraJoinsTheParty_3539eba9-…`).
+- Loose mods keep the dependencies listed in their meta.lsx or info.json when imported; before, they showed no dependencies at all.
+- Cleaner mod names: when a pak file name is generated (a trailing UUID, or the in-game mod manager's `name_1af5b-i3zl` form), show the mod's own name instead, and drop trailing UUIDs from native mod names.
 - Packaging: `SHA256SUMS.txt` lists only the packages from the current build.
 - CI: the release workflow runs only when started by hand.
 

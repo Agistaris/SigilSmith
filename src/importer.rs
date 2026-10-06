@@ -670,11 +670,11 @@ fn import_from_dir(
     }
 
     let use_archive_label = scan.pak_files.len() == 1;
-    let meta_created = scan
+    let payload_meta = scan
         .meta_file
         .as_ref()
-        .and_then(|path| metadata::read_meta_lsx(path))
-        .and_then(|meta| meta.created_at);
+        .and_then(|path| metadata::read_meta_lsx(path));
+    let meta_created = payload_meta.as_ref().and_then(|meta| meta.created_at);
     let json_mods = scan
         .info_json
         .as_ref()
@@ -714,6 +714,7 @@ fn import_from_dir(
             allow_move,
             source_times,
             meta_created.or_else(|| json_mods.iter().filter_map(|info| info.created_at).min()),
+            loose_dependencies(payload_meta.as_ref(), &json_mods),
             loose_file_count,
             pak_total,
             reporter,
@@ -983,11 +984,13 @@ fn import_loose(
     allow_move: bool,
     source_times: Option<SourceTimes>,
     meta_created: Option<i64>,
+    mut dependencies: Vec<String>,
     total_files: usize,
     install_offset: usize,
     reporter: Option<&ProgressReporter>,
 ) -> Result<ImportMod> {
     let mod_id = hash_path(path);
+    dependencies.retain(|dep| !dep.eq_ignore_ascii_case(&mod_id));
     let staging_root = make_stage_dir(data_dir, &mod_id)?;
     let mut guard = StagingGuard::new(staging_root.clone());
 
@@ -1089,7 +1092,7 @@ fn import_loose(
         target_overrides: Vec::new(),
         source_label: source_label.map(|label| label.to_string()),
         source: ModSource::Managed,
-        dependencies: Vec::new(),
+        dependencies,
     };
     guard.disarm();
     Ok(ImportMod {
@@ -1097,6 +1100,23 @@ fn import_loose(
         staging_root: Some(staging_root),
         sigillink: Some(sigillink),
     })
+}
+
+/// Dependencies a loose payload declares in its meta.lsx and info.json. A later metadata
+/// refresh reads the same files, but it is skipped while the import keeps the cache valid.
+fn loose_dependencies(
+    meta: Option<&metadata::ModMeta>,
+    json_mods: &[metadata::JsonModInfo],
+) -> Vec<String> {
+    let mut dependencies = meta
+        .map(|meta| meta.dependencies.clone())
+        .unwrap_or_default();
+    for info in json_mods {
+        dependencies.extend(info.dependencies.iter().cloned());
+    }
+    dependencies.sort();
+    dependencies.dedup();
+    dependencies
 }
 
 fn persist_payload_metadata(scan: &PayloadScan, mod_root: &Path) {
@@ -1849,4 +1869,61 @@ fn has_parent_named(path: &Path, needle: &str) -> bool {
         .skip(1)
         .filter_map(|ancestor| ancestor.file_name())
         .any(|name| name.to_string_lossy().eq_ignore_ascii_case(needle))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const META_LSX: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
+<save>
+  <region id="Config">
+    <node id="root">
+      <children>
+        <node id="Dependencies">
+          <children>
+            <node id="ModuleShortDesc">
+              <attribute id="Folder" type="LSString" value="Required_Mod"/>
+              <attribute id="Name" type="LSString" value="Required_Mod"/>
+              <attribute id="UUID" type="FixedString" value="0badf00d-1111-2222-3333-444455556666"/>
+            </node>
+          </children>
+        </node>
+        <node id="ModuleInfo">
+          <attribute id="Folder" type="LSString" value="LooseDepTest"/>
+          <attribute id="Name" type="LSString" value="Loose Dependency Test"/>
+          <attribute id="UUID" type="FixedString" value="d1ced1ce-0000-4000-8000-000000000001"/>
+        </node>
+      </children>
+    </node>
+  </region>
+</save>
+"#;
+
+    #[test]
+    fn loose_import_keeps_declared_dependencies() {
+        let root = std::env::temp_dir().join(format!(
+            "sigilsmith-loose-deps-{}-{}",
+            std::process::id(),
+            now_timestamp()
+        ));
+        let payload = root.join("Loose Dependency Test");
+        let data_dir = root.join("data");
+        fs::create_dir_all(payload.join("Mods/LooseDepTest")).unwrap();
+        fs::create_dir_all(payload.join("Public/LooseDepTest")).unwrap();
+        fs::create_dir_all(&data_dir).unwrap();
+        fs::write(payload.join("Mods/LooseDepTest/meta.lsx"), META_LSX).unwrap();
+        fs::write(payload.join("Public/LooseDepTest/Test.txt"), "test").unwrap();
+
+        let result = import_path_with_progress(&payload, &data_dir, None);
+        let _ = fs::remove_dir_all(&root);
+
+        let result = result.unwrap();
+        let mods: Vec<&ImportMod> = result.batches.iter().flat_map(|b| &b.mods).collect();
+        assert_eq!(mods.len(), 1);
+        assert_eq!(
+            mods[0].entry.dependencies,
+            vec!["Required_Mod_0badf00d-1111-2222-3333-444455556666".to_string()]
+        );
+    }
 }

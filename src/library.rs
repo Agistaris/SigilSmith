@@ -214,13 +214,19 @@ fn default_true() -> bool {
 
 impl ModEntry {
     pub fn display_name(&self) -> String {
+        let name = strip_trailing_id(&self.name);
         if let Some(label) = &self.source_label {
-            let cleaned = clean_source_label(strip_trailing_uuid(label));
+            let stripped = strip_trailing_id(label);
+            if stripped.len() < label.trim_end().len() && !name.trim().is_empty() {
+                // A generated pak file name; the mod's own name reads better.
+                return name.to_string();
+            }
+            let cleaned = clean_source_label(stripped);
             if !cleaned.is_empty() {
                 return cleaned;
             }
         }
-        self.name.clone()
+        name.to_string()
     }
 
     pub fn source_label(&self) -> Option<&str> {
@@ -411,23 +417,48 @@ fn system_time_to_epoch(time: SystemTime) -> Option<i64> {
         .map(|duration| duration.as_secs() as i64)
 }
 
-/// Drops a trailing mod UUID that some pak file names carry, e.g.
-/// "AlfiraJoinsTheParty_3539eba9-6d77-c53d-1009-b3c77c9cd04c".
-fn strip_trailing_uuid(label: &str) -> &str {
+/// Drops an ID that some mod names and pak file names carry after the name:
+/// a full UUID ("AlfiraJoinsTheParty_3539eba9-6d77-c53d-1009-b3c77c9cd04c")
+/// or the shortened form the in-game mod manager uses
+/// ("bettercontainers_cb42bc3a-f1d2-afwl").
+fn strip_trailing_id(label: &str) -> &str {
     let trimmed = label.trim_end();
-    let Some(split) = trimmed.len().checked_sub(36) else {
+    let Some(head) = strip_uuid_suffix(trimmed).or_else(|| strip_mod_manager_suffix(trimmed))
+    else {
         return trimmed;
     };
-    if !trimmed.is_char_boundary(split) || !is_uuid(&trimmed[split..]) {
-        return trimmed;
-    }
-    let head = trimmed[..split]
-        .trim_end_matches(|ch: char| ch.is_whitespace() || ch == '_' || ch == '-' || ch == '.');
+    let head =
+        head.trim_end_matches(|ch: char| ch.is_whitespace() || ch == '_' || ch == '-' || ch == '.');
     if head.is_empty() {
         trimmed
     } else {
         head
     }
+}
+
+fn strip_uuid_suffix(label: &str) -> Option<&str> {
+    let split = label.len().checked_sub(36)?;
+    (label.is_char_boundary(split) && is_uuid(&label[split..])).then(|| &label[..split])
+}
+
+/// The in-game mod manager names paks "<name>_<start of the UUID>-<4 random
+/// characters>", e.g. "tashascauldronhairstyles_1af5b-i3zl".
+fn strip_mod_manager_suffix(label: &str) -> Option<&str> {
+    let (head, tail) = label.rsplit_once('_')?;
+    let (uuid_start, random) = tail.rsplit_once('-')?;
+    let random_ok = random.len() == 4
+        && random
+            .chars()
+            .all(|ch| ch.is_ascii_digit() || ch.is_ascii_lowercase());
+    let uuid_start_ok = (4..36).contains(&uuid_start.len())
+        && uuid_start
+            .chars()
+            .enumerate()
+            .all(|(index, ch)| match index {
+                8 | 13 | 18 | 23 => ch == '-',
+                _ => ch.is_ascii_hexdigit(),
+            });
+    (random_ok && uuid_start_ok).then_some(head)
 }
 
 fn is_uuid(value: &str) -> bool {
@@ -510,25 +541,98 @@ mod tests {
     fn display_label_drops_trailing_uuid() {
         let label = "AlfiraJoinsTheParty_3539eba9-6d77-c53d-1009-b3c77c9cd04c";
         assert_eq!(
-            clean_source_label(strip_trailing_uuid(label)),
+            clean_source_label(strip_trailing_id(label)),
             "AlfiraJoinsTheParty"
         );
         let label = "Aardi_KnightsandDames_194a7429-5b34-7d68-06ee-494607e165e4";
         assert_eq!(
-            clean_source_label(strip_trailing_uuid(label)),
+            clean_source_label(strip_trailing_id(label)),
             "Aardi KnightsandDames"
         );
+        // Native mod names can carry the UUID after a space.
+        assert_eq!(
+            strip_trailing_id("AlfiraJoinsTheParty 3539eba9-6d77-c53d-1009-b3c77c9cd04c"),
+            "AlfiraJoinsTheParty"
+        );
+    }
+
+    fn entry(name: &str, source_label: Option<&str>) -> ModEntry {
+        ModEntry {
+            id: "id".to_string(),
+            name: name.to_string(),
+            created_at: None,
+            modified_at: None,
+            added_at: 0,
+            targets: Vec::new(),
+            target_overrides: Vec::new(),
+            source_label: source_label.map(str::to_string),
+            source: ModSource::Managed,
+            dependencies: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn display_name_prefers_mod_name_over_generated_file_name() {
+        let generated = entry(
+            "Better Healing Potions",
+            Some("betterhealingpotions_a909a143-gw7g"),
+        );
+        assert_eq!(generated.display_name(), "Better Healing Potions");
+        // A named archive keeps its label (often with a version).
+        let archive = entry("Party Limit Begone", Some("Party Limit Begone SE v3.5"));
+        assert_eq!(archive.display_name(), "Party Limit Begone SE v3.5");
+        let native = entry(
+            "AlfiraJoinsTheParty 3539eba9-6d77-c53d-1009-b3c77c9cd04c",
+            None,
+        );
+        assert_eq!(native.display_name(), "AlfiraJoinsTheParty");
+    }
+
+    #[test]
+    fn display_label_drops_mod_manager_suffix() {
+        for (label, expected) in [
+            ("bettercontainers_cb42bc3a-f1d2-afwl", "bettercontainers"),
+            ("betterinventoryui_6b585be8-ed7-bplo", "betterinventoryui"),
+            (
+                "addonbetterinventoryui_8c7d340-3bzc",
+                "addonbetterinventoryui",
+            ),
+            ("beards_aff0c400-ef4e-bc46-c255-69dx", "beards"),
+            ("weightlessgold_81117bd5-de2f-a-du9y", "weightlessgold"),
+            (
+                "tashascauldronhairstyles_1af5b-i3zl",
+                "tashascauldronhairstyles",
+            ),
+            (
+                "aza_npcre_theemeraldgrove_74cb-bl78",
+                "aza_npcre_theemeraldgrove",
+            ),
+            ("ImpUI_26922ba9-6018-5252-075d-7ff2ba6ed879", "ImpUI"),
+        ] {
+            assert_eq!(strip_trailing_id(label), expected);
+        }
     }
 
     #[test]
     fn display_label_keeps_names_without_uuid() {
         assert_eq!(
-            strip_trailing_uuid("Party Limit Begone SE v3.5"),
+            strip_trailing_id("Party Limit Begone SE v3.5"),
             "Party Limit Begone SE v3.5"
         );
         // A bare UUID stays as-is rather than becoming an empty name.
         let bare = "3539eba9-6d77-c53d-1009-b3c77c9cd04c";
-        assert_eq!(strip_trailing_uuid(bare), bare);
-        assert_eq!(strip_trailing_uuid("Ünïcödé name"), "Ünïcödé name");
+        assert_eq!(strip_trailing_id(bare), bare);
+        assert_eq!(strip_trailing_id("Ünïcödé name"), "Ünïcödé name");
+        // Ordinary names with dashes or versions are left alone.
+        for label in [
+            "Party_Limit_Begone-SE-v3.5",
+            "Mod_Configuration_Menu-9162-1-41-0-1727000000",
+            "Some_Mod_final-v2",
+            "Cool_Armor_1234567-abc",
+            "Better_Dyes_v2-beta",
+            "Camp_Events_2024-final",
+        ] {
+            assert_eq!(strip_trailing_id(label), label);
+        }
     }
 }
