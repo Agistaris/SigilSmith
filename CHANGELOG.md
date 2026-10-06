@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- Packaging: the RPM states the SigilSmith Community License (it said MIT) and installs the LICENSE file.
+- Packaging: RPMs build in the v4 format when the build machine has rpmbuild 6.
+
 ## 0.9.8
 
 - Enable/disable dependency prompts get an "Only this mod" button (`O`) that changes just the selected mod(s), leaving dependents or required dependencies as they are. The prompt warns that the mod or its dependents may not work; the default stays the safe choice.

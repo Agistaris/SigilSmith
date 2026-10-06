@@ -54,3 +54,4 @@ sigilsmith = { path = "/usr/bin/sigilsmith" }
 [package.metadata.rpm.files]
 "sigilsmith.desktop" = { path = "/usr/share/applications/sigilsmith.desktop" }
 "icons" = { path = "/usr/share/icons/hicolor/scalable/apps" }
+"../LICENSE" = { path = "/usr/share/licenses/sigilsmith/LICENSE" }

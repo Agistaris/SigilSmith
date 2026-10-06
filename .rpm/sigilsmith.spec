@@ -6,7 +6,7 @@ Name: sigilsmith
 Summary: Native Linux TUI mod loader for Baldur's Gate 3.
 Version: @@VERSION@@
 Release: @@RELEASE@@%{?dist}
-License: MIT
+License: SigilSmith Community License v1.0
 Group: Applications/System
 Source0: %{name}-%{version}.tar.gz
 BuildRoot: %{_tmppath}/%{name}-%{version}-%{release}-root
@@ -30,3 +30,4 @@ rm -rf %{buildroot}
 %{_bindir}/*
 %{_datadir}/applications/sigilsmith.desktop
 %{_datadir}/icons/hicolor/scalable/apps/sigilsmith.svg
+%license %{_datadir}/licenses/%{name}/LICENSE
