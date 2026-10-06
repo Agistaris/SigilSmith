@@ -1,3 +1,4 @@
+use crate::library::{ModScripts, ScriptExtenderUse};
 use flate2::read::ZlibDecoder;
 use larian_formats::lspk;
 use lz4_flex::block::decompress;
@@ -595,7 +596,11 @@ fn read_meta_lsx_from_pak_custom(path: &Path) -> Option<ModMeta> {
         });
     }
     let entry = meta_entry?;
+    let bytes = read_pak_entry(path, entry)?;
+    Some(parse_meta_lsx(&bytes))
+}
 
+fn read_pak_entry(path: &Path, entry: &PakIndexEntry) -> Option<Vec<u8>> {
     let mut file = fs::File::open(path).ok()?;
     file.seek(SeekFrom::Start(entry.offset)).ok()?;
     let mut compressed = vec![0u8; entry.compressed_size as usize];
@@ -613,8 +618,101 @@ fn read_meta_lsx_from_pak_custom(path: &Path) -> Option<ModMeta> {
             zstd_decompress(&compressed, entry.decompressed_size as usize).ok()?
         }
     };
+    Some(bytes)
+}
 
-    Some(parse_meta_lsx(&bytes))
+/// Scripting a pak ships: a Script Extender config or Osiris goal scripts.
+pub fn read_pak_scripts(path: &Path) -> Option<ModScripts> {
+    let entries = read_pak_index_entries(path)?;
+    let mut scripts = ModScripts::default();
+    for entry in &entries {
+        if is_script_extender_config(&entry.path) {
+            let config = read_pak_entry(path, entry);
+            scripts.merge(ModScripts {
+                script_extender: Some(parse_script_extender_config(config.as_deref())),
+                osiris: false,
+            });
+        } else if is_osiris_goal(&entry.path) {
+            scripts.osiris = true;
+        }
+    }
+    Some(scripts)
+}
+
+/// The same check for a loose mod folder.
+pub fn scan_loose_scripts(root: &Path) -> ModScripts {
+    let mut scripts = ModScripts::default();
+    for entry in WalkDir::new(root)
+        .into_iter()
+        .filter_map(Result::ok)
+        .filter(|entry| entry.file_type().is_file())
+    {
+        let Ok(relative) = entry.path().strip_prefix(root) else {
+            continue;
+        };
+        let path = normalize_path(&relative.to_string_lossy());
+        if is_script_extender_config(&path) {
+            let config = fs::read(entry.path()).ok();
+            scripts.merge(ModScripts {
+                script_extender: Some(parse_script_extender_config(config.as_deref())),
+                osiris: false,
+            });
+        } else if is_osiris_goal(&path) {
+            scripts.osiris = true;
+        }
+    }
+    scripts
+}
+
+/// Paths are lowercase with forward slashes. The Script Extender loads
+/// Mods/<Folder>/ScriptExtender/Config.json.
+fn is_script_extender_config(path: &str) -> bool {
+    let parts: Vec<&str> = path.split('/').collect();
+    parts.len() >= 4
+        && matches!(
+            parts[parts.len() - 4..],
+            ["mods", _, "scriptextender", "config.json"]
+        )
+}
+
+fn is_osiris_goal(path: &str) -> bool {
+    (path.starts_with("mods/") || path.contains("/mods/"))
+        && path.contains("/story/rawfiles/goals/")
+}
+
+fn parse_script_extender_config(bytes: Option<&[u8]>) -> ScriptExtenderUse {
+    let Some(config) = bytes.and_then(|bytes| {
+        let text = String::from_utf8_lossy(bytes);
+        serde_json::from_str::<Value>(text.trim_start_matches('\u{feff}')).ok()
+    }) else {
+        return ScriptExtenderUse::default();
+    };
+    // The Script Extender docs use RequiredVersion; BG3 Mod Manager reads
+    // RequiredExtensionVersion, so accept either.
+    let required_version = ["RequiredVersion", "RequiredExtensionVersion"]
+        .iter()
+        .filter_map(|key| config.get(*key))
+        .find_map(|value| {
+            value
+                .as_u64()
+                .or_else(|| value.as_str().and_then(|text| text.trim().parse().ok()))
+        })
+        .and_then(|version| u32::try_from(version).ok());
+    let features = config
+        .get("FeatureFlags")
+        .and_then(Value::as_array)
+        .map(|flags| {
+            flags
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default();
+    ScriptExtenderUse {
+        required_version,
+        features,
+    }
 }
 
 fn read_pak_index_entries(path: &Path) -> Option<Vec<PakIndexEntry>> {
@@ -735,9 +833,127 @@ fn split_tags(value: &str) -> Vec<String> {
         .collect()
 }
 
+/// Writes a minimal LSPK v18 pak with the layout `read_pak_index_entries` reads.
+/// Each file is (path, contents, lz4-compress).
+#[cfg(test)]
+pub(crate) fn write_test_pak(path: &Path, files: &[(&str, &[u8], bool)]) {
+    let mut data = Vec::new();
+    data.extend_from_slice(b"LSPK");
+    data.extend_from_slice(&18u32.to_le_bytes());
+    data.extend_from_slice(&0u64.to_le_bytes());
+    let mut table = Vec::new();
+    for (name, bytes, compress) in files {
+        let offset = data.len() as u64;
+        let (stored, flags) = if *compress {
+            (lz4_flex::block::compress(bytes), 2u8)
+        } else {
+            (bytes.to_vec(), 0u8)
+        };
+        data.extend_from_slice(&stored);
+        let mut entry = [0u8; 272];
+        entry[..name.len()].copy_from_slice(name.as_bytes());
+        entry[256..260].copy_from_slice(&(offset as u32).to_le_bytes());
+        entry[260..262].copy_from_slice(&((offset >> 32) as u16).to_le_bytes());
+        entry[263] = flags;
+        entry[264..268].copy_from_slice(&(stored.len() as u32).to_le_bytes());
+        entry[268..272].copy_from_slice(&(bytes.len() as u32).to_le_bytes());
+        table.extend_from_slice(&entry);
+    }
+    let footer = data.len() as u64;
+    data[8..16].copy_from_slice(&footer.to_le_bytes());
+    let compressed = lz4_flex::block::compress(&table);
+    data.extend_from_slice(&(files.len() as u32).to_le_bytes());
+    data.extend_from_slice(&(compressed.len() as u32).to_le_bytes());
+    data.extend_from_slice(&compressed);
+    fs::write(path, data).unwrap();
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn temp_pak(name: &str) -> PathBuf {
+        std::env::temp_dir().join(format!("sigilsmith-{name}-{}.pak", std::process::id()))
+    }
+
+    #[test]
+    fn pak_scripts_find_script_extender_and_osiris() {
+        let path = temp_pak("scripts");
+        let config = "\u{feff}{\n  \"RequiredVersion\": 29,\n  \"ModTable\": \"SeTest\",\n  \"FeatureFlags\": [\"Lua\"]\n}";
+        write_test_pak(
+            &path,
+            &[
+                ("Mods/SeTest/meta.lsx", b"<save></save>", false),
+                (
+                    "Mods/SeTest/ScriptExtender/Config.json",
+                    config.as_bytes(),
+                    true,
+                ),
+                (
+                    "Mods/SeTest/ScriptExtender/Lua/BootstrapServer.lua",
+                    b"-- lua",
+                    true,
+                ),
+                (
+                    "Mods/SeTest/Story/RawFiles/Goals/SeTest.txt",
+                    b"Version 1",
+                    false,
+                ),
+            ],
+        );
+        let scripts = read_pak_scripts(&path);
+        let _ = fs::remove_file(&path);
+        assert_eq!(
+            scripts,
+            Some(ModScripts {
+                script_extender: Some(ScriptExtenderUse {
+                    required_version: Some(29),
+                    features: vec!["Lua".to_string()],
+                }),
+                osiris: true,
+            })
+        );
+    }
+
+    #[test]
+    fn pak_scripts_accept_the_bg3mm_version_key() {
+        let path = temp_pak("scripts-legacy");
+        write_test_pak(
+            &path,
+            &[(
+                "Mods/Legacy/ScriptExtender/Config.json",
+                br#"{"RequiredExtensionVersion": 22}"#,
+                false,
+            )],
+        );
+        let scripts = read_pak_scripts(&path).unwrap();
+        let _ = fs::remove_file(&path);
+        let script_extender = scripts.script_extender.unwrap();
+        assert_eq!(script_extender.required_version, Some(22));
+        assert!(!scripts.osiris);
+    }
+
+    #[test]
+    fn pak_scripts_ignore_files_outside_mods() {
+        let path = temp_pak("scripts-none");
+        write_test_pak(
+            &path,
+            &[
+                ("Mods/Plain/meta.lsx", b"<save></save>", false),
+                ("Public/Plain/ScriptExtender/Config.json", b"{}", false),
+                ("Public/Plain/Story/RawFiles/Goals/Note.txt", b"x", false),
+            ],
+        );
+        let scripts = read_pak_scripts(&path).unwrap();
+        let _ = fs::remove_file(&path);
+        assert!(scripts.is_empty(), "{scripts:?}");
+    }
+
+    #[test]
+    fn unreadable_script_extender_config_still_counts() {
+        let config = parse_script_extender_config(Some(b"{ not json"));
+        assert_eq!(config, ScriptExtenderUse::default());
+    }
 
     #[test]
     fn every_builtin_dice_set_is_a_base_dependency() {

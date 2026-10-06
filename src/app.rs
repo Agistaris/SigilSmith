@@ -6,8 +6,8 @@ use crate::{
     importer,
     library::{
         is_sigillink_ranking_profile, library_mod_root, normalize_label, normalize_times,
-        path_times, resolve_times, FileOverride, InstallTarget, Library, ModEntry, ModSource,
-        Profile, ProfileEntry, SigilLinkRankMeta, TargetKind, TargetOverride,
+        path_times, resolve_times, FileOverride, InstallTarget, Library, ModEntry, ModScripts,
+        ModSource, Profile, ProfileEntry, SigilLinkRankMeta, TargetKind, TargetOverride,
         SIGILLINK_RANKING_PROFILE,
     },
     metadata, native_pak, sigillink, smart_rank, update,
@@ -41,7 +41,7 @@ const SEARCH_DEBOUNCE_MS: u64 = 250;
 const HOTKEY_DEBOUNCE_MS: u64 = 200;
 const HOTKEY_FADE_MS: u64 = 200;
 const SIGILLINK_AUTO_RANK_DEBOUNCE_SECS: u64 = 5;
-const METADATA_CACHE_VERSION: u32 = 2;
+const METADATA_CACHE_VERSION: u32 = 3;
 const SMART_RANK_DEBOUNCE_MS: u64 = 600;
 const SMART_RANK_CACHE_SAVE_DEBOUNCE_MS: u64 = 400;
 const SMART_RANK_CACHE_VERSION: u32 = 2;
@@ -435,6 +435,7 @@ struct MetadataUpdate {
     created_at: Option<i64>,
     modified_at: Option<i64>,
     dependencies: Vec<String>,
+    scripts: ModScripts,
 }
 
 struct ImportApplyOutcome {
@@ -1028,6 +1029,7 @@ pub struct NativeModUpdate {
     pub created_at: Option<i64>,
     pub modified_at: Option<i64>,
     pub dependencies: Vec<String>,
+    pub scripts: ModScripts,
 }
 
 #[derive(Debug, Clone)]
@@ -2389,6 +2391,16 @@ Use Ctrl+R to reset this mod or F12 to reset all pins."
             return false;
         };
         expected == self.metadata_cache_key()
+    }
+
+    /// Re-keys the metadata cache after a change applied to the library directly. A cache that
+    /// was stale before the change (an older version or different mods) stays stale, so the
+    /// next start still refreshes it.
+    fn rekey_metadata_cache(&mut self, was_valid: bool) {
+        if was_valid {
+            self.library.metadata_cache_key = Some(self.metadata_cache_key());
+            self.library.metadata_cache_version = METADATA_CACHE_VERSION;
+        }
     }
 
     fn metadata_cache_key(&self) -> String {
@@ -7473,6 +7485,10 @@ Use Ctrl+R to reset this mod or F12 to reset all pins."
                                 mod_entry.dependencies = dependencies;
                                 self.metadata_dirty = true;
                             }
+                            if mod_entry.scripts != update.scripts {
+                                mod_entry.scripts = update.scripts;
+                                self.metadata_dirty = true;
+                            }
                         }
                     }
                     MetadataMessage::Completed => {
@@ -9735,6 +9751,7 @@ Use Ctrl+R to reset this mod or F12 to reset all pins."
         if count == 0 {
             return Ok(0);
         }
+        let metadata_cache_was_valid = self.metadata_cache_valid();
         let was_empty = self.library.mods.is_empty();
         self.schedule_smart_rank_refresh(
             smart_rank::SmartRankRefreshMode::Incremental,
@@ -9765,8 +9782,7 @@ Use Ctrl+R to reset this mod or F12 to reset all pins."
             }
         }
         self.update_dependency_cache_for_entries(&added);
-        self.library.metadata_cache_key = Some(self.metadata_cache_key());
-        self.library.metadata_cache_version = METADATA_CACHE_VERSION;
+        self.rekey_metadata_cache(metadata_cache_was_valid);
         if self.allow_persistence() {
             self.library.save(&self.config.data_dir)?;
             if self.normalize_mod_sources() {
@@ -10503,6 +10519,7 @@ Use Ctrl+R to reset this mod or F12 to reset all pins."
     }
 
     fn remove_mod_by_id_with_options(&mut self, id: &str, delete_files: bool) -> bool {
+        let metadata_cache_was_valid = self.metadata_cache_valid();
         self.schedule_smart_rank_refresh(
             smart_rank::SmartRankRefreshMode::Incremental,
             "remove",
@@ -10550,8 +10567,7 @@ Use Ctrl+R to reset this mod or F12 to reset all pins."
         if self.dependency_cache_ready && self.allow_persistence() {
             self.refresh_dependency_blocks();
         }
-        self.library.metadata_cache_key = Some(self.metadata_cache_key());
-        self.library.metadata_cache_version = METADATA_CACHE_VERSION;
+        self.rekey_metadata_cache(metadata_cache_was_valid);
         if self.allow_persistence() {
             let _ = self.library.save(&self.config.data_dir);
         }
@@ -10695,6 +10711,7 @@ Use Ctrl+R to reset this mod or F12 to reset all pins."
     }
 
     fn apply_native_sync_delta(&mut self, delta: NativeSyncDelta) {
+        let metadata_cache_was_valid = self.metadata_cache_valid();
         let mut changed = false;
         let mut dependencies_changed = false;
         let updated_native_files = delta.updated_native_files;
@@ -10745,6 +10762,10 @@ Use Ctrl+R to reset this mod or F12 to reset all pins."
             if entry.dependencies != update.dependencies {
                 entry.dependencies = update.dependencies;
                 dependencies_changed = true;
+                changed = true;
+            }
+            if entry.scripts != update.scripts {
+                entry.scripts = update.scripts;
                 changed = true;
             }
         }
@@ -10912,8 +10933,7 @@ Use Ctrl+R to reset this mod or F12 to reset all pins."
             || changed
             || modsettings_hash_changed
         {
-            self.library.metadata_cache_key = Some(self.metadata_cache_key());
-            self.library.metadata_cache_version = METADATA_CACHE_VERSION;
+            self.rekey_metadata_cache(metadata_cache_was_valid);
             if let Err(err) = self.library.save(&self.config.data_dir) {
                 self.log_warn(format!("Native mod sync save failed: {err}"));
             }
@@ -13577,6 +13597,7 @@ fn build_unknown_entry(path: &PathBuf, label: &str) -> ModEntry {
         source_label: Some(label.to_string()),
         source: ModSource::Managed,
         dependencies: Vec::new(),
+        scripts: ModScripts::default(),
     }
 }
 
@@ -13677,6 +13698,7 @@ fn collect_metadata_updates(
         let mut file_created: Option<i64> = None;
         let mut file_modified: Option<i64> = None;
         let mut dependencies: Vec<String> = Vec::new();
+        let mut scripts = ModScripts::default();
 
         for pak_path in resolve_pak_paths(
             mod_entry,
@@ -13695,6 +13717,9 @@ fn collect_metadata_updates(
                     dependencies.extend(meta.dependencies);
                 }
             }
+            if let Some(found) = metadata::read_pak_scripts(&pak_path) {
+                scripts.merge(found);
+            }
             let (raw_created, raw_modified) = path_times(&pak_path);
             if let Some(created) = raw_created {
                 file_created = Some(match file_created {
@@ -13712,6 +13737,7 @@ fn collect_metadata_updates(
 
         let mod_root = library_mod_root(&config.sigillink_cache_root()).join(&mod_entry.id);
         if mod_root.exists() {
+            scripts.merge(metadata::scan_loose_scripts(&mod_root));
             if let Some(meta_path) = metadata::find_meta_lsx(&mod_root) {
                 if let Some(meta) = metadata::read_meta_lsx(&meta_path) {
                     if let Some(created) = meta.created_at {
@@ -13818,6 +13844,7 @@ fn collect_metadata_updates(
             created_at: next_created,
             modified_at: next_modified,
             dependencies,
+            scripts,
         };
         if let Some(tx) = progress {
             let _ = tx.send(MetadataMessage::Progress {
@@ -13956,6 +13983,7 @@ fn sync_native_mods_delta(
         let (raw_created, raw_modified) = path_times(&pak_path);
         let mut meta_created = None;
         let mut dependencies = mod_entry.dependencies.clone();
+        let mut scripts = mod_entry.scripts.clone();
         let file_stamp = raw_modified.or(raw_created);
         let should_read_meta = !fast_native_sync
             || mod_entry.modified_at.is_none()
@@ -13966,6 +13994,9 @@ fn sync_native_mods_delta(
             if let Some(pak_meta) = metadata::read_meta_lsx_from_pak_cached(pak_cache, &pak_path) {
                 meta_created = pak_meta.created_at;
                 dependencies = pak_meta.dependencies;
+            }
+            if let Some(found) = metadata::read_pak_scripts(&pak_path) {
+                scripts = found;
             }
         }
         dependencies.sort();
@@ -14013,6 +14044,7 @@ fn sync_native_mods_delta(
             created_at: next_created,
             modified_at: next_modified,
             dependencies,
+            scripts,
         });
     }
 
@@ -14083,6 +14115,7 @@ fn sync_native_mods_delta(
             created_at: next_created,
             modified_at: next_modified,
             dependencies,
+            scripts: metadata::read_pak_scripts(&pak_path).unwrap_or_default(),
         });
         adopted_native += 1;
     }
@@ -14141,6 +14174,7 @@ fn sync_native_mods_delta(
             source_label: None,
             source: ModSource::Native,
             dependencies,
+            scripts: metadata::read_pak_scripts(&pak_path).unwrap_or_default(),
         };
         added.push(mod_entry);
         existing_ids.insert(uuid);

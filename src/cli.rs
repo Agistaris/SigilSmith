@@ -2,7 +2,7 @@ use crate::{
     app::{App, CliImportOptions, CliVerbosity, DependencyLookup, StartupMode},
     bg3::GamePaths,
     game,
-    library::{library_mod_root, InstallTarget, Library, ModEntry, Profile},
+    library::{library_mod_root, InstallTarget, Library, ModEntry, ModScripts, Profile},
     metadata, native_pak, ui,
 };
 use anyhow::{bail, Result};
@@ -482,6 +482,8 @@ struct ModListItem {
     added_at: i64,
     enabled: bool,
     order: Option<usize>,
+    #[serde(skip_serializing_if = "ModScripts::is_empty")]
+    scripts: ModScripts,
 }
 
 fn list_mods(
@@ -510,6 +512,7 @@ fn list_mods(
                 added_at: mod_entry.added_at,
                 enabled,
                 order: if order == 0 { None } else { Some(order) },
+                scripts: mod_entry.scripts.clone(),
             }
         })
         .collect();
@@ -544,8 +547,14 @@ fn list_mods(
                 let enabled = if item.enabled { "x" } else { " " };
                 let created = format_date_cell(item.created_at);
                 let added = format_date_cell(Some(item.added_at));
+                let script_extender = if item.scripts.script_extender.is_some() {
+                    "SE"
+                } else {
+                    "  "
+                };
+                let osiris = if item.scripts.osiris { "Os" } else { "  " };
                 println!(
-                    "{order:>3} [{enabled}] {kind:<10} {created} {added} {name}",
+                    "{order:>3} [{enabled}] {kind:<10} {script_extender} {osiris} {created} {added} {name}",
                     kind = item.kind,
                     name = item.display_name
                 );

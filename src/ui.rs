@@ -2318,6 +2318,7 @@ fn draw(frame: &mut Frame<'_>, app: &mut App) {
         let table_width = table_chunks[0].width;
         let spacing = 0u16;
         let link_width = 2u16;
+        let scripts_width = 6u16;
         let dep_width = 6u16;
         let date_width = 10u16;
         let mod_gap_width = 4u16;
@@ -2326,6 +2327,7 @@ fn draw(frame: &mut Frame<'_>, app: &mut App) {
         let fixed_without_mod_target = 4
             + 3
             + 3
+            + scripts_width
             + 6
             + dep_width
             + link_width
@@ -2334,7 +2336,7 @@ fn draw(frame: &mut Frame<'_>, app: &mut App) {
             + added_gap_width
             + date_width
             + date_width
-            + spacing * 13;
+            + spacing * 14;
         let max_mod = table_width.saturating_sub(fixed_without_mod_target + 1);
         let mut mod_col = mod_width as u16;
         if max_mod > 0 {
@@ -2358,6 +2360,7 @@ fn draw(frame: &mut Frame<'_>, app: &mut App) {
             mod_header_cell("On", ModSortColumn::Enabled, app.mod_sort, &theme),
             mod_header_cell(" # ", ModSortColumn::Order, app.mod_sort, &theme),
             mod_header_cell(" N ", ModSortColumn::Native, app.mod_sort, &theme),
+            mod_header_cell_static("Scr", &theme),
             mod_header_cell("Kind", ModSortColumn::Kind, app.mod_sort, &theme),
             mod_header_cell_static("Dep", &theme),
             mod_header_cell_static(" ", &theme),
@@ -2376,6 +2379,7 @@ fn draw(frame: &mut Frame<'_>, app: &mut App) {
                 Constraint::Length(4),
                 Constraint::Length(3),
                 Constraint::Length(3),
+                Constraint::Length(scripts_width),
                 Constraint::Length(6),
                 Constraint::Length(dep_width),
                 Constraint::Length(link_width),
@@ -7262,6 +7266,7 @@ fn row_for_missing_entry(
         Cell::from(order_text).style(muted),
         Cell::from(" ".to_string()).style(muted),
         Cell::from(" ".to_string()).style(muted),
+        Cell::from(" ".to_string()).style(muted),
         dep_cell,
         link_cell,
         Cell::from(display).style(muted),
@@ -7304,6 +7309,7 @@ fn row_for_entry(
         push_loading(&mut cells, &mut loading_index); // On
         push_loading(&mut cells, &mut loading_index); // #
         push_loading(&mut cells, &mut loading_index); // N
+        push_loading(&mut cells, &mut loading_index); // Scr
         push_loading(&mut cells, &mut loading_index); // Kind
         push_loading(&mut cells, &mut loading_index); // Dep
         push_loading(&mut cells, &mut loading_index); // 🔗
@@ -7376,6 +7382,7 @@ fn row_for_entry(
             Cell::from(enabled_text.to_string()).style(enabled_style),
             Cell::from(order_text).style(order_style),
             Cell::from(native_marker.to_string()).style(native_style),
+            mod_scripts_cell(mod_entry, theme),
             Cell::from(kind.to_string()).style(kind_style),
             dep_cell,
             link_cell,
@@ -7392,6 +7399,31 @@ fn row_for_entry(
         row = row.style(Style::default().bg(theme.row_alt_bg));
     }
     (row, target_len)
+}
+
+/// "SE" and "Os" in fixed slots so each lines up down the column.
+fn mod_scripts_cell(mod_entry: &ModEntry, theme: &Theme) -> Cell<'static> {
+    let scripts = &mod_entry.scripts;
+    let script_extender = if scripts.script_extender.is_some() {
+        "SE"
+    } else {
+        "  "
+    };
+    let osiris = if scripts.osiris { "Os" } else { "  " };
+    Cell::from(Line::from(vec![
+        Span::styled(script_extender, Style::default().fg(theme.accent)),
+        Span::raw(" "),
+        Span::styled(osiris, Style::default().fg(theme.success)),
+        Span::raw(" "),
+    ]))
+}
+
+/// The Script Extender loads through DWrite.dll in the game's bin folder.
+fn script_extender_installed(game_root: &Path) -> bool {
+    let bin = game_root.join("bin");
+    ["DWrite.dll", "dwrite.dll"]
+        .iter()
+        .any(|name| bin.join(name).is_file())
 }
 
 fn sigillink_link_cell(app: &App, mod_id: &str, theme: &Theme) -> Cell<'static> {
@@ -7695,6 +7727,34 @@ fn build_details(app: &App, theme: &Theme, width: usize, height: usize) -> Vec<L
         label_style,
         value_style,
     });
+    // Right under the name: the panel is short and cuts off its last rows.
+    if let Some(script_extender) = &mod_entry.scripts.script_extender {
+        let mut parts = vec![match script_extender.required_version {
+            Some(version) => format!("v{version} or newer"),
+            None => "Required".to_string(),
+        }];
+        parts.extend(script_extender.features.iter().cloned());
+        let mut value = parts.join(", ");
+        let game_root = &app.config.game_root;
+        let missing = !game_root.as_os_str().is_empty() && !script_extender_installed(game_root);
+        if missing {
+            value.push_str(" - not installed");
+        }
+        rows.push(KvRow {
+            label: "Script Extender".to_string(),
+            value,
+            label_style,
+            value_style: Style::default().fg(if missing { theme.warning } else { theme.accent }),
+        });
+    }
+    if mod_entry.scripts.osiris {
+        rows.push(KvRow {
+            label: "Osiris".to_string(),
+            value: "Has story scripts".to_string(),
+            label_style,
+            value_style: Style::default().fg(theme.success),
+        });
+    }
     let added_label = format_short_date(mod_entry.added_at).unwrap_or_else(|| "-".to_string());
     rows.push(KvRow {
         label: "Added".to_string(),
@@ -8538,6 +8598,14 @@ fn legend_rows_for_focus(focus: Focus) -> Vec<LegendRow> {
             legend.push(LegendRow {
                 key: "N".to_string(),
                 action: "Native Mod (Mod.io)".to_string(),
+            });
+            legend.push(LegendRow {
+                key: "SE".to_string(),
+                action: "Needs Script Extender".to_string(),
+            });
+            legend.push(LegendRow {
+                key: "Os".to_string(),
+                action: "Osiris Scripts".to_string(),
             });
             legend.push(LegendRow {
                 key: "Dep".to_string(),

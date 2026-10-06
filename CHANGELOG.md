@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- The mod list marks mods that use the Script Extender (`SE`) or ship Osiris story scripts (`Os`), found from the same files BG3 Mod Manager checks. The details panel shows the required Script Extender version and features, and says "not installed" when the game's `bin` folder has no `DWrite.dll`. `mods list` shows the markers too, and its JSON output gains `scripts`. Existing libraries rescan once on the first start.
+- Fix: the startup native mod sync no longer marks an outdated metadata cache as current, which could skip the refresh that fills in dependencies and dates.
 - Packaging: the RPM states the SigilSmith Community License (it said MIT) and installs the LICENSE file.
 - Packaging: RPMs build in the v4 format when the build machine has rpmbuild 6.
 

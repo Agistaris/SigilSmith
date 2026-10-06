@@ -206,6 +206,56 @@ pub struct ModEntry {
     pub source: ModSource,
     #[serde(default)]
     pub dependencies: Vec<String>,
+    #[serde(default, skip_serializing_if = "ModScripts::is_empty")]
+    pub scripts: ModScripts,
+}
+
+/// Scripting a mod ships, found from the same files BG3 Mod Manager checks for its
+/// Script Extender and Osiris icons.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModScripts {
+    /// Set when the mod has a Mods/<Folder>/ScriptExtender/Config.json.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub script_extender: Option<ScriptExtenderUse>,
+    /// The mod has Osiris goal scripts under Mods/<Folder>/Story/RawFiles/Goals.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub osiris: bool,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ScriptExtenderUse {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub required_version: Option<u32>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub features: Vec<String>,
+}
+
+impl ModScripts {
+    pub fn is_empty(&self) -> bool {
+        self.script_extender.is_none() && !self.osiris
+    }
+
+    /// Combines what several paks or folders of one mod ship.
+    pub fn merge(&mut self, other: ModScripts) {
+        self.osiris |= other.osiris;
+        let Some(found) = other.script_extender else {
+            return;
+        };
+        if let Some(existing) = self.script_extender.as_mut() {
+            existing.required_version = existing.required_version.max(found.required_version);
+            for feature in found.features {
+                if !existing.features.contains(&feature) {
+                    existing.features.push(feature);
+                }
+            }
+        } else {
+            self.script_extender = Some(found);
+        }
+    }
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 fn default_true() -> bool {
@@ -568,7 +618,45 @@ mod tests {
             source_label: source_label.map(str::to_string),
             source: ModSource::Managed,
             dependencies: Vec::new(),
+            scripts: ModScripts::default(),
         }
+    }
+
+    #[test]
+    fn scripts_merge_keeps_highest_version_and_all_features() {
+        let mut scripts = ModScripts {
+            script_extender: Some(ScriptExtenderUse {
+                required_version: Some(18),
+                features: vec!["Lua".to_string()],
+            }),
+            osiris: false,
+        };
+        scripts.merge(ModScripts {
+            script_extender: Some(ScriptExtenderUse {
+                required_version: Some(29),
+                features: vec!["Lua".to_string(), "Preprocessor".to_string()],
+            }),
+            osiris: true,
+        });
+        let script_extender = scripts.script_extender.as_ref().unwrap();
+        assert_eq!(script_extender.required_version, Some(29));
+        assert_eq!(script_extender.features, ["Lua", "Preprocessor"]);
+        assert!(scripts.osiris);
+    }
+
+    #[test]
+    fn mods_without_scripts_save_and_load_as_before() {
+        let plain = entry("Plain", None);
+        let json = serde_json::to_string(&plain).unwrap();
+        assert!(!json.contains("scripts"), "{json}");
+        let loaded: ModEntry = serde_json::from_str(&json).unwrap();
+        assert!(loaded.scripts.is_empty());
+
+        let mut scripted = entry("Scripted", None);
+        scripted.scripts.osiris = true;
+        let json = serde_json::to_string(&scripted).unwrap();
+        let loaded: ModEntry = serde_json::from_str(&json).unwrap();
+        assert_eq!(loaded.scripts, scripted.scripts);
     }
 
     #[test]

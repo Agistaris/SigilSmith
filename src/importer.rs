@@ -1,6 +1,6 @@
 use crate::library::{
     clean_source_label, normalize_times, path_times, resolve_times, InstallTarget, ModEntry,
-    ModSource, PakInfo, TargetKind,
+    ModScripts, ModSource, PakInfo, TargetKind,
 };
 use crate::metadata;
 use crate::sigillink::{SigilLinkEntry, SigilLinkIndex, SIGILLINK_VERSION};
@@ -873,6 +873,7 @@ fn import_single_pak(
         source_label: source_label.map(|label| label.to_string()),
         source: ModSource::Managed,
         dependencies,
+        scripts: metadata::read_pak_scripts(&dest).unwrap_or_default(),
     };
     guard.disarm();
     Ok(ImportMod {
@@ -951,6 +952,7 @@ fn import_override_pak(
         source_label: source_label.map(|label| label.to_string()),
         source: ModSource::Managed,
         dependencies: Vec::new(),
+        scripts: ModScripts::default(),
     };
     guard.disarm();
     Ok(ImportMod {
@@ -1093,6 +1095,7 @@ fn import_loose(
         source_label: source_label.map(|label| label.to_string()),
         source: ModSource::Managed,
         dependencies,
+        scripts: metadata::scan_loose_scripts(&staging_root),
     };
     guard.disarm();
     Ok(ImportMod {
@@ -1925,5 +1928,98 @@ mod tests {
             mods[0].entry.dependencies,
             vec!["Required_Mod_0badf00d-1111-2222-3333-444455556666".to_string()]
         );
+    }
+
+    fn test_root(name: &str) -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "sigilsmith-{name}-{}-{}",
+            std::process::id(),
+            now_timestamp()
+        ))
+    }
+
+    /// Writes a loose payload with a Script Extender config and an Osiris goal under `mods_parent`.
+    fn import_loose_scripts(name: &str, mods_parent: &str) -> ModScripts {
+        let root = test_root(name);
+        let payload = root.join("Loose Script Test");
+        let data_dir = root.join("data");
+        let mod_dir = payload.join(mods_parent).join("Mods/LooseDepTest");
+        let public_dir = payload.join(mods_parent).join("Public/LooseDepTest");
+        fs::create_dir_all(mod_dir.join("ScriptExtender")).unwrap();
+        fs::create_dir_all(mod_dir.join("Story/RawFiles/Goals")).unwrap();
+        fs::create_dir_all(&public_dir).unwrap();
+        fs::create_dir_all(&data_dir).unwrap();
+        fs::write(mod_dir.join("meta.lsx"), META_LSX).unwrap();
+        fs::write(
+            mod_dir.join("ScriptExtender/Config.json"),
+            r#"{"RequiredVersion": 29, "FeatureFlags": ["Lua"]}"#,
+        )
+        .unwrap();
+        fs::write(mod_dir.join("Story/RawFiles/Goals/Test.txt"), "Version 1").unwrap();
+        fs::write(public_dir.join("Test.txt"), "test").unwrap();
+
+        let result = import_path_with_progress(&payload, &data_dir, None);
+        let _ = fs::remove_dir_all(&root);
+
+        let result = result.unwrap();
+        let mods: Vec<&ImportMod> = result.batches.iter().flat_map(|b| &b.mods).collect();
+        assert_eq!(mods.len(), 1);
+        mods[0].entry.scripts.clone()
+    }
+
+    #[test]
+    fn loose_import_finds_scripts_it_deploys() {
+        let scripts = import_loose_scripts("loose-scripts", "Data");
+        assert_eq!(
+            scripts
+                .script_extender
+                .as_ref()
+                .and_then(|se| se.required_version),
+            Some(29)
+        );
+        assert!(scripts.osiris);
+    }
+
+    #[test]
+    fn loose_import_ignores_scripts_it_does_not_deploy() {
+        // A top-level Mods folder is only read for meta.lsx; its other files are not deployed.
+        let scripts = import_loose_scripts("loose-scripts-undeployed", "");
+        assert!(scripts.is_empty(), "{scripts:?}");
+    }
+
+    #[test]
+    fn pak_import_finds_scripts() {
+        let root = test_root("pak-scripts");
+        let data_dir = root.join("data");
+        fs::create_dir_all(&data_dir).unwrap();
+        let pak = root.join("LooseDepTest.pak");
+        metadata::write_test_pak(
+            &pak,
+            &[
+                ("Mods/LooseDepTest/meta.lsx", META_LSX.as_bytes(), true),
+                (
+                    "Mods/LooseDepTest/ScriptExtender/Config.json",
+                    br#"{"RequiredVersion": 30}"#,
+                    false,
+                ),
+            ],
+        );
+
+        let result = import_path_with_progress(&pak, &data_dir, None);
+        let _ = fs::remove_dir_all(&root);
+
+        let result = result.unwrap();
+        let mods: Vec<&ImportMod> = result.batches.iter().flat_map(|b| &b.mods).collect();
+        assert_eq!(mods.len(), 1);
+        assert_eq!(mods[0].entry.id, "d1ced1ce-0000-4000-8000-000000000001");
+        let scripts = &mods[0].entry.scripts;
+        assert_eq!(
+            scripts
+                .script_extender
+                .as_ref()
+                .and_then(|se| se.required_version),
+            Some(30)
+        );
+        assert!(!scripts.osiris);
     }
 }
