@@ -729,6 +729,9 @@ pub struct App {
     whats_new_pending: bool,
     whats_new_block_until: Option<Instant>,
     pub script_extender_setup: Option<ScriptExtenderSetup>,
+    /// Override paks whose stored .pak now reads as a real mod (imported before
+    /// SigilSmith could read LSPK v15/v16); importing them again gives a Pak mod.
+    pub reimportable_override_paks: HashSet<String>,
     script_extender_checked_at: Option<Instant>,
     script_extender_notice_pending: Vec<String>,
     script_extender_install: Option<Receiver<Result<script_extender::SetupReport, String>>>,
@@ -1194,6 +1197,7 @@ impl App {
             whats_new_pending,
             whats_new_block_until: None,
             script_extender_setup: None,
+            reimportable_override_paks: HashSet::new(),
             script_extender_checked_at: None,
             script_extender_notice_pending: Vec::new(),
             script_extender_install: None,
@@ -1298,6 +1302,7 @@ impl App {
         app.load_smart_rank_cache();
         let mod_count = app.library.mods.len();
         app.log_info(format!("Library loaded: {mod_count} mod(s)"));
+        app.find_reimportable_override_paks();
         app.log_info("Detecting game paths...".to_string());
         if let Some(error) = setup_error {
             app.log_warn(format!("Path auto-detect failed: {error}"));
@@ -8011,6 +8016,35 @@ Use Ctrl+R to reset this mod or F12 to reset all pins."
         self.clamp_selection();
     }
 
+    fn find_reimportable_override_paks(&mut self) {
+        let mods_root = library_mod_root(&self.config.sigillink_cache_root());
+        let mut found = Vec::new();
+        for mod_entry in self.library.mods.iter().filter(|m| m.is_override_pak()) {
+            let Ok(files) = fs::read_dir(mods_root.join(&mod_entry.id).join("Data")) else {
+                continue;
+            };
+            let names_a_mod = files
+                .filter_map(Result::ok)
+                .map(|file| file.path())
+                .filter(|path| {
+                    path.extension()
+                        .is_some_and(|ext| ext.eq_ignore_ascii_case("pak"))
+                })
+                .any(|path| {
+                    metadata::read_meta_lsx_from_pak(&path).is_some_and(|meta| meta.uuid.is_some())
+                });
+            if names_a_mod {
+                found.push((mod_entry.id.clone(), mod_entry.display_name()));
+            }
+        }
+        for (id, name) in found {
+            self.log_warn(format!(
+                "Remove {name} and import it again: an older SigilSmith imported this Pak mod as an override pak"
+            ));
+            self.reimportable_override_paks.insert(id);
+        }
+    }
+
     pub fn log_info(&mut self, message: String) {
         self.push_log(LogLevel::Info, message);
     }
@@ -12144,7 +12178,10 @@ Use Ctrl+R to reset this mod or F12 to reset all pins."
 
         if let Some(kind) = selection {
             if !mod_entry.has_target_kind(kind) {
-                self.status = "Target not present for this mod".to_string();
+                let reimport = self.reimportable_override_paks.contains(&mod_entry.id);
+                let message = missing_target_message(mod_entry, kind, reimport);
+                self.status = message.clone();
+                self.log_info(message);
                 return;
             }
             let mut present = HashSet::new();
@@ -12853,7 +12890,7 @@ fn compare_mod_indices(
         ModSortColumn::Enabled => compare_bool(a_entry.enabled, b_entry.enabled, sort.direction),
         ModSortColumn::Native => compare_bool(a_mod.is_native(), b_mod.is_native(), sort.direction),
         ModSortColumn::Kind => {
-            compare_string(mod_kind_label(a_mod), mod_kind_label(b_mod), sort.direction)
+            compare_string(a_mod.kind_label(), b_mod.kind_label(), sort.direction)
         }
         ModSortColumn::Target => compare_string(
             &mod_target_sort_label(a_mod),
@@ -12905,31 +12942,37 @@ fn compare_bool(a: bool, b: bool, direction: SortDirection) -> Ordering {
     }
 }
 
+/// Why the Target menu can't switch a mod to `kind`. The menu calls Pak "Mods".
+/// Short enough for the status bar: says why the mod can't use that target.
+fn missing_target_message(mod_entry: &ModEntry, kind: TargetKind, reimport: bool) -> String {
+    if reimport {
+        return "Old import: remove it and import again".to_string();
+    }
+    if mod_entry.is_override_pak() {
+        return "Override pak (no meta.lsx): Data only".to_string();
+    }
+    let has = mod_entry.display_type();
+    if kind == TargetKind::Pak {
+        return "Can't use Mods: this mod has no .pak".to_string();
+    }
+    let wanted = match kind {
+        TargetKind::Pak => "Mods",
+        TargetKind::Generated => "Gen",
+        TargetKind::Data => "Data",
+        TargetKind::Bin => "Bin",
+    };
+    if has == "Pak" {
+        return format!("Can't use {wanted}: this mod is only a .pak");
+    }
+    format!("Can't use {wanted}: it has only {has} files")
+}
+
 fn compare_string(a: &str, b: &str, direction: SortDirection) -> Ordering {
     let a = a.to_ascii_lowercase();
     let b = b.to_ascii_lowercase();
     match direction {
         SortDirection::Asc => a.cmp(&b),
         SortDirection::Desc => b.cmp(&a),
-    }
-}
-
-fn mod_kind_label(mod_entry: &ModEntry) -> &'static str {
-    let mut has_pak = false;
-    let mut has_loose = false;
-
-    for target in &mod_entry.targets {
-        match target {
-            InstallTarget::Pak { .. } => has_pak = true,
-            _ => has_loose = true,
-        }
-    }
-
-    match (has_pak, has_loose) {
-        (true, true) => "Mixed",
-        (true, false) => "Pak",
-        (false, true) => "Loose",
-        _ => "Unknown",
     }
 }
 
@@ -14671,6 +14714,43 @@ mod tests {
                 name: format!("Dep {i}"),
             })
             .collect()
+    }
+
+    #[test]
+    fn target_menu_explains_what_it_cannot_switch() {
+        let mut mod_entry = ModEntry {
+            id: "pak-1a2b".to_string(),
+            name: "Override Pak: Tweaks".to_string(),
+            created_at: None,
+            modified_at: None,
+            added_at: 0,
+            targets: vec![InstallTarget::Data {
+                dir: "Data".to_string(),
+            }],
+            target_overrides: Vec::new(),
+            source_label: None,
+            source: ModSource::Managed,
+            dependencies: Vec::new(),
+            scripts: ModScripts::default(),
+        };
+        assert_eq!(
+            missing_target_message(&mod_entry, TargetKind::Pak, false),
+            "Override pak (no meta.lsx): Data only"
+        );
+        assert_eq!(
+            missing_target_message(&mod_entry, TargetKind::Pak, true),
+            "Old import: remove it and import again"
+        );
+
+        mod_entry.id = "loose-1a2b".to_string();
+        assert_eq!(
+            missing_target_message(&mod_entry, TargetKind::Pak, false),
+            "Can't use Mods: this mod has no .pak"
+        );
+        assert_eq!(
+            missing_target_message(&mod_entry, TargetKind::Bin, false),
+            "Can't use Bin: it has only Data files"
+        );
     }
 
     #[test]

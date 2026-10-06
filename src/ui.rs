@@ -2365,7 +2365,8 @@ fn draw(frame: &mut Frame<'_>, app: &mut App) {
         let mod_gap_width = 4u16;
         let created_gap_width = 2u16;
         let added_gap_width = 2u16;
-        let kind_width = 6u16;
+        // Fits "Override" plus a gap.
+        let kind_width = 9u16;
         let min_target_width = 8u16;
         let base_width = 4 + 3 + 3 + scripts_width + dep_width + link_width + spacing * 14;
         // Narrow windows: drop Created, then Added, Target and Kind before
@@ -7620,10 +7621,11 @@ fn row_for_entry(
         } else {
             ("[ ] ", Style::default().fg(theme.muted))
         };
-        let kind = mod_kind_label(mod_entry);
+        let kind = mod_entry.kind_label();
         let kind_style = match kind {
             "Pak" => Style::default().fg(theme.accent),
             "Loose" => Style::default().fg(theme.success),
+            "Override" => Style::default().fg(theme.accent_soft),
             _ => Style::default().fg(theme.text),
         };
         let native_marker = if mod_entry.is_native() {
@@ -8130,6 +8132,14 @@ fn build_details(app: &App, theme: &Theme, width: usize, height: usize) -> Vec<L
         label_style,
         value_style,
     });
+    if app.reimportable_override_paks.contains(&mod_entry.id) {
+        rows.push(KvRow {
+            label: "Note".to_string(),
+            value: "Remove and import again".to_string(),
+            label_style,
+            value_style: Style::default().fg(theme.warning),
+        });
+    }
     let targets_label = targets_summary(mod_entry);
     rows.push(KvRow {
         label: "Targets".to_string(),
@@ -8629,25 +8639,6 @@ fn build_conflict_details(
 
     lines.extend(footer_lines);
     lines
-}
-
-fn mod_kind_label(mod_entry: &ModEntry) -> &'static str {
-    let mut has_pak = false;
-    let mut has_loose = false;
-
-    for target in &mod_entry.targets {
-        match target {
-            InstallTarget::Pak { .. } => has_pak = true,
-            _ => has_loose = true,
-        }
-    }
-
-    match (has_pak, has_loose) {
-        (true, true) => "Mixed",
-        (true, false) => "Pak",
-        (false, true) => "Loose",
-        _ => "Unknown",
-    }
 }
 
 fn target_root_label(app: &App, kind: TargetKind) -> String {

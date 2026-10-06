@@ -8,6 +8,7 @@ deployment:
 
 - `.pak` mods -> `~/.local/share/Larian Studios/Baldur's Gate 3/Mods`
 - Loose files -> `Baldur's Gate 3/Data/Generated` or `Baldur's Gate 3/Data`
+- Override paks (a `.pak` with no meta.lsx) -> `Baldur's Gate 3/Data`
 - Bin overrides -> `Baldur's Gate 3/bin`
 
 Multi-game support is coming next via an open adapter template (BG3-first today, more games soon).

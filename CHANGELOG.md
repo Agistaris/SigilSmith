@@ -7,6 +7,9 @@
 - The mod list keeps names readable in narrow windows: it hides Created, then Added, then Target, then Kind before squeezing the name (Details still shows them). Before, below about 110 columns the name column shrank to a letter or two.
 - Help gains a "Mod List Markers" section explaining every icon (N, SE, Os, Dep, ⛓, ⛕, 👻); the side legend shows SE and Os on one row so the Manual Pin and Missing Mod File rows fit again.
 - Fix: paks in the older LSPK v15/v16 format, which some LSLib builds still write (KaiLime UI is one), import as Pak mods. SigilSmith couldn't read their meta.lsx before, so it imported them as an Override Pak in the game's Data folder, shown as Loose. SigiLink ranking reads their file lists now too. A mod already imported that way needs removing and importing again.
+- Override paks (a .pak with no meta.lsx, which SigilSmith deploys to the game's Data folder) show as "Override" in the Kind column instead of "Loose", and as "Override Pak" in Details and `mods list`.
+- Choosing a target a mod can't use says why (for example "Override pak (no meta.lsx): Data only" or "Can't use Mods: this mod has no .pak") instead of "Target not present for this mod".
+- Mods an older SigilSmith imported as override paks but that are real Pak mods (like KaiLime UI before the v15/v16 fix) get a "Remove and import again" note in Details and a warning in the log at startup.
 - Fix: the startup native mod sync no longer marks an outdated metadata cache as current, which could skip the refresh that fills in dependencies and dates.
 - Packaging: the RPM states the SigilSmith Community License (it said MIT) and installs the LICENSE file.
 - Packaging: RPMs build in the v4 format when the build machine has rpmbuild 6.

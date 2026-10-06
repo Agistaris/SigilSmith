@@ -287,7 +287,38 @@ impl ModEntry {
         matches!(self.source, ModSource::Native)
     }
 
+    /// A .pak without a readable meta.lsx: imported whole into the game's Data
+    /// folder, where BG3 always loads it, with no load-order entry.
+    pub fn is_override_pak(&self) -> bool {
+        self.id.starts_with("pak-")
+            && matches!(self.targets.as_slice(), [InstallTarget::Data { dir }] if dir == "Data")
+    }
+
+    /// The mod list's Kind column.
+    pub fn kind_label(&self) -> &'static str {
+        if self.is_override_pak() {
+            return "Override";
+        }
+        let has_pak = self
+            .targets
+            .iter()
+            .any(|target| matches!(target, InstallTarget::Pak { .. }));
+        let has_loose = self
+            .targets
+            .iter()
+            .any(|target| !matches!(target, InstallTarget::Pak { .. }));
+        match (has_pak, has_loose) {
+            (true, true) => "Mixed",
+            (true, false) => "Pak",
+            (false, true) => "Loose",
+            _ => "Unknown",
+        }
+    }
+
     pub fn display_type(&self) -> String {
+        if self.is_override_pak() {
+            return "Override Pak".to_string();
+        }
         let mut kinds = Vec::new();
         let mut has_pak = false;
         let mut has_generated = false;
@@ -620,6 +651,24 @@ mod tests {
             dependencies: Vec::new(),
             scripts: ModScripts::default(),
         }
+    }
+
+    #[test]
+    fn override_paks_get_their_own_kind() {
+        let mut mod_entry = entry("Override Pak: Tweaks", None);
+        mod_entry.id = "pak-1a2b".to_string();
+        mod_entry.targets = vec![InstallTarget::Data {
+            dir: "Data".to_string(),
+        }];
+        assert!(mod_entry.is_override_pak());
+        assert_eq!(mod_entry.kind_label(), "Override");
+        assert_eq!(mod_entry.display_type(), "Override Pak");
+
+        // Loose Data files are not an override pak.
+        mod_entry.id = "loose-1a2b".to_string();
+        assert!(!mod_entry.is_override_pak());
+        assert_eq!(mod_entry.kind_label(), "Loose");
+        assert_eq!(mod_entry.display_type(), "Data");
     }
 
     #[test]

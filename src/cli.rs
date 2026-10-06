@@ -554,7 +554,7 @@ fn list_mods(
                 };
                 let osiris = if item.scripts.osiris { "Os" } else { "  " };
                 println!(
-                    "{order:>3} [{enabled}] {kind:<10} {script_extender} {osiris} {created} {added} {name}",
+                    "{order:>3} [{enabled}] {kind:<12} {script_extender} {osiris} {created} {added} {name}",
                     kind = item.kind,
                     name = item.display_name
                 );
