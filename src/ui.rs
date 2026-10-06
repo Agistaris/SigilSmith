@@ -9341,7 +9341,7 @@ fn build_whats_new_lines(theme: &Theme, width: usize) -> Vec<Line<'static>> {
         "  /  *   .-''-.  /\\  .-''-.   * \\",
         " |  o   /  /\\  \\ || /  /\\  \\   o |",
         "  \\ *  \\  \\/  / || \\  \\/  /  * /",
-        "   '-.  '----'  ||  '----'  .-' v0.9.7",
+        "   '-.  '----'  ||  '----'  .-' v0.9.8",
     ];
     for line in banner {
         let padded = format!("{line:<banner_width$}");
@@ -9382,6 +9382,48 @@ fn build_whats_new_lines(theme: &Theme, width: usize) -> Vec<Line<'static>> {
             style,
         )));
     }
+
+    push_section(&mut lines, "More Choices", width, theme);
+    push_bullet(
+        &mut lines,
+        width,
+        "Dependency prompts get \"Only this mod\" (O): enable or disable just the selected mod.",
+        body_style,
+    );
+    push_bullet(
+        &mut lines,
+        width,
+        "Duplicate and similar-mod import prompts get \"Keep both\" (O): add the new mod next to the existing one.",
+        body_style,
+    );
+    lines.push(Line::from(""));
+
+    push_section(&mut lines, "Fixes", width, theme);
+    push_bullet(
+        &mut lines,
+        width,
+        "DiceSet_05 and DiceSet_07 count as built-in, so mods that use them no longer report missing dependencies.",
+        body_style,
+    );
+    push_bullet(
+        &mut lines,
+        width,
+        "Mods turned off at startup over those dice sets stay off: enable them again once.",
+        body_style,
+    );
+    push_bullet(
+        &mut lines,
+        width,
+        "Mods show their own names instead of generated pak file names.",
+        body_style,
+    );
+    push_bullet(
+        &mut lines,
+        width,
+        "Loose mods keep the dependencies listed in their meta.lsx or info.json.",
+        body_style,
+    );
+    lines.push(Line::from(""));
 
     push_section(&mut lines, "Steam + Proton Paths", width, theme);
     push_bullet(

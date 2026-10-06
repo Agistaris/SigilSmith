@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.9.8
 
 - Enable/disable dependency prompts get an "Only this mod" button (`O`) that changes just the selected mod(s), leaving dependents or required dependencies as they are. The prompt warns that the mod or its dependents may not work; the default stays the safe choice.
 - Duplicate and similar-mod import prompts get a "Keep both" button (`O`) that adds the new mod next to the existing one when their IDs differ; the command-line import prompt gains `[b]oth`.
