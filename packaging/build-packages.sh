@@ -24,10 +24,30 @@ if ! command -v cargo-rpm >/dev/null 2>&1; then
   exit 1
 fi
 
+if ! command -v rpmbuild >/dev/null 2>&1; then
+  echo "Missing rpmbuild. Install your distro's rpm-build (or rpm-tools) package."
+  exit 1
+fi
+
 cargo deb --no-build
 cp "$ROOT/target/debian"/*.deb "$DIST_DIR/"
 
-cargo rpm build
+# cargo-rpm only understands "RPM version 4.x", and RPM 6 writes v6 packages
+# that older distros can't install. With a newer rpmbuild, run cargo rpm
+# through a wrapper that reports 4.x and pins the v4 package format.
+RPM_PATH="$PATH"
+if ! rpmbuild --version | grep -q '^RPM version 4\.'; then
+  RPM_WRAPPER_DIR="$(mktemp -d)"
+  trap 'rm -rf "$RPM_WRAPPER_DIR"' EXIT
+  cat > "$RPM_WRAPPER_DIR/rpmbuild" <<EOF
+#!/bin/sh
+if [ "\$1" = "--version" ]; then echo "RPM version 4.20.1"; exit 0; fi
+exec "$(command -v rpmbuild)" --define "_rpmformat 4" "\$@"
+EOF
+  chmod +x "$RPM_WRAPPER_DIR/rpmbuild"
+  RPM_PATH="$RPM_WRAPPER_DIR:$PATH"
+fi
+PATH="$RPM_PATH" cargo rpm build
 cp "$ROOT/target/release/rpmbuild/RPMS"/*/sigilsmith-"$VERSION"-*.rpm "$DIST_DIR/"
 
 "$ROOT/packaging/build-appimage.sh"
