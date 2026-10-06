@@ -1988,6 +1988,48 @@ mod tests {
     }
 
     #[test]
+    fn archive_with_an_lspk_v16_pak_imports_as_pak() {
+        // KaiLime UI's layout: a zip holding just an LSPK v16 .pak whose file
+        // name doesn't match its module folder.
+        let root = test_root("archive-one-pak");
+        let data_dir = root.join("data");
+        fs::create_dir_all(&data_dir).unwrap();
+        let pak = root.join("LooseDepTest_C.pak");
+        metadata::write_test_pak_version(
+            &pak,
+            16,
+            &[
+                ("Mods/LooseDepTest/meta.lsx", META_LSX.as_bytes(), true),
+                (
+                    "Mods/LooseDepTest/Story/RawFiles/Goals/Test.txt",
+                    b"Version 1",
+                    false,
+                ),
+            ],
+        );
+        let archive = root.join("LooseDepTest.pak-17443-1-1-1-1752287854.zip");
+        let mut writer = zip::ZipWriter::new(fs::File::create(&archive).unwrap());
+        writer
+            .start_file(
+                "LooseDepTest_C.pak",
+                zip::write::SimpleFileOptions::default(),
+            )
+            .unwrap();
+        std::io::Write::write_all(&mut writer, &fs::read(&pak).unwrap()).unwrap();
+        writer.finish().unwrap();
+
+        let result = import_path_with_progress(&archive, &data_dir, None);
+        let _ = fs::remove_dir_all(&root);
+
+        let result = result.unwrap();
+        let mods: Vec<&ImportMod> = result.batches.iter().flat_map(|b| &b.mods).collect();
+        assert_eq!(mods.len(), 1);
+        assert_eq!(mods[0].entry.id, "d1ced1ce-0000-4000-8000-000000000001");
+        assert!(mods[0].entry.has_target_kind(TargetKind::Pak));
+        assert!(mods[0].entry.scripts.osiris);
+    }
+
+    #[test]
     fn pak_import_finds_scripts() {
         let root = test_root("pak-scripts");
         let data_dir = root.join("data");

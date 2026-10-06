@@ -6,12 +6,9 @@ use crate::{
 };
 use anyhow::{Context, Result};
 use blake3::Hasher;
-use lz4_flex::block::decompress;
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{HashMap, HashSet},
-    fs::File,
-    io::{Read, Seek, SeekFrom},
     path::Path,
     time::Instant,
 };
@@ -952,52 +949,15 @@ fn has_pak_files(
 }
 
 fn scan_pak_index(path: &Path) -> Result<Vec<FileEntry>> {
-    const ENTRY_LEN: usize = 272;
-    const PATH_LEN: usize = 256;
-    const MIN_VERSION: u32 = 18;
-
-    let mut file = File::open(path).with_context(|| format!("open pak {:?}", path))?;
-    let mut id = [0u8; 4];
-    file.read_exact(&mut id)?;
-    if &id != b"LSPK" {
-        anyhow::bail!("invalid pak header");
-    }
-    let version = read_u32(&mut file)?;
-    if version < MIN_VERSION {
-        anyhow::bail!("unsupported pak version {version}");
-    }
-    let footer_offset = read_u64(&mut file)?;
-    let footer_offset = i64::try_from(footer_offset)?;
-    file.seek(SeekFrom::Start(0))?;
-    file.seek(SeekFrom::Current(footer_offset))?;
-
-    let file_count = read_u32(&mut file)? as usize;
-    let compressed_len = read_u32(&mut file)? as usize;
-    let decompressed_len = file_count.saturating_mul(ENTRY_LEN);
-
-    let mut compressed = vec![0u8; compressed_len];
-    file.read_exact(&mut compressed)?;
-    let table = decompress(&compressed, decompressed_len)?;
-
-    let mut out = Vec::new();
-    for index in 0..file_count {
-        let start = index * ENTRY_LEN;
-        let end = start + ENTRY_LEN;
-        if end > table.len() {
-            break;
-        }
-        let entry = &table[start..end];
-        let path_end = entry[..PATH_LEN]
-            .iter()
-            .position(|byte| *byte == 0)
-            .unwrap_or(PATH_LEN);
-        let raw_path = String::from_utf8_lossy(&entry[..path_end]);
-        let path = normalize_path(&raw_path);
-        let size = u32::from_le_bytes(entry[268..272].try_into().unwrap_or([0; 4])) as u64;
-        out.push(FileEntry { key: path, size });
-    }
-
-    Ok(out)
+    let entries = metadata::read_pak_index_entries(path)
+        .with_context(|| format!("read pak index {:?}", path))?;
+    Ok(entries
+        .into_iter()
+        .map(|entry| FileEntry {
+            key: entry.path,
+            size: entry.decompressed_size,
+        })
+        .collect())
 }
 
 fn patch_score(mod_entry: &ModEntry, tags: &[String]) -> (u8, Vec<String>) {
@@ -1187,18 +1147,6 @@ fn display_mod_name(id: &str, mod_map: &HashMap<String, ModEntry>) -> String {
         .get(id)
         .map(|entry| entry.display_name())
         .unwrap_or_else(|| id.to_string())
-}
-
-fn read_u32(file: &mut File) -> Result<u32> {
-    let mut bytes = [0u8; 4];
-    file.read_exact(&mut bytes)?;
-    Ok(u32::from_le_bytes(bytes))
-}
-
-fn read_u64(file: &mut File) -> Result<u64> {
-    let mut bytes = [0u8; 8];
-    file.read_exact(&mut bytes)?;
-    Ok(u64::from_le_bytes(bytes))
 }
 
 fn normalize_path(path: &str) -> String {

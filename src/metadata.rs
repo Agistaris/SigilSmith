@@ -567,11 +567,12 @@ fn parse_created_at(value: &str) -> Option<i64> {
 }
 
 #[derive(Debug, Clone)]
-struct PakIndexEntry {
-    path: String,
+pub(crate) struct PakIndexEntry {
+    /// Lowercase, with forward slashes.
+    pub(crate) path: String,
     offset: u64,
-    compressed_size: u32,
-    decompressed_size: u32,
+    compressed_size: u64,
+    pub(crate) decompressed_size: u64,
     compression: CompressionType,
 }
 
@@ -715,10 +716,10 @@ fn parse_script_extender_config(bytes: Option<&[u8]>) -> ScriptExtenderUse {
     }
 }
 
-fn read_pak_index_entries(path: &Path) -> Option<Vec<PakIndexEntry>> {
-    const ENTRY_LEN: usize = 272;
+/// Reads a pak's file list. Handles LSPK v18 (BG3 since release) and v15/v16
+/// (Early Access); older LSLib builds still write v16, and BG3 loads it.
+pub(crate) fn read_pak_index_entries(path: &Path) -> Option<Vec<PakIndexEntry>> {
     const PATH_LEN: usize = 256;
-    const MIN_VERSION: u32 = 18;
 
     let mut file = fs::File::open(path).ok()?;
     let mut id = [0u8; 4];
@@ -727,9 +728,12 @@ fn read_pak_index_entries(path: &Path) -> Option<Vec<PakIndexEntry>> {
         return None;
     }
     let version = read_u32(&mut file)?;
-    if version < MIN_VERSION {
-        return None;
-    }
+    // LSLib's FileEntry15 and FileEntry18.
+    let entry_len = match version {
+        15 | 16 => 296,
+        18.. => 272,
+        _ => return None,
+    };
     let footer_offset = read_u64(&mut file)?;
     let footer_offset = i64::try_from(footer_offset).ok()?;
     file.seek(SeekFrom::Start(0)).ok()?;
@@ -737,7 +741,7 @@ fn read_pak_index_entries(path: &Path) -> Option<Vec<PakIndexEntry>> {
 
     let file_count = read_u32(&mut file)? as usize;
     let compressed_len = read_u32(&mut file)? as usize;
-    let decompressed_len = file_count.saturating_mul(ENTRY_LEN);
+    let decompressed_len = file_count.saturating_mul(entry_len);
 
     let mut compressed = vec![0u8; compressed_len];
     file.read_exact(&mut compressed).ok()?;
@@ -746,10 +750,16 @@ fn read_pak_index_entries(path: &Path) -> Option<Vec<PakIndexEntry>> {
         Err(_) => zstd_decompress(&compressed, decompressed_len).ok()?,
     };
 
+    let u32_at = |entry: &[u8], at: usize| {
+        u32::from_le_bytes(entry[at..at + 4].try_into().unwrap_or([0; 4]))
+    };
+    let u64_at = |entry: &[u8], at: usize| {
+        u64::from_le_bytes(entry[at..at + 8].try_into().unwrap_or([0; 8]))
+    };
     let mut out = Vec::new();
     for index in 0..file_count {
-        let start = index * ENTRY_LEN;
-        let end = start + ENTRY_LEN;
+        let start = index * entry_len;
+        let end = start + entry_len;
         if end > table.len() {
             break;
         }
@@ -761,19 +771,32 @@ fn read_pak_index_entries(path: &Path) -> Option<Vec<PakIndexEntry>> {
         let raw_path = String::from_utf8_lossy(&entry[..path_end]);
         let path = normalize_path(&raw_path);
 
-        let offset_upper = u32::from_le_bytes(entry[256..260].try_into().unwrap_or([0; 4]));
-        let offset_lower = u16::from_le_bytes(entry[260..262].try_into().unwrap_or([0; 2]));
-        let offset = u64::from(offset_upper) | (u64::from(offset_lower) << 32);
-        let offset = offset & 0x000f_ffff_ffff_ffff;
-
-        let compression = match entry[263] & 0x0F {
+        let (offset, flags, compressed_size, decompressed_size) = if entry_len == 296 {
+            // u64 offset, size on disk, uncompressed size; u32 part, flags.
+            (
+                u64_at(entry, 256),
+                entry[284],
+                u64_at(entry, 264),
+                u64_at(entry, 272),
+            )
+        } else {
+            // 48-bit offset (u32 + u16), u8 part, u8 flags, u32 sizes.
+            let offset_upper = u32_at(entry, 256);
+            let offset_lower = u16::from_le_bytes(entry[260..262].try_into().unwrap_or([0; 2]));
+            let offset = u64::from(offset_upper) | (u64::from(offset_lower) << 32);
+            (
+                offset & 0x000f_ffff_ffff_ffff,
+                entry[263],
+                u64::from(u32_at(entry, 264)),
+                u64::from(u32_at(entry, 268)),
+            )
+        };
+        let compression = match flags & 0x0F {
             0 => CompressionType::None,
             1 => CompressionType::Zlib,
             2 => CompressionType::Lz4,
             _ => CompressionType::Zstd,
         };
-        let compressed_size = u32::from_le_bytes(entry[264..268].try_into().unwrap_or([0; 4]));
-        let decompressed_size = u32::from_le_bytes(entry[268..272].try_into().unwrap_or([0; 4]));
 
         out.push(PakIndexEntry {
             path,
@@ -837,9 +860,15 @@ fn split_tags(value: &str) -> Vec<String> {
 /// Each file is (path, contents, lz4-compress).
 #[cfg(test)]
 pub(crate) fn write_test_pak(path: &Path, files: &[(&str, &[u8], bool)]) {
+    write_test_pak_version(path, 18, files);
+}
+
+/// The same for LSPK v16 (`version` 16) or v18.
+#[cfg(test)]
+pub(crate) fn write_test_pak_version(path: &Path, version: u32, files: &[(&str, &[u8], bool)]) {
     let mut data = Vec::new();
     data.extend_from_slice(b"LSPK");
-    data.extend_from_slice(&18u32.to_le_bytes());
+    data.extend_from_slice(&version.to_le_bytes());
     data.extend_from_slice(&0u64.to_le_bytes());
     let mut table = Vec::new();
     for (name, bytes, compress) in files {
@@ -850,6 +879,16 @@ pub(crate) fn write_test_pak(path: &Path, files: &[(&str, &[u8], bool)]) {
             (bytes.to_vec(), 0u8)
         };
         data.extend_from_slice(&stored);
+        if version == 16 {
+            let mut entry = [0u8; 296];
+            entry[..name.len()].copy_from_slice(name.as_bytes());
+            entry[256..264].copy_from_slice(&offset.to_le_bytes());
+            entry[264..272].copy_from_slice(&(stored.len() as u64).to_le_bytes());
+            entry[272..280].copy_from_slice(&(bytes.len() as u64).to_le_bytes());
+            entry[284] = flags;
+            table.extend_from_slice(&entry);
+            continue;
+        }
         let mut entry = [0u8; 272];
         entry[..name.len()].copy_from_slice(name.as_bytes());
         entry[256..260].copy_from_slice(&(offset as u32).to_le_bytes());
