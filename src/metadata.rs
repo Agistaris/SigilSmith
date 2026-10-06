@@ -290,7 +290,9 @@ pub fn is_base_dependency_label(label: &str) -> bool {
             | "diceset02"
             | "diceset03"
             | "diceset04"
+            | "diceset05"
             | "diceset06"
+            | "diceset07"
             | "honour"
             | "honourx"
             | "modbrowser"
@@ -327,8 +329,12 @@ pub fn is_base_dependency_uuid(uuid: &str) -> bool {
             | "e0a4d990-7b9b-8fa9-d7c6-04017c6cf5b1"
             // DiceSet_04
             | "77a2155f-4b35-4f0c-e7ff-4338f91426a4"
+            // DiceSet_05
+            | "6efc8f44-cc2a-0273-d4b1-681d3faa411b"
             // DiceSet_06
             | "ee4989eb-aab8-968f-8674-812ea2f4bfd7"
+            // DiceSet_07
+            | "bf19bab4-4908-ef39-9065-ced469c0f877"
             // Honour
             | "b77b6210-ac50-4cb1-a3d5-5702fb9c744c"
             // HonourX
@@ -727,4 +733,25 @@ fn split_tags(value: &str) -> Vec<String> {
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn every_builtin_dice_set_is_a_base_dependency() {
+        for (label, uuid) in [
+            ("DiceSet_01", "e842840a-2449-588c-b0c4-22122cfce31b"),
+            ("DiceSet_02", "b176a0ac-d79f-ed9d-5a87-5c2c80874e10"),
+            ("DiceSet_03", "e0a4d990-7b9b-8fa9-d7c6-04017c6cf5b1"),
+            ("DiceSet_04", "77a2155f-4b35-4f0c-e7ff-4338f91426a4"),
+            ("DiceSet_05", "6efc8f44-cc2a-0273-d4b1-681d3faa411b"),
+            ("DiceSet_06", "ee4989eb-aab8-968f-8674-812ea2f4bfd7"),
+            ("DiceSet_07", "bf19bab4-4908-ef39-9065-ced469c0f877"),
+        ] {
+            assert!(is_base_dependency_label(label), "{label}");
+            assert!(is_base_dependency_uuid(uuid), "{uuid}");
+        }
+    }
 }

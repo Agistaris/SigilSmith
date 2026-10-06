@@ -162,8 +162,12 @@ pub struct DialogToggle {
 
 #[derive(Debug, Clone)]
 pub enum DialogKind {
-    Overwrite,
-    Similar,
+    Overwrite {
+        keep_both: bool,
+    },
+    Similar {
+        keep_both: bool,
+    },
     Unrecognized {
         path: PathBuf,
         label: String,
@@ -490,6 +494,20 @@ struct DuplicateDecision {
     default_overwrite: Option<bool>,
 }
 
+impl DuplicateDecision {
+    /// Both copies fit in the library only when their IDs differ.
+    fn can_keep_both(&self) -> bool {
+        self.existing_id != self.import_mod.entry.id
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DuplicateAction {
+    Overwrite,
+    Skip,
+    KeepBoth,
+}
+
 #[derive(Debug, Clone)]
 struct SimilarMatch {
     existing_id: String,
@@ -782,7 +800,7 @@ pub struct App {
     log_path: PathBuf,
     duplicate_queue: VecDeque<DuplicateDecision>,
     pending_duplicate: Option<DuplicateDecision>,
-    duplicate_apply_all: Option<bool>,
+    duplicate_apply_all: Option<DuplicateAction>,
     approved_imports: Vec<importer::ImportMod>,
     pub conflicts: Vec<deploy::ConflictEntry>,
     pub conflict_selected: usize,
@@ -6708,6 +6726,7 @@ Use Ctrl+R to reset this mod or F12 to reset all pins."
                     let mod_entry = &import_mod.entry;
                     if let Some(existing) = self.find_duplicate_by_name(&mod_entry.name).cloned() {
                         let default_overwrite = duplicate_default_overwrite(mod_entry, &existing);
+                        let mut keep_both = false;
                         let overwrite = if let Some(choice) = apply_all {
                             choice
                         } else {
@@ -6720,6 +6739,10 @@ Use Ctrl+R to reset this mod or F12 to reset all pins."
                             match resolution {
                                 CliDuplicateAction::Overwrite => true,
                                 CliDuplicateAction::Skip => false,
+                                CliDuplicateAction::KeepBoth => {
+                                    keep_both = true;
+                                    false
+                                }
                                 CliDuplicateAction::OverwriteAll => {
                                     apply_all = Some(true);
                                     true
@@ -6730,7 +6753,9 @@ Use Ctrl+R to reset this mod or F12 to reset all pins."
                                 }
                             }
                         };
-                        if overwrite {
+                        if keep_both {
+                            approved.push(import_mod);
+                        } else if overwrite {
                             if existing.id != mod_entry.id {
                                 let _ = self.remove_mod_by_id(&existing.id);
                             }
@@ -6759,6 +6784,7 @@ Use Ctrl+R to reset this mod or F12 to reset all pins."
                                 continue;
                             }
                         };
+                        let mut keep_both = false;
                         let overwrite = if let Some(choice) = apply_all {
                             choice
                         } else {
@@ -6771,6 +6797,10 @@ Use Ctrl+R to reset this mod or F12 to reset all pins."
                             match resolution {
                                 CliDuplicateAction::Overwrite => true,
                                 CliDuplicateAction::Skip => false,
+                                CliDuplicateAction::KeepBoth => {
+                                    keep_both = true;
+                                    false
+                                }
                                 CliDuplicateAction::OverwriteAll => {
                                     apply_all = Some(true);
                                     true
@@ -6781,7 +6811,9 @@ Use Ctrl+R to reset this mod or F12 to reset all pins."
                                 }
                             }
                         };
-                        if overwrite {
+                        if keep_both {
+                            approved.push(import_mod);
+                        } else if overwrite {
                             if similar.existing_id != mod_entry.id {
                                 let _ = self.remove_mod_by_id(&similar.existing_id);
                             }
@@ -9801,9 +9833,16 @@ Use Ctrl+R to reset this mod or F12 to reset all pins."
             return;
         }
 
-        if let Some(overwrite_all) = self.duplicate_apply_all {
-            while let Some(next) = self.duplicate_queue.pop_front() {
-                self.apply_duplicate_decision(next, overwrite_all);
+        if let Some(action) = self.duplicate_apply_all {
+            while let Some(next) = self.duplicate_queue.front() {
+                if action == DuplicateAction::KeepBoth && !next.can_keep_both() {
+                    // Same ID: only one copy can exist, so ask about this one.
+                    break;
+                }
+                let Some(next) = self.duplicate_queue.pop_front() else {
+                    break;
+                };
+                self.apply_duplicate_decision(next, action);
             }
         }
 
@@ -9827,14 +9866,15 @@ Use Ctrl+R to reset this mod or F12 to reset all pins."
 
         let display_name = next.import_mod.entry.display_name();
         let existing_label = next.existing_label.clone();
-        let (title, message, kind) = match &next.kind {
+        let keep_both = next.can_keep_both();
+        let (title, mut message, kind) = match &next.kind {
             DuplicateKind::Exact => (
                 "Overwrite Duplicate".to_string(),
                 format!(
                     "Mod \"{}\" already exists.\nOverwrite \"{}\"?",
                     display_name, existing_label
                 ),
-                DialogKind::Overwrite,
+                DialogKind::Overwrite { keep_both },
             ),
             DuplicateKind::Similar {
                 new_label,
@@ -9863,10 +9903,13 @@ Use Ctrl+R to reset this mod or F12 to reset all pins."
                 (
                     "Similar Mod Detected".to_string(),
                     message,
-                    DialogKind::Similar,
+                    DialogKind::Similar { keep_both },
                 )
             }
         };
+        if keep_both {
+            message.push_str("\n\nKeep both (O): add it next to the existing mod.");
+        }
 
         let default_choice = if matches!(next.default_overwrite, Some(true)) {
             DialogChoice::Yes
@@ -9890,22 +9933,29 @@ Use Ctrl+R to reset this mod or F12 to reset all pins."
         });
     }
 
-    pub fn confirm_duplicate(&mut self, overwrite: bool, apply_all: bool) {
+    fn confirm_duplicate(&mut self, action: DuplicateAction, apply_all: bool) {
         let Some(decision) = self.pending_duplicate.take() else {
             return;
         };
 
         if apply_all {
-            self.duplicate_apply_all = Some(overwrite);
+            self.duplicate_apply_all = Some(action);
         }
-        self.apply_duplicate_decision(decision, overwrite);
+        self.apply_duplicate_decision(decision, action);
 
         self.input_mode = InputMode::Normal;
         self.prompt_next_duplicate();
     }
 
-    fn apply_duplicate_decision(&mut self, decision: DuplicateDecision, overwrite: bool) {
-        if overwrite {
+    fn apply_duplicate_decision(&mut self, decision: DuplicateDecision, action: DuplicateAction) {
+        if action == DuplicateAction::KeepBoth && decision.can_keep_both() {
+            self.log_info(format!(
+                "Keeping both \"{}\" and \"{}\"",
+                decision.import_mod.entry.display_name(),
+                decision.existing_label
+            ));
+            self.approved_imports.push(decision.import_mod);
+        } else if action == DuplicateAction::Overwrite {
             let same_id = decision.existing_id == decision.import_mod.entry.id;
             let removed = if same_id {
                 false
@@ -10000,6 +10050,9 @@ Use Ctrl+R to reset this mod or F12 to reset all pins."
         let count = match &dialog.kind {
             DialogKind::DisableDependents { ids, .. } => ids.len(),
             DialogKind::EnableRequiredDependencies { requested, .. } => requested.len(),
+            DialogKind::Overwrite { keep_both: true } | DialogKind::Similar { keep_both: true } => {
+                return Some("Keep both");
+            }
             _ => return None,
         };
         Some(if count == 1 {
@@ -10068,13 +10121,18 @@ Use Ctrl+R to reset this mod or F12 to reset all pins."
 
         let choice = dialog.choice;
         match dialog.kind {
-            DialogKind::Overwrite | DialogKind::Similar => {
+            DialogKind::Overwrite { .. } | DialogKind::Similar { .. } => {
                 let apply_all = dialog
                     .toggle
                     .as_ref()
                     .map(|toggle| toggle.checked)
                     .unwrap_or(false);
-                self.confirm_duplicate(matches!(choice, DialogChoice::Yes), apply_all);
+                let action = match choice {
+                    DialogChoice::Yes => DuplicateAction::Overwrite,
+                    DialogChoice::Alt => DuplicateAction::KeepBoth,
+                    DialogChoice::No | DialogChoice::Cancel => DuplicateAction::Skip,
+                };
+                self.confirm_duplicate(action, apply_all);
             }
             DialogKind::Unrecognized { path, label } => {
                 if matches!(choice, DialogChoice::Yes) {
@@ -12932,6 +12990,7 @@ fn duplicate_default_overwrite(new_mod: &ModEntry, existing: &ModEntry) -> Optio
 enum CliDuplicateAction {
     Overwrite,
     Skip,
+    KeepBoth,
     OverwriteAll,
     SkipAll,
 }
@@ -12993,6 +13052,7 @@ fn prompt_duplicate_cli(
     default_overwrite: Option<bool>,
     similarity: Option<f32>,
 ) -> Result<CliDuplicateAction> {
+    let can_keep_both = new_mod.id != existing.id;
     println!();
     println!("Duplicate mod detected:");
     println!("  New: {}", new_mod.display_name());
@@ -13008,7 +13068,11 @@ fn prompt_duplicate_cli(
         };
         println!("  Default: {}", hint);
     }
-    print!("Choose [o]verwrite, [s]kip, overwrite [a]ll, skip all [k] (Enter = default): ");
+    if can_keep_both {
+        print!("Choose [o]verwrite, [s]kip, keep [b]oth, overwrite [a]ll, skip all [k] (Enter = default): ");
+    } else {
+        print!("Choose [o]verwrite, [s]kip, overwrite [a]ll, skip all [k] (Enter = default): ");
+    }
     io::stdout().flush().ok();
     let mut input = String::new();
     io::stdin().read_line(&mut input)?;
@@ -13023,6 +13087,7 @@ fn prompt_duplicate_cli(
     match choice.as_str() {
         "o" | "y" | "yes" => Ok(CliDuplicateAction::Overwrite),
         "s" | "n" | "no" => Ok(CliDuplicateAction::Skip),
+        "b" | "both" if can_keep_both => Ok(CliDuplicateAction::KeepBoth),
         "a" | "all" => Ok(CliDuplicateAction::OverwriteAll),
         "k" | "skipall" | "skip-all" => Ok(CliDuplicateAction::SkipAll),
         _ => Ok(CliDuplicateAction::Skip),
@@ -14264,6 +14329,13 @@ mod tests {
         });
         assert_eq!(App::dialog_alt_label(&enable_one), Some("Only this mod"));
 
-        assert_eq!(App::dialog_alt_label(&dialog(DialogKind::Similar)), None);
+        assert_eq!(
+            App::dialog_alt_label(&dialog(DialogKind::Similar { keep_both: true })),
+            Some("Keep both")
+        );
+        assert_eq!(
+            App::dialog_alt_label(&dialog(DialogKind::Overwrite { keep_both: false })),
+            None
+        );
     }
 }

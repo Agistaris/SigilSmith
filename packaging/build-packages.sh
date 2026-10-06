@@ -32,4 +32,15 @@ cp "$ROOT/target/release/rpmbuild/RPMS"/*/sigilsmith-"$VERSION"-*.rpm "$DIST_DIR
 
 "$ROOT/packaging/build-appimage.sh"
 
-( cd "$DIST_DIR" && sha256sum * > SHA256SUMS.txt )
+# Hash only this build's packages: DIST_DIR can also hold older releases,
+# subdirectories and a previous SHA256SUMS.txt.
+(
+  cd "$DIST_DIR"
+  sha256sum -- \
+    "sigilsmith-${VERSION}-linux-x86_64.tar.gz" \
+    "sigilsmith_${VERSION}"-*_amd64.deb \
+    "sigilsmith-${VERSION}"-*.rpm \
+    "sigilsmith-${VERSION}"-*.AppImage \
+    > SHA256SUMS.txt.tmp
+  mv SHA256SUMS.txt.tmp SHA256SUMS.txt
+)

@@ -1,9 +1,8 @@
 name: release
 
+# Manual only: releases are built and published locally (docs/RELEASE.md),
+# so a tag push should not build or publish a second set of packages.
 on:
-  push:
-    tags:
-      - "v*"
   workflow_dispatch:
 
 permissions:

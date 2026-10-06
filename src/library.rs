@@ -215,7 +215,7 @@ fn default_true() -> bool {
 impl ModEntry {
     pub fn display_name(&self) -> String {
         if let Some(label) = &self.source_label {
-            let cleaned = clean_source_label(label);
+            let cleaned = clean_source_label(strip_trailing_uuid(label));
             if !cleaned.is_empty() {
                 return cleaned;
             }
@@ -411,6 +411,33 @@ fn system_time_to_epoch(time: SystemTime) -> Option<i64> {
         .map(|duration| duration.as_secs() as i64)
 }
 
+/// Drops a trailing mod UUID that some pak file names carry, e.g.
+/// "AlfiraJoinsTheParty_3539eba9-6d77-c53d-1009-b3c77c9cd04c".
+fn strip_trailing_uuid(label: &str) -> &str {
+    let trimmed = label.trim_end();
+    let Some(split) = trimmed.len().checked_sub(36) else {
+        return trimmed;
+    };
+    if !trimmed.is_char_boundary(split) || !is_uuid(&trimmed[split..]) {
+        return trimmed;
+    }
+    let head = trimmed[..split]
+        .trim_end_matches(|ch: char| ch.is_whitespace() || ch == '_' || ch == '-' || ch == '.');
+    if head.is_empty() {
+        trimmed
+    } else {
+        head
+    }
+}
+
+fn is_uuid(value: &str) -> bool {
+    value.len() == 36
+        && value.chars().enumerate().all(|(index, ch)| match index {
+            8 | 13 | 18 | 23 => ch == '-',
+            _ => ch.is_ascii_hexdigit(),
+        })
+}
+
 pub fn clean_source_label(label: &str) -> String {
     let raw = label.trim().replace('_', " ");
     if raw.is_empty() {
@@ -473,4 +500,35 @@ pub fn normalize_label(label: &str) -> String {
         }
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn display_label_drops_trailing_uuid() {
+        let label = "AlfiraJoinsTheParty_3539eba9-6d77-c53d-1009-b3c77c9cd04c";
+        assert_eq!(
+            clean_source_label(strip_trailing_uuid(label)),
+            "AlfiraJoinsTheParty"
+        );
+        let label = "Aardi_KnightsandDames_194a7429-5b34-7d68-06ee-494607e165e4";
+        assert_eq!(
+            clean_source_label(strip_trailing_uuid(label)),
+            "Aardi KnightsandDames"
+        );
+    }
+
+    #[test]
+    fn display_label_keeps_names_without_uuid() {
+        assert_eq!(
+            strip_trailing_uuid("Party Limit Begone SE v3.5"),
+            "Party Limit Begone SE v3.5"
+        );
+        // A bare UUID stays as-is rather than becoming an empty name.
+        let bare = "3539eba9-6d77-c53d-1009-b3c77c9cd04c";
+        assert_eq!(strip_trailing_uuid(bare), bare);
+        assert_eq!(strip_trailing_uuid("Ünïcödé name"), "Ünïcödé name");
+    }
 }
