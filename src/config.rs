@@ -29,6 +29,8 @@ pub struct AppConfig {
     pub dependency_search_copy_preference: Option<bool>,
     #[serde(default = "default_true")]
     pub show_startup_dependency_notice: bool,
+    #[serde(default = "default_true")]
+    pub show_script_extender_notice: bool,
     #[serde(default = "default_false")]
     pub sigillink_onboarded: bool,
     #[serde(default = "default_false")]
@@ -71,6 +73,7 @@ impl AppConfig {
             warn_missing_dependencies: true,
             dependency_search_copy_preference: None,
             show_startup_dependency_notice: true,
+            show_script_extender_notice: true,
             sigillink_onboarded: false,
             sigillink_ranking_enabled: false,
             sigillink_auto_preview: true,

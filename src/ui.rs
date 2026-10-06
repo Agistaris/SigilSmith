@@ -5,6 +5,7 @@ use crate::{
         ModSortColumn, PathBrowser, PathBrowserEntryKind, PathBrowserFocus, PathBrowserPurpose,
         SetupStep, SigilLinkCacheAction, SigilLinkMissingTrigger, ToastLevel, UpdateStatus,
     },
+    bg3::{ScriptExtenderSetup, SetupCheck},
     library::{InstallTarget, ModEntry, TargetKind},
 };
 use anyhow::Result;
@@ -37,6 +38,8 @@ const STATUS_WIDTH: u16 = SIDE_PANEL_WIDTH;
 const HEADER_HEIGHT: u16 = 3;
 const DETAILS_HEIGHT: u16 = 12;
 const CONTEXT_HEIGHT: u16 = 28;
+// Fits every mod-list marker; Help ("Mod List Markers") repeats them in full.
+const LEGEND_ROWS: usize = 6;
 const LOG_MIN_HEIGHT: u16 = 5;
 const CONFLICTS_BAR_HEIGHT: u16 = 0;
 const FILTER_HEIGHT: u16 = 2;
@@ -343,6 +346,11 @@ fn handle_dialog_mode(app: &mut App, key: KeyEvent) -> Result<()> {
                         app.dialog_set_choice(DialogChoice::Yes);
                         app.dialog_confirm();
                     }
+                    // Closes without installing or copying anything.
+                    DialogKind::ScriptExtenderSetup { .. } => {
+                        app.dialog_set_choice(DialogChoice::Cancel);
+                        app.dialog_confirm();
+                    }
                     _ => {
                         app.dialog_set_choice(DialogChoice::No);
                         app.dialog_confirm();
@@ -595,9 +603,11 @@ enum SettingsItemKind {
     ToggleDependencyDownloads,
     ToggleDependencyWarnings,
     ToggleStartupDependencyNotice,
+    ToggleScriptExtenderNotice,
     DefaultSortColumn,
     ActionCheckUpdates,
     ActionWhatsNew,
+    ActionScriptExtenderSetup,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -648,6 +658,12 @@ fn settings_items(app: &App) -> Vec<SettingsItem> {
             selectable: true,
         },
         SettingsItem {
+            label: "Script Extender Setup".to_string(),
+            kind: SettingsItemKind::ActionScriptExtenderSetup,
+            checked: None,
+            selectable: true,
+        },
+        SettingsItem {
             label: "Auto Deploy".to_string(),
             kind: SettingsItemKind::ToggleAutoDeploy,
             checked: Some(app.app_config.auto_deploy_enabled),
@@ -681,6 +697,12 @@ fn settings_items(app: &App) -> Vec<SettingsItem> {
             label: "Warn On Missing Dependencies".to_string(),
             kind: SettingsItemKind::ToggleDependencyWarnings,
             checked: Some(app.app_config.warn_missing_dependencies),
+            selectable: true,
+        },
+        SettingsItem {
+            label: "Script Extender Notice".to_string(),
+            kind: SettingsItemKind::ToggleScriptExtenderNotice,
+            checked: Some(app.app_config.show_script_extender_notice),
             selectable: true,
         },
         SettingsItem {
@@ -1022,6 +1044,12 @@ fn handle_settings_menu(app: &mut App, key: KeyEvent) -> Result<()> {
                             app.log_error(format!("Settings update failed: {err}"));
                         }
                     }
+                    SettingsItemKind::ToggleScriptExtenderNotice => {
+                        if let Err(err) = app.toggle_script_extender_notice() {
+                            app.status = format!("Settings update failed: {err}");
+                            app.log_error(format!("Settings update failed: {err}"));
+                        }
+                    }
                     SettingsItemKind::ActionMoveSigilLinkCache => {
                         app.request_settings_menu_return();
                         app.close_settings_menu();
@@ -1069,6 +1097,10 @@ fn handle_settings_menu(app: &mut App, key: KeyEvent) -> Result<()> {
                         app.request_settings_menu_return();
                         app.close_settings_menu();
                         app.open_whats_new();
+                    }
+                    SettingsItemKind::ActionScriptExtenderSetup => {
+                        app.close_settings_menu();
+                        app.open_script_extender_setup();
                     }
                     SettingsItemKind::ActionCheckUpdates => {
                         if matches!(app.update_status, UpdateStatus::Available { .. }) {
@@ -2080,6 +2112,15 @@ fn draw(frame: &mut Frame<'_>, app: &mut App) {
         "SigiLink",
         "Help",
     ];
+    let script_extender_mods = app.enabled_script_extender_mods();
+    let script_extender_problem = app
+        .script_extender_setup
+        .as_ref()
+        .filter(|_| script_extender_mods > 0)
+        .map(|setup| setup.problem());
+    if script_extender_problem.is_some() {
+        context_labels.insert(5, "Script Ext.");
+    }
     if !app.paths_ready() {
         context_labels.push("Setup");
     }
@@ -2324,19 +2365,50 @@ fn draw(frame: &mut Frame<'_>, app: &mut App) {
         let mod_gap_width = 4u16;
         let created_gap_width = 2u16;
         let added_gap_width = 2u16;
-        let fixed_without_mod_target = 4
-            + 3
-            + 3
-            + scripts_width
-            + 6
-            + dep_width
-            + link_width
-            + mod_gap_width
-            + created_gap_width
-            + added_gap_width
-            + date_width
-            + date_width
-            + spacing * 14;
+        let kind_width = 6u16;
+        let min_target_width = 8u16;
+        let base_width = 4 + 3 + 3 + scripts_width + dep_width + link_width + spacing * 14;
+        // Narrow windows: drop Created, then Added, Target and Kind before
+        // the name gets squeezed; Details still shows them all.
+        let optional = [
+            date_width + created_gap_width,
+            date_width + added_gap_width,
+            min_target_width,
+            kind_width,
+        ];
+        let wanted_mod = (mod_width as u16).min(20);
+        let mut dropped = 0;
+        while dropped < optional.len() {
+            let gap = if dropped < 3 { mod_gap_width } else { 0 };
+            let used = base_width + gap + optional[dropped..].iter().sum::<u16>();
+            if table_width.saturating_sub(used + 1) >= wanted_mod {
+                break;
+            }
+            dropped += 1;
+        }
+        let show_created = dropped < 1;
+        let show_added = dropped < 2;
+        let show_target = dropped < 3;
+        let kind_col = if dropped < 4 { kind_width } else { 0 };
+        let mod_gap_col = if show_target { mod_gap_width } else { 0 };
+        let (created_col, created_gap_col) = if show_created {
+            (date_width, created_gap_width)
+        } else {
+            (0, 0)
+        };
+        let (added_col, added_gap_col) = if show_added {
+            (date_width, added_gap_width)
+        } else {
+            (0, 0)
+        };
+        let fixed_without_mod_target = base_width
+            + kind_col
+            + mod_gap_col
+            + created_col
+            + created_gap_col
+            + added_col
+            + added_gap_col
+            + if show_target { min_target_width } else { 0 };
         let max_mod = table_width.saturating_sub(fixed_without_mod_target + 1);
         let mut mod_col = mod_width as u16;
         if max_mod > 0 {
@@ -2344,7 +2416,8 @@ fn draw(frame: &mut Frame<'_>, app: &mut App) {
         } else {
             mod_col = 1;
         }
-        let fixed_without_target = fixed_without_mod_target + mod_col;
+        let fixed_without_target =
+            fixed_without_mod_target + mod_col - if show_target { min_target_width } else { 0 };
         let max_target = table_width.saturating_sub(fixed_without_target);
         let mut target_col = target_width as u16;
         if max_target > 0 {
@@ -2355,6 +2428,9 @@ fn draw(frame: &mut Frame<'_>, app: &mut App) {
         }
         if target_col == 0 {
             target_col = 1;
+        }
+        if !show_target {
+            target_col = 0;
         }
         let header = Row::new(vec![
             mod_header_cell("On", ModSortColumn::Enabled, app.mod_sort, &theme),
@@ -2380,15 +2456,15 @@ fn draw(frame: &mut Frame<'_>, app: &mut App) {
                 Constraint::Length(3),
                 Constraint::Length(3),
                 Constraint::Length(scripts_width),
-                Constraint::Length(6),
+                Constraint::Length(kind_col),
                 Constraint::Length(dep_width),
                 Constraint::Length(link_width),
                 Constraint::Length(mod_col),
-                Constraint::Length(mod_gap_width),
-                Constraint::Length(date_width),
-                Constraint::Length(created_gap_width),
-                Constraint::Length(date_width),
-                Constraint::Length(added_gap_width),
+                Constraint::Length(mod_gap_col),
+                Constraint::Length(created_col),
+                Constraint::Length(created_gap_col),
+                Constraint::Length(added_col),
+                Constraint::Length(added_gap_col),
                 Constraint::Length(target_col),
             ],
         )
@@ -2725,6 +2801,32 @@ fn draw(frame: &mut Frame<'_>, app: &mut App) {
         )
     };
     context_lines.push(sigilink_line);
+    if let Some(problem) = script_extender_problem {
+        let mods = if script_extender_mods == 1 {
+            "1 mod".to_string()
+        } else {
+            format!("{script_extender_mods} mods")
+        };
+        // The problem alone: with the mod count it no longer fits the panel.
+        let value_parts = match problem {
+            _ if app.script_extender_installing() => vec![(
+                "Setting up...".to_string(),
+                Style::default().fg(theme.accent),
+            )],
+            Some(problem) => vec![(format!("✗ {problem}"), Style::default().fg(theme.warning))],
+            None => vec![
+                ("✓ Ready".to_string(), Style::default().fg(theme.success)),
+                (format!("  {mods}"), Style::default().fg(theme.muted)),
+            ],
+        };
+        context_lines.push(format_kv_line_aligned_spans(
+            "Script Ext.",
+            label_style,
+            value_parts,
+            context_width,
+            context_label_width,
+        ));
+    }
     let help_row = KvRow {
         label: "Help".to_string(),
         value: "? Shortcuts".to_string(),
@@ -3581,6 +3683,8 @@ fn draw_dialog(frame: &mut Frame<'_>, app: &mut App, theme: &Theme) {
             Span::raw("   "),
             Span::styled(format!(" {} ", dialog.no_label), no_style),
         ])
+    } else if dialog.no_label.is_empty() {
+        Line::from(Span::styled(format!(" {} ", dialog.yes_label), yes_style))
     } else {
         Line::from(vec![
             Span::raw(" "),
@@ -3854,12 +3958,187 @@ fn build_dialog_message_lines(dialog: &crate::app::Dialog, theme: &Theme) -> Vec
             lines.extend(only_this_mod_note_lines(dialog, effect, theme));
             lines
         }
+        DialogKind::ScriptExtenderSetup { mods, setup } => {
+            script_extender_setup_lines(mods, setup, theme)
+        }
         _ => dialog
             .message
             .lines()
             .map(|line| Line::from(line.to_string()))
             .collect(),
     }
+}
+
+fn script_extender_setup_lines(
+    mods: &[String],
+    setup: &ScriptExtenderSetup,
+    theme: &Theme,
+) -> Vec<Line<'static>> {
+    let text = Style::default().fg(theme.text);
+    let muted = Style::default().fg(theme.muted);
+    let accent = Style::default().fg(theme.accent);
+    let ready = setup.is_ready();
+    let mut lines = Vec::new();
+    let max_list = 3usize;
+    match mods {
+        [] => {}
+        [name] => lines.push(Line::from(vec![
+            Span::styled(name.clone(), accent),
+            Span::styled(" needs the Script Extender.", text),
+        ])),
+        _ => {
+            lines.push(Line::from(Span::styled(
+                format!("{} mods need the Script Extender:", mods.len()),
+                text,
+            )));
+            for name in mods.iter().take(max_list) {
+                lines.push(Line::from(Span::styled(name.clone(), accent)));
+            }
+            if mods.len() > max_list {
+                lines.push(Line::from(Span::styled(
+                    format!("...and {} more", mods.len() - max_list),
+                    accent,
+                )));
+            }
+        }
+    }
+    let summary = match (ready, mods.len()) {
+        (true, _) => "The Script Extender is set up.",
+        (false, 0) => "The Script Extender isn't set up yet.",
+        (false, 1) => "It isn't set up yet, so the mod's scripts won't run.",
+        (false, _) => "It isn't set up yet, so their scripts won't run.",
+    };
+    lines.push(Line::from(Span::styled(
+        summary,
+        if ready {
+            Style::default().fg(theme.success)
+        } else {
+            muted
+        },
+    )));
+
+    // The body is centered; padding the checklist and steps to one width
+    // keeps them left-aligned as a block.
+    let mut block: Vec<Vec<Span<'static>>> = Vec::new();
+    let checks = [
+        (setup.proton_check(), "Steam runs BG3 with Proton"),
+        (
+            setup.installed_check(),
+            "DWrite.dll in the game's bin folder",
+        ),
+        (setup.launch_option_check(), "DWrite override for Proton"),
+    ];
+    for (check, label) in checks {
+        let (mark, color) = match check {
+            SetupCheck::Ok => ("✓", theme.success),
+            SetupCheck::Missing => ("✗", theme.warning),
+            SetupCheck::Unknown => continue,
+        };
+        block.push(vec![
+            Span::styled(mark, Style::default().fg(color)),
+            Span::styled(format!(" {label}"), text),
+        ]);
+    }
+    let heading = |label: &'static str| {
+        vec![Span::styled(
+            label,
+            Style::default()
+                .fg(theme.accent)
+                .add_modifier(Modifier::BOLD),
+        )]
+    };
+    let mut automatic: Vec<[&str; 2]> = Vec::new();
+    if setup.installed_check() == SetupCheck::Missing {
+        automatic.push([
+            "Download the latest BG3SE from github.com/Norbyte",
+            "and put its DWrite.dll in the game's bin folder.",
+        ]);
+    }
+    if setup.can_set_override() {
+        automatic.push([
+            "Turn on the DWrite override in BG3's Proton",
+            "prefix (the setting winecfg changes).",
+        ]);
+    }
+    let launch_option_manual =
+        setup.launch_option_check() == SetupCheck::Missing && !setup.can_set_override();
+    let mut manual: Vec<[&str; 2]> = Vec::new();
+    if setup.proton_check() == SetupCheck::Missing {
+        manual.push([
+            "Steam: BG3 > Properties > Compatibility,",
+            "force a Proton version.",
+        ]);
+    }
+    if launch_option_manual {
+        manual.push([
+            "Steam: BG3 > Properties > Launch Options,",
+            "paste the copied launch option:",
+        ]);
+    }
+    let push_steps = |block: &mut Vec<Vec<Span<'static>>>, steps: &[[&str; 2]]| {
+        for [first, second] in steps {
+            block.push(vec![Span::styled(format!("• {first}"), text)]);
+            block.push(vec![Span::styled(format!("  {second}"), text)]);
+        }
+    };
+    if !automatic.is_empty() {
+        block.push(Vec::new());
+        block.push(heading("Set up for me will:"));
+        push_steps(&mut block, &automatic);
+    }
+    if !manual.is_empty() {
+        block.push(Vec::new());
+        block.push(heading(if automatic.is_empty() {
+            "To fix:"
+        } else {
+            "You still need to:"
+        }));
+        push_steps(&mut block, &manual);
+    }
+    let block_width = block
+        .iter()
+        .map(|spans| {
+            spans
+                .iter()
+                .map(|span| display_width(&span.content))
+                .sum::<usize>()
+        })
+        .max()
+        .unwrap_or(0);
+    lines.push(Line::from(""));
+    for mut spans in block {
+        let width: usize = spans.iter().map(|span| display_width(&span.content)).sum();
+        spans.push(Span::raw(" ".repeat(block_width - width)));
+        lines.push(Line::from(spans));
+    }
+    if setup.can_set_override() {
+        // For people who'd rather do it in Steam themselves.
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            "Or do it yourself: Steam > BG3 > Properties > Launch Options",
+            muted,
+        )));
+        lines.push(Line::from(Span::styled(
+            setup.suggested_launch_options(),
+            accent,
+        )));
+    }
+    if launch_option_manual {
+        lines.push(Line::from(Span::styled(
+            setup.suggested_launch_options(),
+            accent,
+        )));
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            if setup.can_set_up() {
+                "Set up for me copies it for you."
+            } else {
+                "Steam may only save launch options when it closes."
+            },
+            muted,
+        )));
+    }
+    lines
 }
 
 fn dependency_action_lines(
@@ -6173,6 +6452,7 @@ fn build_settings_menu_lines(
                         | SettingsItemKind::ToggleDependencyDownloads
                         | SettingsItemKind::ToggleDependencyWarnings
                         | SettingsItemKind::ToggleStartupDependencyNotice
+                        | SettingsItemKind::ToggleScriptExtenderNotice
                 )
             })
             .map(|item| display_width(&item.label))
@@ -6285,6 +6565,7 @@ fn build_settings_menu_lines(
             | SettingsItemKind::ActionCopyLogAll
             | SettingsItemKind::ActionExportLogFile
             | SettingsItemKind::ActionCheckUpdates
+            | SettingsItemKind::ActionScriptExtenderSetup
             | SettingsItemKind::ActionWhatsNew => {
                 lines.push(menu_row(
                     index == selected,
@@ -6312,7 +6593,8 @@ fn build_settings_menu_lines(
             | SettingsItemKind::ToggleAutoDeploy
             | SettingsItemKind::ToggleDependencyDownloads
             | SettingsItemKind::ToggleDependencyWarnings
-            | SettingsItemKind::ToggleStartupDependencyNotice => {
+            | SettingsItemKind::ToggleStartupDependencyNotice
+            | SettingsItemKind::ToggleScriptExtenderNotice => {
                 let enabled = item.checked.unwrap_or(false);
                 let state_label = if enabled { "ON" } else { "OFF" };
                 let state_style = Style::default()
@@ -7418,14 +7700,6 @@ fn mod_scripts_cell(mod_entry: &ModEntry, theme: &Theme) -> Cell<'static> {
     ]))
 }
 
-/// The Script Extender loads through DWrite.dll in the game's bin folder.
-fn script_extender_installed(game_root: &Path) -> bool {
-    let bin = game_root.join("bin");
-    ["DWrite.dll", "dwrite.dll"]
-        .iter()
-        .any(|name| bin.join(name).is_file())
-}
-
 fn sigillink_link_cell(app: &App, mod_id: &str, theme: &Theme) -> Cell<'static> {
     if app.sigillink_missing_pak(mod_id) {
         return Cell::from("👻".to_string()).style(Style::default().fg(theme.warning));
@@ -7730,15 +8004,19 @@ fn build_details(app: &App, theme: &Theme, width: usize, height: usize) -> Vec<L
     // Right under the name: the panel is short and cuts off its last rows.
     if let Some(script_extender) = &mod_entry.scripts.script_extender {
         let mut parts = vec![match script_extender.required_version {
-            Some(version) => format!("v{version} or newer"),
+            Some(version) => format!("v{version}+"),
             None => "Required".to_string(),
         }];
         parts.extend(script_extender.features.iter().cloned());
         let mut value = parts.join(", ");
-        let game_root = &app.config.game_root;
-        let missing = !game_root.as_os_str().is_empty() && !script_extender_installed(game_root);
-        if missing {
-            value.push_str(" - not installed");
+        let problem = app
+            .script_extender_setup
+            .as_ref()
+            .and_then(|setup| setup.problem());
+        let missing = problem.is_some();
+        if let Some(problem) = problem {
+            value.push_str(" - ");
+            value.push_str(problem);
         }
         rows.push(KvRow {
             label: "Script Extender".to_string(),
@@ -8600,12 +8878,8 @@ fn legend_rows_for_focus(focus: Focus) -> Vec<LegendRow> {
                 action: "Native Mod (Mod.io)".to_string(),
             });
             legend.push(LegendRow {
-                key: "SE".to_string(),
-                action: "Needs Script Extender".to_string(),
-            });
-            legend.push(LegendRow {
-                key: "Os".to_string(),
-                action: "Osiris Scripts".to_string(),
+                key: "SE/Os".to_string(),
+                action: "Script Extender/Osiris".to_string(),
             });
             legend.push(LegendRow {
                 key: "Dep".to_string(),
@@ -8827,14 +9101,14 @@ fn build_legend_lines(
             action: "None".to_string(),
         });
     }
-    while legend_rows.len() < 5 {
+    while legend_rows.len() < LEGEND_ROWS {
         legend_rows.push(LegendRow {
             key: String::new(),
             action: String::new(),
         });
     }
-    if legend_rows.len() > 5 {
-        legend_rows.truncate(5);
+    if legend_rows.len() > LEGEND_ROWS {
+        legend_rows.truncate(LEGEND_ROWS);
     }
     lines.extend(format_context_rows(
         &legend_rows,
@@ -8893,6 +9167,17 @@ fn context_header_line(title: &str, width: usize, theme: &Theme) -> Line<'static
     ))
 }
 
+// Gap after a legend key. `display_width` counts the chain marks as two cells
+// and the ghost as one, but they draw one and two cells wide; this evens it out
+// so every description starts in the same column.
+fn legend_key_spacing(key: &str) -> usize {
+    match key {
+        "⛓" | "⛕" => 3,
+        "👻" => 1,
+        _ => 2,
+    }
+}
+
 fn format_context_rows(
     rows: &[LegendRow],
     width: usize,
@@ -8913,15 +9198,7 @@ fn format_context_rows(
 
     rows.iter()
         .map(|row| {
-            let spacing = if row.key == "👻" {
-                1usize
-            } else if row.key == "!" {
-                2usize
-            } else if row.key == "⛓" || row.key == "⛕" {
-                3usize
-            } else {
-                2usize
-            };
+            let spacing = legend_key_spacing(&row.key);
             let action_width = width.saturating_sub(key_width + spacing);
             let key_text = truncate_text(&row.key, key_width);
             let key_len = display_width(&key_text);
@@ -8949,11 +9226,7 @@ fn format_legend_rows(
     rows.iter()
         .enumerate()
         .map(|(index, row)| {
-            let spacing = if row.key == "⛓" || row.key == "⛕" {
-                3usize
-            } else {
-                2usize
-            };
+            let spacing = legend_key_spacing(&row.key);
             let action_width = width.saturating_sub(key_width + spacing);
             let bg = if index % 2 == 1 {
                 theme.row_alt_bg
@@ -9134,6 +9407,39 @@ fn help_sections() -> Vec<HelpSection> {
                 LegendRow {
                     key: "Del".to_string(),
                     action: "Remove Mod".to_string(),
+                },
+            ],
+        },
+        HelpSection {
+            title: "Mod List Markers",
+            rows: vec![
+                LegendRow {
+                    key: "N".to_string(),
+                    action: "Native Mod, Installed Through Mod.io In Game.".to_string(),
+                },
+                LegendRow {
+                    key: "SE".to_string(),
+                    action: "Needs The Script Extender (Esc > Script Extender Setup).".to_string(),
+                },
+                LegendRow {
+                    key: "Os".to_string(),
+                    action: "Ships Osiris Story Scripts.".to_string(),
+                },
+                LegendRow {
+                    key: "Dep".to_string(),
+                    action: "A Dependency Is Missing Or Disabled.".to_string(),
+                },
+                LegendRow {
+                    key: "⛓".to_string(),
+                    action: "Placed By SigiLink Ranking.".to_string(),
+                },
+                LegendRow {
+                    key: "⛕".to_string(),
+                    action: "Manual Pin: Moved By Hand While Auto Ranking Is ON.".to_string(),
+                },
+                LegendRow {
+                    key: "👻".to_string(),
+                    action: "The Mod's .pak File Is Missing.".to_string(),
                 },
             ],
         },
@@ -9792,4 +10098,129 @@ fn format_kv_line_split(
     spans.push(Span::raw(spacer));
     spans.extend(right_spans);
     Line::from(spans)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn text(lines: &[Line<'_>]) -> Vec<String> {
+        lines.iter().map(|line| line.to_string()).collect()
+    }
+
+    #[test]
+    fn marker_descriptions_line_up() {
+        let theme = Theme::new();
+        let rows: Vec<LegendRow> = ["N", "SE/Os", "⛓", "⛕", "👻"]
+            .iter()
+            .map(|key| LegendRow {
+                key: key.to_string(),
+                action: "Text".to_string(),
+            })
+            .collect();
+        // Column where the description starts, as ratatui draws it.
+        let starts = |lines: Vec<Line<'static>>| -> Vec<usize> {
+            lines
+                .iter()
+                .map(|line| line.spans[0].width() + line.spans[1].width())
+                .collect()
+        };
+        for lines in [
+            format_legend_rows(&rows, 40, 8, &theme),
+            format_context_rows(&rows, 40, 8, &theme, false),
+        ] {
+            let starts = starts(lines);
+            assert!(starts.iter().all(|&start| start == starts[0]), "{starts:?}");
+        }
+    }
+
+    #[test]
+    fn script_extender_popup_lists_only_failing_steps() {
+        let theme = Theme::new();
+        // DLL missing, no Proton prefix yet: the launch option stays manual.
+        let setup = ScriptExtenderSetup {
+            uses_proton: Some(true),
+            installed: false,
+            launch_options: Some("gamemoderun %command%".to_string()),
+            prefix_override: false,
+            prefix_exists: false,
+        };
+        let lines = text(&script_extender_setup_lines(
+            &["Example".to_string()],
+            &setup,
+            &theme,
+        ));
+        assert_eq!(lines[0], "Example needs the Script Extender.");
+        assert!(lines
+            .iter()
+            .any(|line| line.starts_with("✓ Steam runs BG3 with Proton")));
+        assert!(lines.iter().any(|line| line.starts_with("✗ DWrite.dll")));
+        assert!(!lines.iter().any(|line| line.contains("Compatibility")));
+        assert!(lines
+            .iter()
+            .any(|line| line.starts_with("Set up for me will:")));
+        assert!(lines
+            .iter()
+            .any(|line| line.starts_with("• Download the latest BG3SE")));
+        assert!(!lines.iter().any(|line| line.contains("Proton prefix")));
+        assert!(lines
+            .iter()
+            .any(|line| line.starts_with("You still need to:")));
+        assert!(lines
+            .iter()
+            .any(|line| line == "WINEDLLOVERRIDES=\"DWrite.dll=n,b\" gamemoderun %command%"));
+        assert!(lines
+            .iter()
+            .any(|line| line == "Set up for me copies it for you."));
+        // The checklist and steps share one width so they stay left-aligned.
+        let block: Vec<&String> = lines
+            .iter()
+            .filter(|line| line.starts_with('✓') || line.starts_with('✗') || line.starts_with('•'))
+            .collect();
+        let width = display_width(block[0]);
+        assert!(block.iter().all(|line| display_width(line) == width));
+
+        // With a prefix, SigilSmith sets the override itself.
+        let setup = ScriptExtenderSetup {
+            prefix_exists: true,
+            ..setup
+        };
+        let lines = text(&script_extender_setup_lines(&[], &setup, &theme));
+        assert_eq!(lines[0], "The Script Extender isn't set up yet.");
+        assert!(lines
+            .iter()
+            .any(|line| line.starts_with("• Turn on the DWrite override")));
+        assert!(!lines.iter().any(|line| line.contains("You still need")));
+        assert!(lines
+            .iter()
+            .any(|line| line.starts_with("Or do it yourself: Steam > BG3")));
+        assert!(lines
+            .iter()
+            .any(|line| line == "WINEDLLOVERRIDES=\"DWrite.dll=n,b\" gamemoderun %command%"));
+
+        let setup = ScriptExtenderSetup {
+            launch_options: None,
+            installed: true,
+            uses_proton: None,
+            prefix_override: false,
+            prefix_exists: false,
+        };
+        let lines = text(&script_extender_setup_lines(
+            &[
+                "A".to_string(),
+                "B".to_string(),
+                "C".to_string(),
+                "D".to_string(),
+            ],
+            &setup,
+            &theme,
+        ));
+        assert_eq!(lines[0], "4 mods need the Script Extender:");
+        assert!(lines.iter().any(|line| line == "...and 1 more"));
+        assert!(lines
+            .iter()
+            .any(|line| line == "The Script Extender is set up."));
+        assert!(!lines.iter().any(|line| line.contains("Set up for me")));
+        assert!(!lines.iter().any(|line| line.contains("WINEDLLOVERRIDES")));
+    }
 }

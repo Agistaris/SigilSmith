@@ -9,6 +9,7 @@ mod importer;
 mod library;
 mod metadata;
 mod native_pak;
+mod script_extender;
 mod sigillink;
 mod smart_rank;
 mod ui;

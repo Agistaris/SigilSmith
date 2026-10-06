@@ -1,5 +1,6 @@
 use crate::{
     backup,
+    bg3::{self, ScriptExtenderSetup, SetupCheck},
     config::{AppConfig, GameConfig},
     deploy,
     game::{self, GameId},
@@ -10,7 +11,7 @@ use crate::{
         ModSource, Profile, ProfileEntry, SigilLinkRankMeta, TargetKind, TargetOverride,
         SIGILLINK_RANKING_PROFILE,
     },
-    metadata, native_pak, sigillink, smart_rank, update,
+    metadata, native_pak, script_extender, sigillink, smart_rank, update,
 };
 use anyhow::{Context, Result};
 use arboard::Clipboard;
@@ -211,6 +212,10 @@ pub enum DialogKind {
         link: String,
     },
     StartupDependencyNotice,
+    ScriptExtenderSetup {
+        mods: Vec<String>,
+        setup: ScriptExtenderSetup,
+    },
     SigilLinkOnboarding,
     SigilLinkRankPrompt,
     SigilLinkClearPins,
@@ -723,6 +728,10 @@ pub struct App {
     sigillink_onboarding_pending: bool,
     whats_new_pending: bool,
     whats_new_block_until: Option<Instant>,
+    pub script_extender_setup: Option<ScriptExtenderSetup>,
+    script_extender_checked_at: Option<Instant>,
+    script_extender_notice_pending: Vec<String>,
+    script_extender_install: Option<Receiver<Result<script_extender::SetupReport, String>>>,
     pub smart_rank_progress: Option<smart_rank::SmartRankProgress>,
     smart_rank_cache: Option<SmartRankCache>,
     smart_rank_active: bool,
@@ -1184,6 +1193,10 @@ impl App {
             sigillink_onboarding_pending,
             whats_new_pending,
             whats_new_block_until: None,
+            script_extender_setup: None,
+            script_extender_checked_at: None,
+            script_extender_notice_pending: Vec::new(),
+            script_extender_install: None,
             smart_rank_progress: None,
             smart_rank_active: false,
             smart_rank_mode: None,
@@ -1877,6 +1890,107 @@ impl App {
             "disabled"
         };
         self.status = format!("Startup dependency notice {state}");
+        Ok(())
+    }
+
+    fn copy_launch_option(&mut self, setup: &ScriptExtenderSetup) {
+        if self.copy_to_clipboard(&setup.suggested_launch_options()) {
+            self.status = "Launch option copied: paste it in Steam > BG3 > Properties".to_string();
+        }
+    }
+
+    pub fn script_extender_installing(&self) -> bool {
+        self.script_extender_install.is_some()
+    }
+
+    fn start_script_extender_install(&mut self, setup: ScriptExtenderSetup) {
+        if self.script_extender_install.is_some() {
+            return;
+        }
+        let game_root = self.config.game_root.clone();
+        let (tx, rx) = mpsc::channel();
+        thread::spawn(move || {
+            let result =
+                script_extender::set_up(&game_root, &setup).map_err(|err| format!("{err:#}"));
+            let _ = tx.send(result);
+        });
+        self.script_extender_install = Some(rx);
+        self.status = "Setting up the Script Extender...".to_string();
+        self.log_info("Script Extender setup started".to_string());
+    }
+
+    fn poll_script_extender_install(&mut self) {
+        let Some(rx) = &self.script_extender_install else {
+            return;
+        };
+        let result = match rx.try_recv() {
+            Ok(result) => result,
+            Err(TryRecvError::Empty) => return,
+            Err(TryRecvError::Disconnected) => Err("setup stopped unexpectedly".to_string()),
+        };
+        self.script_extender_install = None;
+        let report = match result {
+            Ok(report) => report,
+            Err(err) => {
+                self.status = format!("Script Extender setup failed: {err}");
+                self.log_error(format!("Script Extender setup failed: {err}"));
+                self.set_toast(
+                    "Script Extender setup failed: see log",
+                    ToastLevel::Error,
+                    Duration::from_secs(4),
+                );
+                return;
+            }
+        };
+        if let Some(tag) = &report.installed {
+            self.log_info(format!(
+                "Script Extender {tag} installed: {}",
+                self.config.game_root.join("bin/DWrite.dll").display()
+            ));
+        }
+        if report.override_set {
+            self.log_info(
+                "DWrite override set in BG3's Proton prefix (previous registry kept as user.reg.sigilsmith-backup)"
+                    .to_string(),
+            );
+        }
+        self.refresh_script_extender_setup();
+        let Some(setup) = self.script_extender_setup.clone() else {
+            return;
+        };
+        if setup.is_ready() {
+            self.status = "Script Extender ready".to_string();
+            self.set_toast(
+                "Script Extender ready",
+                ToastLevel::Info,
+                Duration::from_secs(3),
+            );
+            return;
+        }
+        // Steps left for the user, such as forcing Proton or, without a
+        // Proton prefix yet, the launch option.
+        if setup.launch_option_check() == SetupCheck::Missing && !setup.prefix_exists {
+            self.copy_launch_option(&setup);
+        }
+        if self.overlay_or_task_open() {
+            if let Some(problem) = setup.problem() {
+                self.status = format!("Script Extender: {problem}");
+            }
+            return;
+        }
+        let mods = self.enabled_script_extender_mod_names();
+        self.prompt_script_extender_setup(setup, mods, "Script Extender: almost ready");
+    }
+
+    pub fn toggle_script_extender_notice(&mut self) -> Result<()> {
+        self.app_config.show_script_extender_notice = !self.app_config.show_script_extender_notice;
+        self.app_config.save()?;
+        let state = if self.app_config.show_script_extender_notice {
+            "enabled"
+        } else {
+            "disabled"
+        };
+        self.status = format!("Script Extender notice {state}");
         Ok(())
     }
 
@@ -4931,6 +5045,9 @@ Use Ctrl+R to reset this mod or F12 to reset all pins."
         self.update_hotkey_transition();
         self.maybe_show_sigillink_onboarding();
         self.maybe_show_whats_new();
+        self.maybe_refresh_script_extender_setup();
+        self.poll_script_extender_install();
+        self.maybe_show_script_extender_notice();
         self.maybe_start_sigillink_rank_pending();
         self.maybe_return_to_settings_menu();
 
@@ -5029,7 +5146,15 @@ Use Ctrl+R to reset this mod or F12 to reset all pins."
         if self.sigillink_onboarding_pending {
             return;
         }
-        if self.dialog.is_some()
+        if self.overlay_or_task_open() {
+            return;
+        }
+        self.open_whats_new();
+    }
+
+    /// True while a dialog, menu or import would sit under a popup notice.
+    fn overlay_or_task_open(&self) -> bool {
+        self.dialog.is_some()
             || !matches!(self.input_mode, InputMode::Normal)
             || self.settings_menu.is_some()
             || self.export_menu.is_some()
@@ -5046,10 +5171,184 @@ Use Ctrl+R to reset this mod or F12 to reset all pins."
             || !self.duplicate_queue.is_empty()
             || self.dependency_queue.is_some()
             || self.startup_pending
+    }
+
+    /// Re-reads the game folder and Steam's settings so fixes made outside
+    /// SigilSmith show up without a restart.
+    pub fn refresh_script_extender_setup(&mut self) {
+        let game_root = &self.config.game_root;
+        self.script_extender_setup =
+            (!game_root.as_os_str().is_empty()).then(|| bg3::script_extender_setup(game_root));
+        self.script_extender_checked_at = Some(Instant::now());
+    }
+
+    fn maybe_refresh_script_extender_setup(&mut self) {
+        let due = self
+            .script_extender_checked_at
+            .map_or(true, |at| at.elapsed() >= Duration::from_secs(30));
+        if due {
+            self.refresh_script_extender_setup();
+        }
+    }
+
+    /// Enabled mods in the active profile that need the Script Extender.
+    pub fn enabled_script_extender_mods(&self) -> usize {
+        let Some(profile) = self.library.active_profile() else {
+            return 0;
+        };
+        let needs_se: HashSet<&str> = self
+            .library
+            .mods
+            .iter()
+            .filter(|mod_entry| mod_entry.scripts.script_extender.is_some())
+            .map(|mod_entry| mod_entry.id.as_str())
+            .collect();
+        if needs_se.is_empty() {
+            return 0;
+        }
+        profile
+            .order
+            .iter()
+            .filter(|entry| entry.enabled && needs_se.contains(entry.id.as_str()))
+            .count()
+    }
+
+    fn queue_script_extender_notice(&mut self, enabled_ids: &[String]) {
+        if !self.app_config.show_script_extender_notice {
+            return;
+        }
+        for id in enabled_ids {
+            let needs_se = self.library.mods.iter().any(|mod_entry| {
+                &mod_entry.id == id && mod_entry.scripts.script_extender.is_some()
+            });
+            if needs_se && !self.script_extender_notice_pending.contains(id) {
+                self.script_extender_notice_pending.push(id.clone());
+            }
+        }
+    }
+
+    fn maybe_show_script_extender_notice(&mut self) {
+        if self.script_extender_notice_pending.is_empty()
+            || self.script_extender_install.is_some()
+            || self.sigillink_onboarding_pending
+            || self.whats_new_pending
+            || self.whats_new_open
+            || self.overlay_or_task_open()
         {
             return;
         }
-        self.open_whats_new();
+        let ids = std::mem::take(&mut self.script_extender_notice_pending);
+        if !self.app_config.show_script_extender_notice {
+            return;
+        }
+        self.refresh_script_extender_setup();
+        let Some(setup) = self.script_extender_setup.clone() else {
+            return;
+        };
+        if setup.is_ready() {
+            return;
+        }
+        let Some(profile) = self.library.active_profile() else {
+            return;
+        };
+        let names: Vec<String> = ids
+            .iter()
+            .filter(|id| {
+                profile
+                    .order
+                    .iter()
+                    .any(|entry| &entry.id == *id && entry.enabled)
+            })
+            .filter_map(|id| {
+                self.library
+                    .mods
+                    .iter()
+                    .find(|mod_entry| &mod_entry.id == id)
+            })
+            .map(|mod_entry| mod_entry.display_name())
+            .collect();
+        if names.is_empty() {
+            return;
+        }
+        self.prompt_script_extender_setup(setup, names, "Script Extender not set up");
+    }
+
+    /// Opens the setup popup from Settings, whatever the current state.
+    pub fn open_script_extender_setup(&mut self) {
+        if self.config.game_root.as_os_str().is_empty() {
+            self.status = "Set the game folder first (Settings > Setup Paths)".to_string();
+            return;
+        }
+        if self.script_extender_install.is_some() {
+            self.status = "Setting up the Script Extender...".to_string();
+            return;
+        }
+        self.refresh_script_extender_setup();
+        let Some(setup) = self.script_extender_setup.clone() else {
+            return;
+        };
+        let mods = self.enabled_script_extender_mod_names();
+        let title = if setup.is_ready() {
+            "Script Extender ready"
+        } else {
+            "Script Extender not set up"
+        };
+        self.prompt_script_extender_setup(setup, mods, title);
+    }
+
+    fn enabled_script_extender_mod_names(&self) -> Vec<String> {
+        let Some(profile) = self.library.active_profile() else {
+            return Vec::new();
+        };
+        profile
+            .order
+            .iter()
+            .filter(|entry| entry.enabled)
+            .filter_map(|entry| {
+                self.library
+                    .mods
+                    .iter()
+                    .find(|mod_entry| mod_entry.id == entry.id)
+            })
+            .filter(|mod_entry| mod_entry.scripts.script_extender.is_some())
+            .map(|mod_entry| mod_entry.display_name())
+            .collect()
+    }
+
+    fn prompt_script_extender_setup(
+        &mut self,
+        setup: ScriptExtenderSetup,
+        mods: Vec<String>,
+        title: &str,
+    ) {
+        let (yes_label, no_label) = if setup.can_set_up() {
+            ("Set up for me", "Not now")
+        } else if setup.launch_option_check() == SetupCheck::Missing {
+            ("OK", "Copy launch option")
+        } else {
+            ("OK", "")
+        };
+        let mut message = Vec::new();
+        if !mods.is_empty() {
+            message.push(format!("Needs the Script Extender: {}", mods.join(", ")));
+        }
+        if let Some(problem) = setup.problem() {
+            message.push(format!("Script Extender: {problem}"));
+        }
+        self.open_dialog(Dialog {
+            title: title.to_string(),
+            message: message.join("\n"),
+            yes_label: yes_label.to_string(),
+            no_label: no_label.to_string(),
+            choice: DialogChoice::Yes,
+            kind: DialogKind::ScriptExtenderSetup { mods, setup },
+            toggle: Some(DialogToggle {
+                label: "Show this again".to_string(),
+                checked: true,
+            }),
+            toggle_alt: None,
+            scroll: 0,
+        });
     }
 
     fn maybe_start_sigillink_rank_pending(&mut self) {
@@ -9780,6 +10079,9 @@ Use Ctrl+R to reset this mod or F12 to reset all pins."
                     }
                 }
             }
+            if enable_imported {
+                self.queue_script_extender_notice(&added_ids);
+            }
         }
         self.update_dependency_cache_for_entries(&added);
         self.rekey_metadata_cache(metadata_cache_was_valid);
@@ -10069,6 +10371,13 @@ Use Ctrl+R to reset this mod or F12 to reset all pins."
             DialogKind::Overwrite { keep_both: true } | DialogKind::Similar { keep_both: true } => {
                 return Some("Keep both");
             }
+            // Next to "Set up for me", for people who'd rather paste it into
+            // Steam themselves.
+            DialogKind::ScriptExtenderSetup { setup, .. }
+                if setup.can_set_up() && setup.launch_option_check() == SetupCheck::Missing =>
+            {
+                return Some("Copy launch option");
+            }
             _ => return None,
         };
         Some(if count == 1 {
@@ -10088,7 +10397,9 @@ Use Ctrl+R to reset this mod or F12 to reset all pins."
 
     pub fn dialog_choice_left(&mut self) {
         if let Some(dialog) = &mut self.dialog {
-            if Self::dialog_alt_label(dialog).is_some() {
+            if dialog.no_label.is_empty() {
+                dialog.choice = DialogChoice::Yes;
+            } else if Self::dialog_alt_label(dialog).is_some() {
                 dialog.choice = match dialog.choice {
                     DialogChoice::No => DialogChoice::Alt,
                     _ => DialogChoice::Yes,
@@ -10107,7 +10418,9 @@ Use Ctrl+R to reset this mod or F12 to reset all pins."
 
     pub fn dialog_choice_right(&mut self) {
         if let Some(dialog) = &mut self.dialog {
-            if Self::dialog_alt_label(dialog).is_some() {
+            if dialog.no_label.is_empty() {
+                dialog.choice = DialogChoice::Yes;
+            } else if Self::dialog_alt_label(dialog).is_some() {
                 dialog.choice = match dialog.choice {
                     DialogChoice::Yes | DialogChoice::Cancel => DialogChoice::Alt,
                     _ => DialogChoice::No,
@@ -10405,6 +10718,28 @@ Use Ctrl+R to reset this mod or F12 to reset all pins."
                     }
                 } else {
                     self.status = "Search link skipped".to_string();
+                }
+            }
+            DialogKind::ScriptExtenderSetup { setup, .. } => {
+                let show_again = dialog.toggle.map_or(true, |toggle| toggle.checked);
+                if !show_again {
+                    self.app_config.show_script_extender_notice = false;
+                    let _ = self.app_config.save();
+                    self.status =
+                        "Script Extender notice hidden (Settings turns it back on)".to_string();
+                }
+                match choice {
+                    DialogChoice::Yes if setup.can_set_up() => {
+                        self.start_script_extender_install(setup);
+                    }
+                    DialogChoice::Alt => self.copy_launch_option(&setup),
+                    DialogChoice::No
+                        if !setup.can_set_up()
+                            && setup.launch_option_check() == SetupCheck::Missing =>
+                    {
+                        self.copy_launch_option(&setup);
+                    }
+                    _ => {}
                 }
             }
             DialogKind::StartupDependencyNotice => {
@@ -11425,12 +11760,16 @@ Use Ctrl+R to reset this mod or F12 to reset all pins."
             return 0;
         };
         let id_set: HashSet<&str> = ids.iter().map(|id| id.as_str()).collect();
-        let mut changed = 0;
+        let mut changed_ids = Vec::new();
         for entry in &mut profile.order {
             if id_set.contains(entry.id.as_str()) && entry.enabled != enabled {
                 entry.enabled = enabled;
-                changed += 1;
+                changed_ids.push(entry.id.clone());
             }
+        }
+        let changed = changed_ids.len();
+        if enabled {
+            self.queue_script_extender_notice(&changed_ids);
         }
         if changed > 0 {
             self.library.modsettings_sync_enabled = false;
