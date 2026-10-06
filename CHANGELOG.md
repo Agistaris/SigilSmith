@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Enable/disable dependency prompts get an "Only this mod" button (`O`) that changes just the selected mod(s), leaving dependents or required dependencies as they are. The prompt warns that the mod or its dependents may not work; the default stays the safe choice.
+
 ## 0.9.7
 
 - Pick the Larian data dir from Steam's per-game compatibility tool: BG3 forced to Proton uses its compatdata prefix; native runs keep `~/.local/share/Larian Studios`.

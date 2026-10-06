@@ -313,6 +313,9 @@ fn handle_dialog_mode(app: &mut App, key: KeyEvent) -> Result<()> {
         KeyCode::Char('n') | KeyCode::Char('N') => {
             app.dialog_set_choice(DialogChoice::No);
         }
+        KeyCode::Char('o') | KeyCode::Char('O') => {
+            app.dialog_select_alt();
+        }
         KeyCode::Char('d') | KeyCode::Char('D') => {
             if let Some(dialog) = &mut app.dialog {
                 if let Some(toggle) = &mut dialog.toggle {
@@ -3515,8 +3518,9 @@ fn draw_dialog(frame: &mut Frame<'_>, app: &mut App, theme: &Theme) {
     let message_lines = build_dialog_message_lines(dialog, theme);
 
     let has_cancel = matches!(dialog.kind, DialogKind::DeleteMod { .. });
+    let alt_label = App::dialog_alt_label(dialog);
     let yes_selected = matches!(dialog.choice, DialogChoice::Yes);
-    let no_selected = if has_cancel {
+    let no_selected = if has_cancel || alt_label.is_some() {
         matches!(dialog.choice, DialogChoice::No)
     } else {
         !yes_selected
@@ -3539,7 +3543,24 @@ fn draw_dialog(frame: &mut Frame<'_>, app: &mut App, theme: &Theme) {
         Style::default().fg(theme.text)
     };
 
-    let buttons = if has_cancel {
+    let buttons = if let Some(alt_label) = alt_label {
+        let alt_style = if matches!(dialog.choice, DialogChoice::Alt) {
+            Style::default()
+                .fg(Color::Black)
+                .bg(theme.warning)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(theme.text)
+        };
+        Line::from(vec![
+            Span::raw(" "),
+            Span::styled(format!(" {} ", dialog.yes_label), yes_style),
+            Span::raw("   "),
+            Span::styled(format!(" {alt_label} "), alt_style),
+            Span::raw("   "),
+            Span::styled(format!(" {} ", dialog.no_label), no_style),
+        ])
+    } else if has_cancel {
         let cancel_style = if cancel_selected {
             Style::default()
                 .fg(Color::Black)
@@ -3807,10 +3828,27 @@ fn build_dialog_message_lines(dialog: &crate::app::Dialog, theme: &Theme) -> Vec
             lines
         }
         DialogKind::DisableDependents { dependents, .. } => {
-            dependency_action_lines("Will disable", dependents, theme)
+            let mut lines = dependency_action_lines("Will disable", dependents, theme);
+            lines.extend(only_this_mod_note_lines(
+                dialog,
+                "dependents stay on and may not work.",
+                theme,
+            ));
+            lines
         }
-        DialogKind::EnableRequiredDependencies { dependencies, .. } => {
-            dependency_action_lines("Will enable", dependencies, theme)
+        DialogKind::EnableRequiredDependencies {
+            dependencies,
+            requested,
+            ..
+        } => {
+            let mut lines = dependency_action_lines("Will enable", dependencies, theme);
+            let effect = if requested.len() == 1 {
+                "skips dependencies; it may not work."
+            } else {
+                "skips dependencies; they may not work."
+            };
+            lines.extend(only_this_mod_note_lines(dialog, effect, theme));
+            lines
         }
         _ => dialog
             .message
@@ -3858,6 +3896,26 @@ fn dependency_action_lines(
         )));
     }
     lines
+}
+
+fn only_this_mod_note_lines(
+    dialog: &crate::app::Dialog,
+    effect: &str,
+    theme: &Theme,
+) -> Vec<Line<'static>> {
+    let Some(label) = App::dialog_alt_label(dialog) else {
+        return Vec::new();
+    };
+    vec![
+        Line::from(""),
+        Line::from(vec![
+            Span::styled(
+                format!("{label} (O): "),
+                Style::default().fg(theme.text).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(effect.to_string(), Style::default().fg(theme.muted)),
+        ]),
+    ]
 }
 
 fn delete_dependents_lines(

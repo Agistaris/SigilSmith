@@ -151,6 +151,7 @@ pub enum DialogChoice {
     Yes,
     No,
     Cancel,
+    Alt,
 }
 
 #[derive(Debug, Clone)]
@@ -175,6 +176,7 @@ pub enum DialogKind {
     },
     EnableRequiredDependencies {
         ids: Vec<String>,
+        requested: Vec<String>,
         dependencies: Vec<DependentMod>,
     },
     EnableDuplicateMods {
@@ -9991,11 +9993,40 @@ Use Ctrl+R to reset this mod or F12 to reset all pins."
         matches!(dialog.kind, DialogKind::DeleteMod { .. })
     }
 
+    /// Label for the middle "change only the selected mods" button, shown on
+    /// dependency prompts so a mod can be toggled without its dependents or
+    /// requirements.
+    pub fn dialog_alt_label(dialog: &Dialog) -> Option<&'static str> {
+        let count = match &dialog.kind {
+            DialogKind::DisableDependents { ids, .. } => ids.len(),
+            DialogKind::EnableRequiredDependencies { requested, .. } => requested.len(),
+            _ => return None,
+        };
+        Some(if count == 1 {
+            "Only this mod"
+        } else {
+            "Only these mods"
+        })
+    }
+
+    pub fn dialog_select_alt(&mut self) {
+        if let Some(dialog) = &mut self.dialog {
+            if Self::dialog_alt_label(dialog).is_some() {
+                dialog.choice = DialogChoice::Alt;
+            }
+        }
+    }
+
     pub fn dialog_choice_left(&mut self) {
         if let Some(dialog) = &mut self.dialog {
-            if Self::dialog_supports_cancel(dialog) {
+            if Self::dialog_alt_label(dialog).is_some() {
                 dialog.choice = match dialog.choice {
-                    DialogChoice::No => DialogChoice::Yes,
+                    DialogChoice::No => DialogChoice::Alt,
+                    _ => DialogChoice::Yes,
+                };
+            } else if Self::dialog_supports_cancel(dialog) {
+                dialog.choice = match dialog.choice {
+                    DialogChoice::No | DialogChoice::Alt => DialogChoice::Yes,
                     DialogChoice::Yes => DialogChoice::Cancel,
                     DialogChoice::Cancel => DialogChoice::Cancel,
                 };
@@ -10007,10 +10038,15 @@ Use Ctrl+R to reset this mod or F12 to reset all pins."
 
     pub fn dialog_choice_right(&mut self) {
         if let Some(dialog) = &mut self.dialog {
-            if Self::dialog_supports_cancel(dialog) {
+            if Self::dialog_alt_label(dialog).is_some() {
+                dialog.choice = match dialog.choice {
+                    DialogChoice::Yes | DialogChoice::Cancel => DialogChoice::Alt,
+                    _ => DialogChoice::No,
+                };
+            } else if Self::dialog_supports_cancel(dialog) {
                 dialog.choice = match dialog.choice {
                     DialogChoice::Cancel => DialogChoice::Yes,
-                    DialogChoice::Yes => DialogChoice::No,
+                    DialogChoice::Yes | DialogChoice::Alt => DialogChoice::No,
                     DialogChoice::No => DialogChoice::No,
                 };
             } else {
@@ -10138,12 +10174,54 @@ Use Ctrl+R to reset this mod or F12 to reset all pins."
                     if !enable_after.is_empty() {
                         self.enable_mods_with_dependencies(enable_after);
                     }
+                } else if matches!(choice, DialogChoice::Alt) {
+                    let changed = self.set_mods_enabled_in_active(&ids, false);
+                    if changed == 0 {
+                        self.status = "Mods already disabled".to_string();
+                    } else {
+                        self.status = format!(
+                            "Disabled {changed} mod(s); {} dependent(s) left enabled",
+                            dependents.len()
+                        );
+                        self.log_warn(format!(
+                            "Disabled {changed} mod(s) only; {} dependent mod(s) left enabled may not work",
+                            dependents.len()
+                        ));
+                        self.queue_auto_deploy(&reason);
+                    }
+                    if !enable_after.is_empty() {
+                        self.enable_mods_with_dependencies(enable_after);
+                    }
                 } else {
                     self.status = "Disable canceled".to_string();
                 }
             }
-            DialogKind::EnableRequiredDependencies { ids, .. } => {
-                if matches!(choice, DialogChoice::Yes) {
+            DialogKind::EnableRequiredDependencies {
+                ids,
+                requested,
+                dependencies,
+            } => {
+                if matches!(choice, DialogChoice::Alt) {
+                    if let Some(dialog) = self.build_duplicate_enable_dialog(&requested) {
+                        self.open_dialog(dialog);
+                        return;
+                    }
+                    let changed = self.set_mods_enabled_in_active(&requested, true);
+                    if changed == 0 {
+                        self.status = "Mods already enabled".to_string();
+                        return;
+                    }
+                    self.status = format!(
+                        "Enabled {changed} mod(s); {} dependency(ies) left disabled",
+                        dependencies.len()
+                    );
+                    self.log_warn(format!(
+                        "Enabled {changed} mod(s) without {} required dependency(ies); they may not work",
+                        dependencies.len()
+                    ));
+                    self.queue_auto_deploy("enable toggle");
+                    self.request_sigillink_auto_rank();
+                } else if matches!(choice, DialogChoice::Yes) {
                     if let Some(dialog) = self.build_duplicate_enable_dialog(&ids) {
                         self.open_dialog(dialog);
                         return;
@@ -11048,7 +11126,7 @@ Use Ctrl+R to reset this mod or F12 to reset all pins."
                     title: "Disable dependent mods".to_string(),
                     message: String::new(),
                     yes_label: "Cancel".to_string(),
-                    no_label: "Disable".to_string(),
+                    no_label: "Disable all".to_string(),
                     choice: DialogChoice::Yes,
                     kind: DialogKind::DisableDependents {
                         ids: vec![id],
@@ -11194,6 +11272,7 @@ Use Ctrl+R to reset this mod or F12 to reset all pins."
         disabled_required_ids.sort();
         disabled_required_ids.dedup();
 
+        let requested = ids.clone();
         let mut to_enable = ids;
         to_enable.extend(present.into_iter());
         to_enable.sort();
@@ -11215,11 +11294,12 @@ Use Ctrl+R to reset this mod or F12 to reset all pins."
             self.open_dialog(Dialog {
                 title: "Enable required dependencies".to_string(),
                 message: String::new(),
-                yes_label: "Enable".to_string(),
+                yes_label: "Enable all".to_string(),
                 no_label: "Cancel".to_string(),
                 choice: DialogChoice::Yes,
                 kind: DialogKind::EnableRequiredDependencies {
                     ids: to_enable,
+                    requested,
                     dependencies,
                 },
                 toggle: None,
@@ -11841,7 +11921,7 @@ Use Ctrl+R to reset this mod or F12 to reset all pins."
                 title: "Disable dependent mods".to_string(),
                 message: String::new(),
                 yes_label: "Cancel".to_string(),
-                no_label: "Disable".to_string(),
+                no_label: "Disable all".to_string(),
                 choice: DialogChoice::Yes,
                 kind: DialogKind::DisableDependents {
                     ids,
@@ -11900,7 +11980,7 @@ Use Ctrl+R to reset this mod or F12 to reset all pins."
                 title: "Disable dependent mods".to_string(),
                 message: String::new(),
                 yes_label: "Cancel".to_string(),
-                no_label: "Disable".to_string(),
+                no_label: "Disable all".to_string(),
                 choice: DialogChoice::Yes,
                 kind: DialogKind::DisableDependents {
                     ids: to_disable,
@@ -14126,4 +14206,64 @@ fn path_within_root(path: &Path, root: &Path) -> bool {
         }
     }
     path.starts_with(root)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn dialog(kind: DialogKind) -> Dialog {
+        Dialog {
+            title: String::new(),
+            message: String::new(),
+            yes_label: String::new(),
+            no_label: String::new(),
+            choice: DialogChoice::Yes,
+            kind,
+            toggle: None,
+            toggle_alt: None,
+            scroll: 0,
+        }
+    }
+
+    fn dependents(count: usize) -> Vec<DependentMod> {
+        (0..count)
+            .map(|i| DependentMod {
+                id: format!("dep{i}"),
+                name: format!("Dep {i}"),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn alt_label_only_on_dependency_prompts() {
+        let disable_one = dialog(DialogKind::DisableDependents {
+            ids: vec!["a".to_string()],
+            dependents: dependents(2),
+            enable_after: Vec::new(),
+            reason: String::new(),
+        });
+        assert_eq!(App::dialog_alt_label(&disable_one), Some("Only this mod"));
+
+        let disable_many = dialog(DialogKind::DisableDependents {
+            ids: vec!["a".to_string(), "b".to_string()],
+            dependents: dependents(1),
+            enable_after: Vec::new(),
+            reason: String::new(),
+        });
+        assert_eq!(
+            App::dialog_alt_label(&disable_many),
+            Some("Only these mods")
+        );
+
+        // The label counts the mods the user picked, not the cascade.
+        let enable_one = dialog(DialogKind::EnableRequiredDependencies {
+            ids: vec!["a".to_string(), "dep0".to_string(), "dep1".to_string()],
+            requested: vec!["a".to_string()],
+            dependencies: dependents(2),
+        });
+        assert_eq!(App::dialog_alt_label(&enable_one), Some("Only this mod"));
+
+        assert_eq!(App::dialog_alt_label(&dialog(DialogKind::Similar)), None);
+    }
 }
