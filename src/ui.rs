@@ -366,7 +366,7 @@ fn handle_dialog_mode(app: &mut App, key: KeyEvent) -> Result<()> {
 fn handle_help_mode(app: &mut App, key: KeyEvent) -> Result<()> {
     match key.code {
         KeyCode::Esc | KeyCode::Char('?') => app.close_help(),
-        KeyCode::Char('q') | KeyCode::Char('Q') => app.should_quit = true,
+        KeyCode::Char('q') | KeyCode::Char('Q') => app.request_quit(),
         KeyCode::Up | KeyCode::Char('k') | KeyCode::Char('K') => {
             app.help_scroll = app.help_scroll.saturating_sub(1);
         }
@@ -1170,7 +1170,7 @@ fn handle_normal_mode(app: &mut App, key: KeyEvent) -> Result<()> {
             app.toggle_mod_sort_direction();
             return Ok(());
         }
-        (KeyCode::Char('q'), _) | (KeyCode::Char('Q'), _) => app.should_quit = true,
+        (KeyCode::Char('q'), _) | (KeyCode::Char('Q'), _) => app.request_quit(),
         (KeyCode::Char('i'), _) | (KeyCode::Char('I'), _) => app.enter_import_mode(),
         (KeyCode::Char('d'), _) | (KeyCode::Char('D'), _) => {
             if let Err(err) = app.deploy() {
@@ -1178,8 +1178,11 @@ fn handle_normal_mode(app: &mut App, key: KeyEvent) -> Result<()> {
                 app.log_error(format!("Deploy failed: {err}"));
             }
         }
-        (KeyCode::Char('b'), _) | (KeyCode::Char('B'), _) => {
-            if let Err(err) = app.rollback_last_backup() {
+        // Not with Ctrl or Alt: this replaces the mod list, so only a plain b.
+        (KeyCode::Char('b'), mods) | (KeyCode::Char('B'), mods)
+            if !mods.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+        {
+            if let Err(err) = app.prompt_rollback() {
                 app.status = format!("Rollback failed: {err}");
                 app.log_error(format!("Rollback failed: {err}"));
             }
@@ -1374,7 +1377,10 @@ fn handle_mods_mode(app: &mut App, key: KeyEvent) -> Result<()> {
         (KeyCode::Char('A'), _) => app.enable_visible_mods(),
         (KeyCode::Char('S'), _) => app.disable_visible_mods(),
         (KeyCode::Char('X'), _) => app.invert_visible_mods(),
-        (KeyCode::Char('c'), _) | (KeyCode::Char('C'), _) => app.clear_visible_overrides(),
+        // Shift+C, like the other bulk actions (A/S/X); never Ctrl+C.
+        (KeyCode::Char('C'), mods) if !mods.contains(KeyModifiers::CONTROL) => {
+            app.clear_visible_overrides()
+        }
         (KeyCode::Delete, _) | (KeyCode::Backspace, _) => app.request_remove_selected(),
         (KeyCode::Char('k'), _) | (KeyCode::Char('K'), _) | (KeyCode::Up, _) => {
             if app.move_mode {
@@ -1564,85 +1570,129 @@ fn handle_browser_mode(app: &mut App, key: KeyEvent, browser: &mut PathBrowser) 
             }
             _ => {}
         },
-        PathBrowserFocus::List => match key.code {
-            KeyCode::Up | KeyCode::Char('k') | KeyCode::Char('K') => {
-                browser.selected = browser.selected.saturating_sub(1);
+        PathBrowserFocus::List => {
+            if handle_browser_jump(browser, &key) {
+                return Ok(false);
             }
-            KeyCode::Down | KeyCode::Char('j') | KeyCode::Char('J') => {
-                if len > 0 {
-                    browser.selected = (browser.selected + 1).min(len.saturating_sub(1));
+            match key.code {
+                KeyCode::Up => {
+                    browser.selected = browser.selected.saturating_sub(1);
                 }
-            }
-            KeyCode::PageUp => {
-                browser.selected = browser.selected.saturating_sub(10);
-            }
-            KeyCode::PageDown => {
-                if len > 0 {
-                    browser.selected = (browser.selected + 10).min(len.saturating_sub(1));
+                KeyCode::Down => {
+                    if len > 0 {
+                        browser.selected = (browser.selected + 1).min(len.saturating_sub(1));
+                    }
                 }
-            }
-            KeyCode::End => {
-                if len > 0 {
-                    browser.selected = len.saturating_sub(1);
+                KeyCode::PageUp => {
+                    browser.selected = browser.selected.saturating_sub(10);
                 }
-            }
-            KeyCode::Tab => {
-                browser.focus = PathBrowserFocus::PathInput;
-                sync_path_input_for_browser(app, browser);
-            }
-            KeyCode::Left | KeyCode::Home | KeyCode::Backspace | KeyCode::Char('\u{8}') => {
-                if let Some(parent) = browser.current.parent() {
-                    path_browser_set_current(app, browser, parent.to_path_buf());
+                KeyCode::PageDown => {
+                    if len > 0 {
+                        browser.selected = (browser.selected + 10).min(len.saturating_sub(1));
+                    }
                 }
-            }
-            KeyCode::Enter | KeyCode::Char(' ') => {
-                if let Some(entry) = browser.entries.get(browser.selected) {
-                    match entry.kind {
-                        PathBrowserEntryKind::Select | PathBrowserEntryKind::SaveHere => {
-                            if entry.selectable {
-                                app.apply_path_browser_selection(
-                                    &browser.purpose,
-                                    entry.path.clone(),
-                                    None,
-                                )?;
-                                return Ok(true);
+                KeyCode::Home => {
+                    browser.selected = 0;
+                }
+                KeyCode::End => {
+                    if len > 0 {
+                        browser.selected = len.saturating_sub(1);
+                    }
+                }
+                KeyCode::Tab => {
+                    browser.focus = PathBrowserFocus::PathInput;
+                    sync_path_input_for_browser(app, browser);
+                }
+                KeyCode::Left | KeyCode::Backspace | KeyCode::Char('\u{8}') => {
+                    if let Some(parent) = browser.current.parent() {
+                        path_browser_set_current(app, browser, parent.to_path_buf());
+                    }
+                }
+                KeyCode::Enter | KeyCode::Char(' ') => {
+                    if let Some(entry) = browser.entries.get(browser.selected) {
+                        match entry.kind {
+                            PathBrowserEntryKind::Select | PathBrowserEntryKind::SaveHere => {
+                                if entry.selectable {
+                                    app.apply_path_browser_selection(
+                                        &browser.purpose,
+                                        entry.path.clone(),
+                                        None,
+                                    )?;
+                                    return Ok(true);
+                                }
+                                app.status = invalid_hint.to_string();
+                                app.set_toast(
+                                    invalid_hint,
+                                    ToastLevel::Warn,
+                                    Duration::from_secs(2),
+                                );
                             }
-                            app.status = invalid_hint.to_string();
-                            app.set_toast(invalid_hint, ToastLevel::Warn, Duration::from_secs(2));
-                        }
-                        PathBrowserEntryKind::Parent | PathBrowserEntryKind::Dir => {
-                            path_browser_set_current(app, browser, entry.path.clone());
-                        }
-                        PathBrowserEntryKind::File => {
-                            if app.path_browser_selectable(&browser.purpose, &entry.path) {
-                                app.apply_path_browser_selection(
-                                    &browser.purpose,
-                                    entry.path.clone(),
-                                    None,
-                                )?;
-                                return Ok(true);
+                            PathBrowserEntryKind::Parent | PathBrowserEntryKind::Dir => {
+                                path_browser_set_current(app, browser, entry.path.clone());
                             }
-                            app.status = invalid_hint.to_string();
-                            app.set_toast(invalid_hint, ToastLevel::Warn, Duration::from_secs(2));
+                            PathBrowserEntryKind::File => {
+                                if app.path_browser_selectable(&browser.purpose, &entry.path) {
+                                    app.apply_path_browser_selection(
+                                        &browser.purpose,
+                                        entry.path.clone(),
+                                        None,
+                                    )?;
+                                    return Ok(true);
+                                }
+                                app.status = invalid_hint.to_string();
+                                app.set_toast(
+                                    invalid_hint,
+                                    ToastLevel::Warn,
+                                    Duration::from_secs(2),
+                                );
+                            }
                         }
                     }
                 }
-            }
-            KeyCode::Esc => {
-                app.remember_last_browser_dir(&browser.purpose, &browser.current);
-                app.input_mode = InputMode::Normal;
-                if !app.paths_ready() {
-                    app.status = "Setup required: open Menu (Esc) to configure paths".to_string();
+                KeyCode::Esc => {
+                    app.remember_last_browser_dir(&browser.purpose, &browser.current);
+                    app.input_mode = InputMode::Normal;
+                    if !app.paths_ready() {
+                        app.status =
+                            "Setup required: open Menu (Esc) to configure paths".to_string();
+                    }
+                    return Ok(true);
                 }
-                return Ok(true);
+                _ => {}
             }
-            _ => {}
-        },
+        }
     }
     Ok(false)
 }
 
+/// Type-to-jump in the file list: typing selects the first file or folder
+/// whose name starts with the typed text. `/` starts it too and keeps it on
+/// until Esc, Enter or a move key. Returns true when it used the key.
+fn handle_browser_jump(browser: &mut PathBrowser, key: &KeyEvent) -> bool {
+    if key
+        .modifiers
+        .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
+    {
+        return false;
+    }
+    let jumping = browser.active_jump().is_some();
+    match key.code {
+        KeyCode::Char('/') => browser.hold_jump(),
+        // Space opens the selection unless it's part of a typed name.
+        KeyCode::Char(' ') if !jumping => return false,
+        KeyCode::Char(c) if !c.is_control() => browser.type_to_jump(c),
+        KeyCode::Backspace if jumping => browser.jump_backspace(),
+        KeyCode::Esc if jumping => browser.clear_jump(),
+        _ => {
+            browser.clear_jump();
+            return false;
+        }
+    }
+    true
+}
+
 fn path_browser_set_current(app: &mut App, browser: &mut PathBrowser, path: PathBuf) {
+    browser.clear_jump();
     browser.current = path.clone();
     app.remember_last_browser_dir(&browser.purpose, &browser.current);
     sync_path_input_for_browser(app, browser);
@@ -5383,10 +5433,35 @@ fn draw_path_browser(frame: &mut Frame<'_>, app: &App, theme: &Theme, browser: &
     } else {
         Span::styled(invalid_label, Style::default().fg(theme.warning))
     };
-    let status_line = Line::from(vec![
-        Span::styled("Status: ", Style::default().fg(theme.muted)),
-        status_span,
-    ]);
+    let status_line = match browser.active_jump().filter(|_| !path_focus) {
+        Some(typed) => {
+            let mut spans = vec![
+                Span::styled("Jump: ", Style::default().fg(theme.muted)),
+                Span::styled(
+                    format!("{typed}_"),
+                    Style::default()
+                        .fg(theme.accent)
+                        .add_modifier(Modifier::BOLD),
+                ),
+            ];
+            if typed.is_empty() {
+                spans.push(Span::styled(
+                    "  type a name, Esc to stop",
+                    Style::default().fg(theme.muted),
+                ));
+            } else if !browser.jump_found() {
+                spans.push(Span::styled(
+                    "  no match",
+                    Style::default().fg(theme.warning),
+                ));
+            }
+            Line::from(spans)
+        }
+        None => Line::from(vec![
+            Span::styled("Status: ", Style::default().fg(theme.muted)),
+            status_span,
+        ]),
+    };
     let header = Paragraph::new(vec![path_line, current_line, status_line, Line::from("")]);
     frame.render_widget(header, chunks[0]);
 
@@ -5500,7 +5575,12 @@ fn draw_path_browser(frame: &mut Frame<'_>, app: &App, theme: &Theme, browser: &
         .fg(theme.accent)
         .add_modifier(Modifier::BOLD);
     let text_style = Style::default().fg(theme.muted);
-    let footer_parts = vec![
+    let mut footer_parts = Vec::new();
+    if !path_focus {
+        footer_parts.push(("[Type]".to_string(), key_style));
+        footer_parts.push((" Jump  ".to_string(), text_style));
+    }
+    footer_parts.extend([
         ("[Tab]".to_string(), key_style),
         (format!(" {tab_label}  "), text_style),
         ("[Enter/Space]".to_string(), key_style),
@@ -5509,7 +5589,7 @@ fn draw_path_browser(frame: &mut Frame<'_>, app: &App, theme: &Theme, browser: &
         (" Parent  ".to_string(), text_style),
         ("[Esc]".to_string(), key_style),
         (" Cancel".to_string(), text_style),
-    ];
+    ]);
     let footer_line = Line::from(truncate_spans(footer_parts, footer_area.width as usize));
     let footer_widget = Paragraph::new(footer_line)
         .style(Style::default().fg(theme.muted))
@@ -8938,19 +9018,19 @@ fn hotkey_rows_for_focus(focus: Focus) -> HotkeyRows {
         Focus::Conflicts => {
             context.extend([
                 LegendRow {
-                    key: "←/→".to_string(),
-                    action: "Select Override".to_string(),
+                    key: "↑/↓".to_string(),
+                    action: "Select Conflict".to_string(),
                 },
                 LegendRow {
-                    key: "↑/↓".to_string(),
+                    key: "←/→ or 1-9".to_string(),
                     action: "Choose Winner".to_string(),
                 },
                 LegendRow {
-                    key: "Enter".to_string(),
-                    action: "Cycle Winner".to_string(),
+                    key: "p".to_string(),
+                    action: "Pick From List".to_string(),
                 },
                 LegendRow {
-                    key: "Backspace".to_string(),
+                    key: "c/Backspace".to_string(),
                     action: "Clear Override".to_string(),
                 },
             ]);
@@ -8971,11 +9051,11 @@ fn hotkey_rows_for_focus(focus: Focus) -> HotkeyRows {
                 },
                 LegendRow {
                     key: "u/n".to_string(),
-                    action: "Move Order".to_string(),
+                    action: "Move Up/Down".to_string(),
                 },
                 LegendRow {
-                    key: "Enter/Esc".to_string(),
-                    action: "Exit Move Mode".to_string(),
+                    key: "m/Enter".to_string(),
+                    action: "Place (Esc Cancels)".to_string(),
                 },
                 LegendRow {
                     key: "Ctrl+←/→".to_string(),
@@ -9287,7 +9367,7 @@ fn help_sections() -> Vec<HelpSection> {
                 },
                 LegendRow {
                     key: "b".to_string(),
-                    action: "Rollback Last Backup".to_string(),
+                    action: "Restore Last Backup (Asks First)".to_string(),
                 },
                 LegendRow {
                     key: "q".to_string(),
@@ -9361,11 +9441,15 @@ fn help_sections() -> Vec<HelpSection> {
                 },
                 LegendRow {
                     key: "u/n".to_string(),
-                    action: "Move Order".to_string(),
+                    action: "Move Up/Down Without Move Mode".to_string(),
                 },
                 LegendRow {
-                    key: "Enter/Esc".to_string(),
-                    action: "Exit Move Mode".to_string(),
+                    key: "m/Enter/Space".to_string(),
+                    action: "Place Mod (Move Mode)".to_string(),
+                },
+                LegendRow {
+                    key: "Esc".to_string(),
+                    action: "Cancel Move (Puts It Back)".to_string(),
                 },
                 LegendRow {
                     key: "1-5".to_string(),
@@ -9376,8 +9460,8 @@ fn help_sections() -> Vec<HelpSection> {
                     action: "Enable/Disable/Invert Visible".to_string(),
                 },
                 LegendRow {
-                    key: "c".to_string(),
-                    action: "Clear Overrides".to_string(),
+                    key: "C".to_string(),
+                    action: "Clear Target Overrides (Visible)".to_string(),
                 },
                 LegendRow {
                     key: "/ or Ctrl+F".to_string(),
@@ -9438,19 +9522,27 @@ fn help_sections() -> Vec<HelpSection> {
             title: "Conflicts",
             rows: vec![
                 LegendRow {
-                    key: "←/→".to_string(),
-                    action: "Select Override".to_string(),
+                    key: "↑/↓".to_string(),
+                    action: "Select Conflict".to_string(),
                 },
                 LegendRow {
-                    key: "↑/↓".to_string(),
-                    action: "Choose Winner".to_string(),
+                    key: "←/→".to_string(),
+                    action: "Change Winner".to_string(),
+                },
+                LegendRow {
+                    key: "1-9".to_string(),
+                    action: "Pick Winner By Number".to_string(),
+                },
+                LegendRow {
+                    key: "p".to_string(),
+                    action: "Pick Winner From A List".to_string(),
                 },
                 LegendRow {
                     key: "Enter".to_string(),
-                    action: "Cycle Winner".to_string(),
+                    action: "Apply Now (Else After A Pause)".to_string(),
                 },
                 LegendRow {
-                    key: "Backspace/Del".to_string(),
+                    key: "c/Backspace/Del".to_string(),
                     action: "Clear Override".to_string(),
                 },
             ],
@@ -9547,6 +9639,10 @@ fn help_sections() -> Vec<HelpSection> {
                     action: "Pick Choice".to_string(),
                 },
                 LegendRow {
+                    key: "O".to_string(),
+                    action: "Pick Only This Mod / Keep Both".to_string(),
+                },
+                LegendRow {
                     key: "D".to_string(),
                     action: "Toggle Checkbox".to_string(),
                 },
@@ -9589,6 +9685,14 @@ fn help_sections() -> Vec<HelpSection> {
             title: "Path Browser",
             rows: vec![
                 LegendRow {
+                    key: "Type".to_string(),
+                    action: "Jump To A Name".to_string(),
+                },
+                LegendRow {
+                    key: "/".to_string(),
+                    action: "Jump (Stays On Until Esc)".to_string(),
+                },
+                LegendRow {
                     key: "Tab".to_string(),
                     action: "Switch Focus".to_string(),
                 },
@@ -9597,7 +9701,7 @@ fn help_sections() -> Vec<HelpSection> {
                     action: "Open/Select".to_string(),
                 },
                 LegendRow {
-                    key: "↑/↓ or j/k".to_string(),
+                    key: "↑/↓".to_string(),
                     action: "Move Selection".to_string(),
                 },
                 LegendRow {
@@ -9609,7 +9713,7 @@ fn help_sections() -> Vec<HelpSection> {
                     action: "Top/Bottom".to_string(),
                 },
                 LegendRow {
-                    key: "←/Backspace/Home".to_string(),
+                    key: "←/Backspace".to_string(),
                     action: "Parent Folder".to_string(),
                 },
                 LegendRow {

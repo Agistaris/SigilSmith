@@ -10,6 +10,13 @@
 - Override paks (a .pak with no meta.lsx, which SigilSmith deploys to the game's Data folder) show as "Override" in the Kind column instead of "Loose", and as "Override Pak" in Details and `mods list`.
 - Choosing a target a mod can't use says why (for example "Override pak (no meta.lsx): Data only" or "Can't use Mods: this mod has no .pak") instead of "Target not present for this mod".
 - Mods an older SigilSmith imported as override paks but that are real Pak mods (like KaiLime UI before the v15/v16 fix) get a "Remove and import again" note in Details and a warning in the log at startup.
+- File pickers (import/export mod lists, log export, folder setup, SigiLink cache): type a name to jump to it, as in a desktop file manager. The typed text shows on the Status line and clears after a second's pause; press `/` first to keep it on until Esc. Pressing the same letter again cycles through names starting with it. j/k now type letters there instead of moving, and Home goes to the top.
+- `b` (restore last backup) asks first, says when that backup was made, and defaults to Cancel. Before, one press replaced the mod list with no prompt. Ctrl+B and Alt+B no longer trigger it.
+- Clear target overrides is Shift+C, like the other bulk actions (A/S/X). Ctrl+C no longer clears them.
+- Leaving move mode any other way (Tab, search, sorting, deploying, opening a dialog) places the mod, as m/Enter does; before, the mod stayed moved on screen but wasn't saved or deployed. Esc still puts it back, and `q` asks you to finish the move first.
+- Deploys and SigiLink auto-ranking wait while a mod is being moved, so a half-finished move is never deployed and ranking can't reshuffle the list mid-move.
+- Backups: SigilSmith keeps the newest 50 and deletes older ones (each deploy writes one, so they could reach hundreds of megabytes). The first deploy after updating removes the old ones.
+- Help and the side legend list the Overrides panel keys correctly (←/→ or 1-9 choose a winner, p picks from a list, c/Backspace clear), and add Esc to cancel a move, O in dialogs, and the file picker keys.
 - Fix: the startup native mod sync no longer marks an outdated metadata cache as current, which could skip the refresh that fills in dependencies and dates.
 - Packaging: the RPM states the SigilSmith Community License (it said MIT) and installs the LICENSE file.
 - Packaging: RPMs build in the v4 format when the build machine has rpmbuild 6.

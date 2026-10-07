@@ -145,6 +145,115 @@ pub struct PathBrowser {
     pub selected: usize,
     pub path_input: String,
     pub focus: PathBrowserFocus,
+    /// Type-to-jump: the start of a name typed in the list.
+    pub jump: String,
+    jump_at: Option<Instant>,
+    /// Started with `/`: stays on until Esc, Enter or a move key instead of
+    /// ending after a pause.
+    pub jump_held: bool,
+}
+
+/// A pause this long starts a new name, unless the jump was started with `/`.
+const JUMP_PAUSE: Duration = Duration::from_millis(1000);
+
+impl PathBrowser {
+    /// The typed name while type-to-jump is on (empty right after `/`).
+    pub fn active_jump(&self) -> Option<&str> {
+        let typing = !self.jump.is_empty()
+            && self
+                .jump_at
+                .is_some_and(|typed_at| typed_at.elapsed() < JUMP_PAUSE);
+        (self.jump_held || typing).then_some(self.jump.as_str())
+    }
+
+    pub fn hold_jump(&mut self) {
+        self.clear_jump();
+        self.jump_held = true;
+    }
+
+    pub fn clear_jump(&mut self) {
+        self.jump.clear();
+        self.jump_at = None;
+        self.jump_held = false;
+    }
+
+    /// Adds `c` to the typed name and selects the entry it leads to.
+    pub fn type_to_jump(&mut self, c: char) {
+        if self.active_jump().is_none() {
+            self.jump.clear();
+        }
+        self.jump.push(c);
+        self.jump_at = Some(Instant::now());
+        if let Some(index) = jump_target(&self.entries, self.selected, &self.jump) {
+            self.selected = index;
+        }
+    }
+
+    pub fn jump_backspace(&mut self) {
+        if self.jump.pop().is_none() {
+            self.clear_jump();
+            return;
+        }
+        self.jump_at = Some(Instant::now());
+    }
+
+    /// Whether the selected entry matches the typed name.
+    pub fn jump_found(&self) -> bool {
+        self.entries
+            .get(self.selected)
+            .and_then(jump_name)
+            .is_some_and(|name| jump_matches(&name, &self.jump))
+    }
+}
+
+/// The lowercase name type-to-jump compares against; None for the
+/// "select", "save here" and ".." rows.
+fn jump_name(entry: &PathBrowserEntry) -> Option<String> {
+    if !matches!(
+        entry.kind,
+        PathBrowserEntryKind::Dir | PathBrowserEntryKind::File
+    ) {
+        return None;
+    }
+    Some(entry.path.file_name()?.to_string_lossy().to_lowercase())
+}
+
+/// `typed` is the start of `name`, or the same letter typed again ("ddd"),
+/// which cycles through the names starting with that letter.
+fn jump_matches(name: &str, typed: &str) -> bool {
+    let typed = typed.to_lowercase();
+    let Some(first) = typed.chars().next() else {
+        return false;
+    };
+    name.starts_with(&typed) || (typed.chars().all(|c| c == first) && name.starts_with(first))
+}
+
+/// The entry typing `typed` selects: the next name that starts with it,
+/// ignoring case. One letter moves past the selection, so pressing it again
+/// cycles; a longer name keeps the selection while it still matches.
+fn jump_target(entries: &[PathBrowserEntry], selected: usize, typed: &str) -> Option<usize> {
+    let typed = typed.to_lowercase();
+    let first = typed.chars().next()?;
+    let names: Vec<Option<String>> = entries.iter().map(jump_name).collect();
+    let find = |prefix: &str, start: usize| {
+        (0..names.len())
+            .map(|step| (start + step) % names.len())
+            .find(|&index| {
+                names[index]
+                    .as_deref()
+                    .is_some_and(|name| name.starts_with(prefix))
+            })
+    };
+    if typed.chars().count() == 1 {
+        return find(&typed, selected + 1);
+    }
+    find(&typed, selected).or_else(|| {
+        if typed.chars().all(|c| c == first) {
+            find(&first.to_string(), selected + 1)
+        } else {
+            None
+        }
+    })
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -220,6 +329,9 @@ pub enum DialogKind {
     SigilLinkRankPrompt,
     SigilLinkClearPins,
     SigilLinkPinNotice,
+    RestoreBackup {
+        backup_dir: PathBuf,
+    },
     #[allow(dead_code)]
     EnableAllVisible,
     #[allow(dead_code)]
@@ -1532,7 +1644,7 @@ impl App {
             return;
         }
         self.mod_sort.column = next_column;
-        self.move_mode = false;
+        self.end_move_mode();
         self.reselect_mod_by_id(current_id);
         self.status = format!(
             "Sort: {} ({})",
@@ -1547,7 +1659,7 @@ impl App {
             SortDirection::Asc => SortDirection::Desc,
             SortDirection::Desc => SortDirection::Asc,
         };
-        self.move_mode = false;
+        self.end_move_mode();
         self.reselect_mod_by_id(current_id);
         self.status = format!(
             "Sort: {} ({})",
@@ -2915,6 +3027,13 @@ Use Ctrl+R to reset this mod or F12 to reset all pins."
             result.report.missing_pak,
         ));
 
+        // This ranking started before the mod being moved left its place, so
+        // rank again once the move ends.
+        if self.move_mode && matches!(mode, SmartRankMode::Auto) {
+            self.sigillink_rank_pending_import = true;
+            return;
+        }
+
         let (current_order, pins) = {
             let Some(profile) = self.library.active_profile() else {
                 self.status = "SigiLink Intelligent Ranking skipped: no profile".to_string();
@@ -3362,7 +3481,7 @@ Use Ctrl+R to reset this mod or F12 to reset all pins."
             self.hotkey_fade_until = None;
         }
         self.focus = focus;
-        self.move_mode = false;
+        self.end_move_mode();
     }
 
     pub fn set_active_game(&mut self, game_id: GameId) -> Result<()> {
@@ -3427,7 +3546,7 @@ Use Ctrl+R to reset this mod or F12 to reset all pins."
     }
 
     pub fn enter_create_profile(&mut self) {
-        self.move_mode = false;
+        self.end_move_mode();
         self.input_mode = InputMode::Editing {
             prompt: "New profile name".to_string(),
             buffer: String::new(),
@@ -3439,7 +3558,7 @@ Use Ctrl+R to reset this mod or F12 to reset all pins."
     }
 
     pub fn enter_rename_profile(&mut self, original: &str) {
-        self.move_mode = false;
+        self.end_move_mode();
         self.input_mode = InputMode::Editing {
             prompt: "Rename profile".to_string(),
             buffer: original.to_string(),
@@ -3454,7 +3573,7 @@ Use Ctrl+R to reset this mod or F12 to reset all pins."
 
     pub fn enter_duplicate_profile(&mut self, source: &str) {
         let suggested = self.unique_profile_name(&format!("{source} Copy"));
-        self.move_mode = false;
+        self.end_move_mode();
         self.input_mode = InputMode::Editing {
             prompt: "Duplicate profile".to_string(),
             buffer: suggested,
@@ -3468,12 +3587,12 @@ Use Ctrl+R to reset this mod or F12 to reset all pins."
     }
 
     pub fn enter_export_profile(&mut self, profile: &str) {
-        self.move_mode = false;
+        self.end_move_mode();
         self.open_export_menu(profile);
     }
 
     pub fn enter_import_profile(&mut self) {
-        self.move_mode = false;
+        self.end_move_mode();
         self.open_path_browser(PathBrowserPurpose::ImportProfile);
     }
 
@@ -3490,7 +3609,7 @@ Use Ctrl+R to reset this mod or F12 to reset all pins."
     }
 
     pub fn open_export_path_browser(&mut self, profile: &str, kind: ExportKind) {
-        self.move_mode = false;
+        self.end_move_mode();
         self.open_path_browser(PathBrowserPurpose::ExportProfile {
             profile: profile.to_string(),
             kind,
@@ -3937,6 +4056,7 @@ Use Ctrl+R to reset this mod or F12 to reset all pins."
     }
 
     pub fn delete_profile(&mut self, name: String) -> Result<()> {
+        self.end_move_mode();
         if self.library.profiles.len() <= 1 {
             self.status = "Cannot delete the last profile".to_string();
             self.set_toast(
@@ -3992,6 +4112,7 @@ Use Ctrl+R to reset this mod or F12 to reset all pins."
     }
 
     pub fn set_active_profile(&mut self, name: &str) -> Result<()> {
+        self.end_move_mode();
         if !self.library.profiles.iter().any(|p| p.name == name) {
             self.status = "Profile not found".to_string();
             return Ok(());
@@ -4359,7 +4480,7 @@ Use Ctrl+R to reset this mod or F12 to reset all pins."
     }
 
     pub fn open_log_export(&mut self) {
-        self.move_mode = false;
+        self.end_move_mode();
         self.open_path_browser(PathBrowserPurpose::ExportLog);
     }
 
@@ -5372,6 +5493,7 @@ Use Ctrl+R to reset this mod or F12 to reset all pins."
             self.sigillink_rank_debounce_until = None;
         }
         if self.dialog.is_some()
+            || self.move_mode
             || !matches!(self.input_mode, InputMode::Normal)
             || self.settings_menu.is_some()
             || self.mod_list_preview.is_some()
@@ -5481,22 +5603,22 @@ Use Ctrl+R to reset this mod or F12 to reset all pins."
     }
 
     pub fn enter_setup_game_root(&mut self) {
-        self.move_mode = false;
+        self.end_move_mode();
         self.open_path_browser(PathBrowserPurpose::Setup(SetupStep::GameRoot));
     }
 
     pub fn enter_setup_larian_dir(&mut self) {
-        self.move_mode = false;
+        self.end_move_mode();
         self.open_path_browser(PathBrowserPurpose::Setup(SetupStep::LarianDir));
     }
 
     pub fn enter_setup_downloads_dir(&mut self) {
-        self.move_mode = false;
+        self.end_move_mode();
         self.open_path_browser(PathBrowserPurpose::Setup(SetupStep::DownloadsDir));
     }
 
     pub fn open_sigillink_cache_move(&mut self) {
-        self.move_mode = false;
+        self.end_move_mode();
         self.open_path_browser(PathBrowserPurpose::SigilLinkCache {
             action: SigilLinkCacheAction::Move,
             require_dev: None,
@@ -5508,7 +5630,7 @@ Use Ctrl+R to reset this mod or F12 to reset all pins."
             self.status = "SigiLink relocation failed: unable to read BG3 filesystem.".to_string();
             return;
         };
-        self.move_mode = false;
+        self.end_move_mode();
         self.open_path_browser(PathBrowserPurpose::SigilLinkCache {
             action: SigilLinkCacheAction::Relocate { target_root },
             require_dev: Some(require_dev),
@@ -5559,6 +5681,9 @@ Use Ctrl+R to reset this mod or F12 to reset all pins."
             selected: 0,
             path_input: input_seed,
             focus,
+            jump: String::new(),
+            jump_at: None,
+            jump_held: false,
         });
         self.status = title.to_string();
     }
@@ -6090,7 +6215,7 @@ Use Ctrl+R to reset this mod or F12 to reset all pins."
         if self.block_mod_changes("import") {
             return;
         }
-        self.move_mode = false;
+        self.end_move_mode();
         self.input_mode = InputMode::Editing {
             prompt: "Import path".to_string(),
             buffer: String::new(),
@@ -6102,7 +6227,7 @@ Use Ctrl+R to reset this mod or F12 to reset all pins."
     }
 
     pub fn enter_mod_filter(&mut self) {
-        self.move_mode = false;
+        self.end_move_mode();
         self.mod_filter_snapshot = Some(self.mod_filter.clone());
         self.input_mode = InputMode::Editing {
             prompt: "Search mods".to_string(),
@@ -10367,8 +10492,8 @@ Use Ctrl+R to reset this mod or F12 to reset all pins."
 
     fn open_dialog(&mut self, mut dialog: Dialog) {
         dialog.scroll = 0;
+        self.end_move_mode();
         self.dialog = Some(dialog);
-        self.move_mode = false;
         self.input_mode = InputMode::Normal;
     }
 
@@ -10813,6 +10938,16 @@ Use Ctrl+R to reset this mod or F12 to reset all pins."
             DialogKind::SigilLinkClearPins => {
                 if matches!(choice, DialogChoice::Yes) {
                     self.clear_all_sigillink_pins();
+                }
+            }
+            DialogKind::RestoreBackup { backup_dir } => {
+                if matches!(choice, DialogChoice::Yes) {
+                    if let Err(err) = self.rollback_to_backup(&backup_dir) {
+                        self.status = format!("Rollback failed: {err}");
+                        self.log_error(format!("Rollback failed: {err}"));
+                    }
+                } else {
+                    self.status = "Rollback canceled".to_string();
                 }
             }
             DialogKind::SigilLinkPinNotice => {
@@ -11476,11 +11611,13 @@ Use Ctrl+R to reset this mod or F12 to reset all pins."
     }
 
     pub fn deploy(&mut self) -> Result<()> {
+        // Like the other ways out of move mode, deploying places the mod.
+        self.end_move_mode();
         self.queue_deploy("manual deploy");
         Ok(())
     }
 
-    pub fn rollback_last_backup(&mut self) -> Result<()> {
+    fn rollback_blocked(&mut self) -> bool {
         if self.import_active.is_some()
             || self.import_apply_active
             || self.deploy_active
@@ -11493,9 +11630,17 @@ Use Ctrl+R to reset this mod or F12 to reset all pins."
                 ToastLevel::Warn,
                 Duration::from_secs(3),
             );
+            return true;
+        }
+        false
+    }
+
+    /// Asks before restoring the last backup: it replaces the whole mod list
+    /// and can't be undone.
+    pub fn prompt_rollback(&mut self) -> Result<()> {
+        if self.dialog.is_some() || self.rollback_blocked() {
             return Ok(());
         }
-
         let Some(backup_dir) = backup::load_last_backup(&self.config.data_dir)? else {
             self.status = "No backup available".to_string();
             self.log_warn("No backup available".to_string());
@@ -11506,8 +11651,36 @@ Use Ctrl+R to reset this mod or F12 to reset all pins."
             );
             return Ok(());
         };
+        let when = backup::backup_timestamp(&backup_dir)
+            .map(|stamp| time_ago(now_timestamp().saturating_sub(stamp as i64)))
+            .unwrap_or_else(|| "unknown time".to_string());
+        // Short lines: the dialog sizes itself by line count, not wrapping.
+        let mut message = format!(
+            "Puts your mod list, load order and profiles back\nthe way they were at the last deploy ({when}).\nChanges made since then are lost."
+        );
+        if self.app_config.auto_deploy_enabled {
+            message.push_str("\n\nAuto-Deploy is on, so this is usually the same as now.");
+        }
+        self.open_dialog(Dialog {
+            title: "Restore last backup?".to_string(),
+            message,
+            yes_label: "Restore".to_string(),
+            no_label: "Cancel".to_string(),
+            choice: DialogChoice::No,
+            kind: DialogKind::RestoreBackup { backup_dir },
+            toggle: None,
+            toggle_alt: None,
+            scroll: 0,
+        });
+        Ok(())
+    }
 
-        let mut library = backup::load_backup_library(&backup_dir)?;
+    fn rollback_to_backup(&mut self, backup_dir: &Path) -> Result<()> {
+        if self.rollback_blocked() {
+            return Ok(());
+        }
+
+        let mut library = backup::load_backup_library(backup_dir)?;
         if library.profiles.is_empty() {
             library
                 .profiles
@@ -12031,6 +12204,14 @@ Use Ctrl+R to reset this mod or F12 to reset all pins."
             "Move mode: use arrows to reorder, Enter/Space/M confirm, Esc cancel".to_string();
     }
 
+    /// Leaving move mode any other way (Tab, search, sorting, a dialog...)
+    /// places the mod where it is, like pressing m.
+    fn end_move_mode(&mut self) {
+        if self.move_mode {
+            self.confirm_move_mode();
+        }
+    }
+
     fn confirm_move_mode(&mut self) {
         self.move_mode = false;
         let moved = self.move_dirty;
@@ -12085,11 +12266,30 @@ Use Ctrl+R to reset this mod or F12 to reset all pins."
             self.clamp_selection();
         }
         self.move_mode = false;
+        let moved = self.move_dirty;
         self.move_dirty = false;
         self.move_origin_id = None;
         self.move_origin_index = None;
         self.move_origin_pinned = false;
         self.status = "Move canceled".to_string();
+        // A deploy that was already running may have saved the moved order.
+        if moved && self.allow_persistence() {
+            let _ = self.library.save(&self.config.data_dir);
+        }
+    }
+
+    /// Quitting mid-move would drop the move, so finish it first.
+    pub fn request_quit(&mut self) {
+        if self.move_mode {
+            self.status = "Finish the move first (m or Esc)".to_string();
+            self.set_toast(
+                "Finish the move first (m or Esc)",
+                ToastLevel::Warn,
+                Duration::from_secs(3),
+            );
+            return;
+        }
+        self.should_quit = true;
     }
 
     pub fn remove_selected(&mut self) {
@@ -12598,7 +12798,9 @@ Use Ctrl+R to reset this mod or F12 to reset all pins."
         if !self.deploy_pending || self.deploy_active {
             return;
         }
-        if self.import_active.is_some()
+        // Wait while a mod is being moved: its new place isn't settled yet.
+        if self.move_mode
+            || self.import_active.is_some()
             || self.import_apply_active
             || self.dialog.is_some()
             || self.pending_duplicate.is_some()
@@ -12965,6 +13167,18 @@ fn missing_target_message(mod_entry: &ModEntry, kind: TargetKind, reimport: bool
         return format!("Can't use {wanted}: this mod is only a .pak");
     }
     format!("Can't use {wanted}: it has only {has} files")
+}
+
+/// "just now", "5 minutes ago", "3 hours ago", "2 days ago".
+fn time_ago(seconds: i64) -> String {
+    let (count, unit) = match seconds.max(0) {
+        0..=59 => return "just now".to_string(),
+        s @ 60..=3599 => (s / 60, "minute"),
+        s @ 3600..=86_399 => (s / 3600, "hour"),
+        s => (s / 86_400, "day"),
+    };
+    let plural = if count == 1 { "" } else { "s" };
+    format!("{count} {unit}{plural} ago")
 }
 
 fn compare_string(a: &str, b: &str, direction: SortDirection) -> Ordering {
@@ -14714,6 +14928,111 @@ mod tests {
                 name: format!("Dep {i}"),
             })
             .collect()
+    }
+
+    fn jump_browser(names: &[&str]) -> PathBrowser {
+        let mut entries = vec![PathBrowserEntry {
+            label: "..".to_string(),
+            path: PathBuf::from("/"),
+            kind: PathBrowserEntryKind::Parent,
+            selectable: false,
+        }];
+        entries.extend(names.iter().map(|name| PathBrowserEntry {
+            label: format!("{name}/"),
+            path: PathBuf::from("/home").join(name),
+            kind: PathBrowserEntryKind::Dir,
+            selectable: false,
+        }));
+        PathBrowser {
+            purpose: PathBrowserPurpose::ImportProfile,
+            current: PathBuf::from("/home"),
+            entries,
+            selected: 0,
+            path_input: String::new(),
+            focus: PathBrowserFocus::List,
+            jump: String::new(),
+            jump_at: None,
+            jump_held: false,
+        }
+    }
+
+    #[test]
+    fn typing_jumps_to_the_matching_name() {
+        let mut browser = jump_browser(&["Desktop", "Dev", "Documents", "Downloads", "Music"]);
+        browser.type_to_jump('d');
+        assert_eq!(browser.selected, 1); // Desktop
+        browser.type_to_jump('o');
+        assert_eq!(browser.selected, 3); // Documents
+        browser.type_to_jump('w');
+        assert_eq!(browser.selected, 4); // Downloads
+        assert!(browser.jump_found());
+
+        // No match keeps the selection.
+        browser.type_to_jump('x');
+        assert_eq!(browser.selected, 4);
+        assert!(!browser.jump_found());
+        browser.jump_backspace();
+        assert_eq!(browser.active_jump(), Some("dow"));
+        assert!(browser.jump_found());
+
+        // The same letter again cycles through the names that start with it.
+        browser.clear_jump();
+        browser.selected = 0;
+        for expected in [1, 2, 3, 4, 1] {
+            browser.type_to_jump('D');
+            assert_eq!(browser.selected, expected);
+        }
+
+        // Upper case matches too, and ".." never matches.
+        browser.clear_jump();
+        browser.type_to_jump('M');
+        assert_eq!(browser.selected, 5);
+        browser.clear_jump();
+        browser.type_to_jump('.');
+        assert_eq!(browser.selected, 5);
+    }
+
+    #[test]
+    fn slash_keeps_the_jump_on_until_cleared() {
+        let mut browser = jump_browser(&["My Mods", "Music"]);
+        assert_eq!(browser.active_jump(), None);
+        browser.hold_jump();
+        assert_eq!(browser.active_jump(), Some(""));
+        for c in "my m".chars() {
+            browser.type_to_jump(c);
+        }
+        // "My Mods": the space is part of the name.
+        assert_eq!(browser.selected, 1);
+        // Held jumps don't time out.
+        browser.jump_at = Some(Instant::now() - JUMP_PAUSE * 3);
+        assert_eq!(browser.active_jump(), Some("my m"));
+        for _ in 0..4 {
+            browser.jump_backspace();
+        }
+        assert_eq!(browser.active_jump(), Some(""));
+        browser.jump_backspace();
+        assert_eq!(browser.active_jump(), None);
+    }
+
+    #[test]
+    fn typed_names_expire_after_a_pause() {
+        let mut browser = jump_browser(&["Desktop", "Music"]);
+        browser.type_to_jump('d');
+        browser.jump_at = Some(Instant::now() - JUMP_PAUSE);
+        assert_eq!(browser.active_jump(), None);
+        browser.type_to_jump('m');
+        assert_eq!(browser.active_jump(), Some("m"));
+        assert_eq!(browser.selected, 2);
+    }
+
+    #[test]
+    fn backup_age_reads_naturally() {
+        assert_eq!(time_ago(-5), "just now");
+        assert_eq!(time_ago(59), "just now");
+        assert_eq!(time_ago(60), "1 minute ago");
+        assert_eq!(time_ago(3599), "59 minutes ago");
+        assert_eq!(time_ago(7200), "2 hours ago");
+        assert_eq!(time_ago(86_400 * 3 + 5), "3 days ago");
     }
 
     #[test]
