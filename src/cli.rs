@@ -1223,7 +1223,7 @@ fn format_short_date(timestamp: i64) -> Option<String> {
     if timestamp <= 0 {
         return None;
     }
-    let date = time::OffsetDateTime::from_unix_timestamp(timestamp).ok()?;
+    let date = crate::localtime::local_datetime(timestamp)?;
     let year = date.year();
     let month = date.month() as u8;
     let day = date.day();

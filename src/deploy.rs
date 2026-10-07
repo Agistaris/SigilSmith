@@ -366,7 +366,12 @@ pub fn deploy_with_options(
     }
 
     if options.backup {
-        backup::create_backup(config, library, &paths, options.reason.as_deref())?;
+        backup::create_backup(
+            config,
+            library,
+            Some(&paths.modsettings_path),
+            options.reason.as_deref(),
+        )?;
     }
 
     let mut manifest = load_manifest(&config.data_dir)?;

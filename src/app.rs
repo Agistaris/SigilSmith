@@ -33,6 +33,8 @@ use std::{
 };
 use walkdir::WalkDir;
 
+pub use crate::backup::ChangeKind;
+
 use blake3::Hasher;
 
 #[cfg(unix)]
@@ -331,6 +333,10 @@ pub enum DialogKind {
     SigilLinkPinNotice,
     RestoreBackup {
         backup_dir: PathBuf,
+        /// What started the deploy that made it, e.g. "Order changed".
+        reason: String,
+        timestamp: u64,
+        groups: Vec<ChangeGroup>,
     },
     #[allow(dead_code)]
     EnableAllVisible,
@@ -419,6 +425,216 @@ pub struct OverrideCandidatePicker {
     pub conflict_index: usize,
     pub items: Vec<OverrideCandidateItem>,
     pub selected: usize,
+}
+
+/// The Backups list (b): every kept backup, newest first.
+#[derive(Debug, Clone)]
+pub struct BackupBrowser {
+    pub rows: Vec<BackupRow>,
+    pub selected: usize,
+}
+
+#[derive(Debug, Clone)]
+pub struct BackupRow {
+    pub entry: backup::BackupEntry,
+    /// What restoring it would change; None when it can't be read.
+    pub changes: Option<backup::RestoreChanges>,
+    /// Mods it would bring back whose files are gone.
+    pub missing_files: Vec<String>,
+    /// Names of the mods `changes` mentions.
+    pub names: HashMap<String, String>,
+}
+
+impl BackupRow {
+    pub fn age(&self) -> String {
+        time_ago(now_timestamp().saturating_sub(self.entry.timestamp as i64))
+    }
+
+    pub fn reason(&self) -> String {
+        backup::reason_label(self.entry.reason.as_deref())
+    }
+
+    /// What restoring this backup would do, grouped by kind of change. Empty
+    /// when the backup can't be read or matches the setup now.
+    pub fn change_groups(&self, auto_deploy: bool) -> Vec<ChangeGroup> {
+        let Some(changes) = self.changes.as_ref().filter(|changes| !changes.is_empty()) else {
+            return Vec::new();
+        };
+        let name = |id: &String| self.names.get(id).cloned().unwrap_or_else(|| id.clone());
+        let mods = |ids: &[String]| -> Vec<ChangeItem> {
+            ids.iter().map(|id| ChangeItem::new(name(id))).collect()
+        };
+        let mut groups = Vec::new();
+        let mut push = |kind: ChangeKind, items: Vec<ChangeItem>, note: Option<&str>| {
+            if !items.is_empty() {
+                groups.push(ChangeGroup {
+                    kind,
+                    items,
+                    note: note.map(str::to_string),
+                });
+            }
+        };
+        if changes.switches_profile {
+            push(
+                ChangeKind::Profile,
+                vec![ChangeItem::new(changes.profile.clone())],
+                None,
+            );
+        }
+        let moved = changes
+            .moved
+            .iter()
+            .map(|(id, from, to)| ChangeItem::with_note(name(id), format!("{from} → {to}")))
+            .collect();
+        push(ChangeKind::Moved, moved, None);
+        push(ChangeKind::On, mods(&changes.turned_on), None);
+        push(ChangeKind::Off, mods(&changes.turned_off), None);
+        // Mods that come back with their files first, then those without.
+        let (with_files, without_files): (Vec<&String>, Vec<&String>) = changes
+            .returning
+            .iter()
+            .partition(|id| !self.missing_files.contains(id));
+        let readded = with_files
+            .into_iter()
+            .map(|id| ChangeItem::new(name(id)))
+            .chain(
+                without_files
+                    .into_iter()
+                    .map(|id| ChangeItem::with_note(name(id), "no files, stays off")),
+            )
+            .collect();
+        push(ChangeKind::ReAdded, readded, None);
+        push(
+            ChangeKind::Removed,
+            mods(&changes.leaving),
+            Some("files stay on disk"),
+        );
+        push(ChangeKind::Targets, mods(&changes.targets), None);
+        if changes.overrides > 0 {
+            push(
+                ChangeKind::Overrides,
+                vec![ChangeItem::new(format!("{} changed", changes.overrides))],
+                None,
+            );
+        }
+        let profiles = |names: &[String], one: &str, many: &str| -> Option<ChangeItem> {
+            let verb = match names.len() {
+                0 => return None,
+                1 => one,
+                _ => many,
+            };
+            Some(ChangeItem::new(format!(
+                "{} {verb}",
+                join_names(names.to_vec())
+            )))
+        };
+        let profile_items = [
+            profiles(&changes.profiles_returning, "comes back", "come back"),
+            profiles(&changes.profiles_leaving, "is removed", "are removed"),
+            profiles(&changes.other_profiles, "changes too", "change too"),
+        ];
+        push(
+            ChangeKind::Profiles,
+            profile_items.into_iter().flatten().collect(),
+            None,
+        );
+        if !auto_deploy {
+            push(
+                ChangeKind::Deploy,
+                vec![ChangeItem::with_note("Yes", "Auto-Deploy is off")],
+                None,
+            );
+        }
+        groups
+    }
+}
+
+/// One mod (or fact) in a change group, with an optional note after it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChangeItem {
+    pub text: String,
+    pub note: Option<String>,
+}
+
+impl ChangeItem {
+    fn new(text: impl Into<String>) -> Self {
+        Self {
+            text: text.into(),
+            note: None,
+        }
+    }
+
+    fn with_note(text: impl Into<String>, note: impl Into<String>) -> Self {
+        Self {
+            text: text.into(),
+            note: Some(note.into()),
+        }
+    }
+}
+
+/// A labeled group of changes, e.g. "On" and the mods a restore turns on.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChangeGroup {
+    pub kind: ChangeKind,
+    pub items: Vec<ChangeItem>,
+    /// A note about the whole group, e.g. "files stay on disk".
+    pub note: Option<String>,
+}
+
+/// "A, B and C", or "A, B, C and 4 more" for long lists.
+fn join_names(names: Vec<String>) -> String {
+    const SHOWN: usize = 3;
+    match names.len() {
+        0 => String::new(),
+        1 => names[0].clone(),
+        count if count <= SHOWN => {
+            format!("{} and {}", names[..count - 1].join(", "), names[count - 1])
+        }
+        count => format!("{} and {} more", names[..SHOWN].join(", "), count - SHOWN),
+    }
+}
+
+/// Whether a mod's files are still on disk, for mods a backup brings back.
+struct ModFileCheck {
+    cache_root: PathBuf,
+    paths: Option<crate::bg3::GamePaths>,
+    native_index: Option<Vec<native_pak::NativePakEntry>>,
+}
+
+impl ModFileCheck {
+    fn new(app: &App) -> Self {
+        let paths = game::detect_paths(
+            app.game_id,
+            Some(&app.config.game_root),
+            Some(&app.config.larian_dir),
+        )
+        .ok();
+        let native_index = paths.as_ref().map(|paths| {
+            native_pak::build_native_pak_index_cached(&paths.larian_mods_dir).to_vec()
+        });
+        Self {
+            cache_root: app.config.sigillink_cache_root(),
+            paths,
+            native_index,
+        }
+    }
+
+    fn missing(&self, mod_entry: &ModEntry) -> bool {
+        if mod_entry.has_target_kind(TargetKind::Pak) {
+            // Without game paths there's nothing to check native paks against.
+            return self.paths.is_some()
+                && App::sigillink_missing_pak_for_mod_with(
+                    mod_entry,
+                    &self.cache_root,
+                    self.paths.as_ref(),
+                    self.native_index.as_deref(),
+                );
+        }
+        !mod_entry.is_native()
+            && !library_mod_root(&self.cache_root)
+                .join(&mod_entry.id)
+                .exists()
+    }
 }
 
 impl DependencyItem {
@@ -903,6 +1119,8 @@ pub struct App {
     sigillink_missing_queue_view: usize,
     override_picker: Option<OverrideCandidatePicker>,
     override_picker_view: usize,
+    backup_browser: Option<BackupBrowser>,
+    backup_browser_view: usize,
     sigillink_missing_paks: HashSet<String>,
     sigillink_missing_paks_ignored: HashSet<String>,
     dependency_cache: HashMap<String, Vec<String>>,
@@ -1369,6 +1587,8 @@ impl App {
             sigillink_missing_queue_view: 1,
             override_picker: None,
             override_picker_view: 1,
+            backup_browser: None,
+            backup_browser_view: 1,
             sigillink_missing_paks: HashSet::new(),
             sigillink_missing_paks_ignored: HashSet::new(),
             dependency_cache: HashMap::new(),
@@ -10940,14 +11160,15 @@ Use Ctrl+R to reset this mod or F12 to reset all pins."
                     self.clear_all_sigillink_pins();
                 }
             }
-            DialogKind::RestoreBackup { backup_dir } => {
+            DialogKind::RestoreBackup { backup_dir, .. } => {
                 if matches!(choice, DialogChoice::Yes) {
+                    self.backup_browser = None;
                     if let Err(err) = self.rollback_to_backup(&backup_dir) {
-                        self.status = format!("Rollback failed: {err}");
-                        self.log_error(format!("Rollback failed: {err}"));
+                        self.status = format!("Restore failed: {err}");
+                        self.log_error(format!("Restore failed: {err:#}"));
                     }
                 } else {
-                    self.status = "Rollback canceled".to_string();
+                    self.status = "Restore canceled".to_string();
                 }
             }
             DialogKind::SigilLinkPinNotice => {
@@ -11623,10 +11844,10 @@ Use Ctrl+R to reset this mod or F12 to reset all pins."
             || self.deploy_active
             || self.deploy_pending
         {
-            self.status = "Rollback blocked: active tasks".to_string();
-            self.log_warn("Rollback blocked: active tasks".to_string());
+            self.status = "Restore blocked: wait for the deploy or import".to_string();
+            self.log_warn("Restore blocked: deploy or import running".to_string());
             self.set_toast(
-                "Rollback blocked: active tasks",
+                "Restore blocked: wait for the deploy or import",
                 ToastLevel::Warn,
                 Duration::from_secs(3),
             );
@@ -11635,44 +11856,179 @@ Use Ctrl+R to reset this mod or F12 to reset all pins."
         false
     }
 
-    /// Asks before restoring the last backup: it replaces the whole mod list
-    /// and can't be undone.
-    pub fn prompt_rollback(&mut self) -> Result<()> {
+    /// b: lists the kept backups with what restoring each would change.
+    pub fn open_backup_browser(&mut self) {
         if self.dialog.is_some() || self.rollback_blocked() {
-            return Ok(());
+            return;
         }
-        let Some(backup_dir) = backup::load_last_backup(&self.config.data_dir)? else {
-            self.status = "No backup available".to_string();
-            self.log_warn("No backup available".to_string());
+        self.end_move_mode();
+        let entries = backup::list_backups(&self.config.data_dir);
+        if entries.is_empty() {
+            self.status = "No backups yet: each deploy makes one".to_string();
+            self.set_toast("No backups yet", ToastLevel::Warn, Duration::from_secs(3));
+            return;
+        }
+        let files = ModFileCheck::new(self);
+        // Older ones are deleted at the next deploy, so leave them out.
+        let rows: Vec<BackupRow> = entries
+            .into_iter()
+            .take(backup::KEEP_BACKUPS)
+            .map(|entry| self.backup_row(entry, &files))
+            .collect();
+        // Start on the newest backup that differs from now: with Auto-Deploy
+        // on, the top one usually matches, and the next undoes the last deploy.
+        let selected = rows
+            .iter()
+            .position(|row| {
+                row.changes
+                    .as_ref()
+                    .is_some_and(|changes| !changes.is_empty())
+            })
+            .unwrap_or(0);
+        self.backup_browser = Some(BackupBrowser { rows, selected });
+    }
+
+    fn backup_row(&self, entry: backup::BackupEntry, files: &ModFileCheck) -> BackupRow {
+        let Ok(then) = backup::load_backup_library(&entry.dir) else {
+            return BackupRow {
+                entry,
+                changes: None,
+                missing_files: Vec::new(),
+                names: HashMap::new(),
+            };
+        };
+        let changes = backup::restore_changes(&self.library, &then);
+        let missing_files = then
+            .mods
+            .iter()
+            .filter(|mod_entry| changes.returning.contains(&mod_entry.id))
+            .filter(|mod_entry| files.missing(mod_entry))
+            .map(|mod_entry| mod_entry.id.clone())
+            .collect();
+        let mentioned: HashSet<&String> = changes
+            .moved
+            .iter()
+            .map(|(id, _, _)| id)
+            .chain(&changes.turned_on)
+            .chain(&changes.turned_off)
+            .chain(&changes.returning)
+            .chain(&changes.leaving)
+            .chain(&changes.targets)
+            .collect();
+        // Today's name wins for mods that are in both.
+        let names = then
+            .mods
+            .iter()
+            .chain(&self.library.mods)
+            .filter(|mod_entry| mentioned.contains(&mod_entry.id))
+            .map(|mod_entry| (mod_entry.id.clone(), mod_entry.display_name()))
+            .collect();
+        BackupRow {
+            entry,
+            changes: Some(changes),
+            missing_files,
+            names,
+        }
+    }
+
+    pub fn backup_browser(&self) -> Option<&BackupBrowser> {
+        self.backup_browser.as_ref()
+    }
+
+    pub fn backup_browser_active(&self) -> bool {
+        self.backup_browser.is_some()
+    }
+
+    pub fn set_backup_browser_view(&mut self, view_items: usize) {
+        self.backup_browser_view = view_items.max(1);
+    }
+
+    pub fn backup_browser_page_step(&self) -> isize {
+        self.backup_browser_view.saturating_sub(1).max(1) as isize
+    }
+
+    pub fn backup_browser_move(&mut self, delta: isize) {
+        if let Some(browser) = &mut self.backup_browser {
+            let last = browser.rows.len().saturating_sub(1) as isize;
+            browser.selected = (browser.selected as isize + delta).clamp(0, last) as usize;
+        }
+    }
+
+    pub fn backup_browser_home(&mut self) {
+        if let Some(browser) = &mut self.backup_browser {
+            browser.selected = 0;
+        }
+    }
+
+    pub fn backup_browser_end(&mut self) {
+        if let Some(browser) = &mut self.backup_browser {
+            browser.selected = browser.rows.len().saturating_sub(1);
+        }
+    }
+
+    pub fn close_backup_browser(&mut self) {
+        self.backup_browser = None;
+    }
+
+    /// Enter in the Backups list: asks before restoring the selected backup.
+    pub fn backup_browser_select(&mut self) {
+        let Some(row) = self
+            .backup_browser
+            .as_ref()
+            .and_then(|browser| browser.rows.get(browser.selected))
+            .cloned()
+        else {
+            return;
+        };
+        let Some(changes) = &row.changes else {
+            self.status = "This backup can't be read".to_string();
             self.set_toast(
-                "No backup available",
+                "This backup can't be read",
                 ToastLevel::Warn,
                 Duration::from_secs(3),
             );
-            return Ok(());
+            return;
         };
-        let when = backup::backup_timestamp(&backup_dir)
-            .map(|stamp| time_ago(now_timestamp().saturating_sub(stamp as i64)))
-            .unwrap_or_else(|| "unknown time".to_string());
-        // Short lines: the dialog sizes itself by line count, not wrapping.
-        let mut message = format!(
-            "Puts your mod list, load order and profiles back\nthe way they were at the last deploy ({when}).\nChanges made since then are lost."
-        );
-        if self.app_config.auto_deploy_enabled {
-            message.push_str("\n\nAuto-Deploy is on, so this is usually the same as now.");
+        if changes.is_empty() {
+            self.status = "This backup is the same as now".to_string();
+            self.set_toast(
+                "Same as now: nothing to restore",
+                ToastLevel::Info,
+                Duration::from_secs(3),
+            );
+            return;
+        }
+        let groups = row.change_groups(self.app_config.auto_deploy_enabled);
+        // The UI draws the groups as a labeled list; this plain text is the
+        // fallback.
+        let mut message = String::new();
+        for group in &groups {
+            let items: Vec<String> = group
+                .items
+                .iter()
+                .map(|item| match &item.note {
+                    Some(note) => format!("{} ({note})", item.text),
+                    None => item.text.clone(),
+                })
+                .collect();
+            message.push_str(&format!("{}: {}\n", group.kind.label(), items.join(", ")));
         }
         self.open_dialog(Dialog {
-            title: "Restore last backup?".to_string(),
+            title: format!("Restore the backup from {}?", row.age()),
             message,
             yes_label: "Restore".to_string(),
             no_label: "Cancel".to_string(),
             choice: DialogChoice::No,
-            kind: DialogKind::RestoreBackup { backup_dir },
+            kind: DialogKind::RestoreBackup {
+                backup_dir: row.entry.dir.clone(),
+                reason: row.reason(),
+                timestamp: row.entry.timestamp,
+                groups,
+            },
             toggle: None,
             toggle_alt: None,
             scroll: 0,
         });
-        Ok(())
     }
 
     fn rollback_to_backup(&mut self, backup_dir: &Path) -> Result<()> {
@@ -11680,21 +12036,45 @@ Use Ctrl+R to reset this mod or F12 to reset all pins."
             return Ok(());
         }
 
-        let mut library = backup::load_backup_library(backup_dir)?;
-        if library.profiles.is_empty() {
-            library
-                .profiles
-                .push(crate::library::Profile::new("Default"));
+        let then = backup::load_backup_library(backup_dir)?;
+        // Save today's setup first, so the restore can be undone from the list.
+        let modsettings = game::detect_paths(
+            self.game_id,
+            Some(&self.config.game_root),
+            Some(&self.config.larian_dir),
+        )
+        .ok()
+        .map(|paths| paths.modsettings_path);
+        backup::create_backup(
+            &self.config,
+            &self.library,
+            modsettings.as_deref(),
+            Some(backup::BEFORE_RESTORE),
+        )
+        .context("save the current setup first")?;
+
+        let current: HashSet<String> = self
+            .library
+            .mods
+            .iter()
+            .map(|mod_entry| mod_entry.id.clone())
+            .collect();
+        let mut library = backup::restored_library(&self.library, then);
+        // Mods that come back without their files stay off.
+        let files = ModFileCheck::new(self);
+        let missing: HashSet<String> = library
+            .mods
+            .iter()
+            .filter(|mod_entry| !current.contains(&mod_entry.id) && files.missing(mod_entry))
+            .map(|mod_entry| mod_entry.id.clone())
+            .collect();
+        for profile in &mut library.profiles {
+            for entry in &mut profile.order {
+                if missing.contains(&entry.id) {
+                    entry.enabled = false;
+                }
+            }
         }
-        if library.active_profile.is_empty()
-            || !library
-                .profiles
-                .iter()
-                .any(|profile| profile.name == library.active_profile)
-        {
-            library.active_profile = library.profiles[0].name.clone();
-        }
-        library.ensure_mods_in_profiles();
         self.library = library;
         self.config.active_profile = self.library.active_profile.clone();
         self.library.save(&self.config.data_dir)?;
@@ -11702,10 +12082,39 @@ Use Ctrl+R to reset this mod or F12 to reset all pins."
         self.conflicts.clear();
         self.conflict_selected = 0;
 
-        self.queue_deploy_with_options("rollback", false);
-        self.queue_conflict_scan("rollback");
-        self.status = "Rollback queued".to_string();
-        self.log_info(format!("Rollback queued from {}", backup_dir.display()));
+        self.queue_deploy_with_options("restore", false);
+        self.queue_conflict_scan("restore");
+        let when = backup::backup_timestamp(backup_dir)
+            .map(|stamp| time_ago(now_timestamp().saturating_sub(stamp as i64)))
+            .unwrap_or_else(|| "an unknown time".to_string());
+        self.status = format!("Restored the backup from {when}");
+        self.log_info(format!(
+            "Restored backup {} (the setup before it is saved as \"Before restore\")",
+            backup_dir.display()
+        ));
+        if !missing.is_empty() {
+            let names: Vec<String> = self
+                .library
+                .mods
+                .iter()
+                .filter(|mod_entry| missing.contains(&mod_entry.id))
+                .map(|mod_entry| mod_entry.display_name())
+                .collect();
+            let stays = if names.len() == 1 {
+                "it stays"
+            } else {
+                "they stay"
+            };
+            self.log_warn(format!(
+                "Restored {} without files, so {stays} off",
+                join_names(names)
+            ));
+        }
+        self.set_toast(
+            &format!("Restored the backup from {when}"),
+            ToastLevel::Info,
+            Duration::from_secs(3),
+        );
         Ok(())
     }
 
@@ -13175,7 +13584,9 @@ fn time_ago(seconds: i64) -> String {
         0..=59 => return "just now".to_string(),
         s @ 60..=3599 => (s / 60, "minute"),
         s @ 3600..=86_399 => (s / 3600, "hour"),
-        s => (s / 86_400, "day"),
+        s @ 86_400..=5_183_999 => (s / 86_400, "day"),
+        s @ 5_184_000..=63_071_999 => (s / 2_592_000, "month"),
+        s => (s / 31_536_000, "year"),
     };
     let plural = if count == 1 { "" } else { "s" };
     format!("{count} {unit}{plural} ago")
@@ -15033,6 +15444,9 @@ mod tests {
         assert_eq!(time_ago(3599), "59 minutes ago");
         assert_eq!(time_ago(7200), "2 hours ago");
         assert_eq!(time_ago(86_400 * 3 + 5), "3 days ago");
+        assert_eq!(time_ago(86_400 * 59), "59 days ago");
+        assert_eq!(time_ago(86_400 * 250), "8 months ago");
+        assert_eq!(time_ago(86_400 * 800), "2 years ago");
     }
 
     #[test]
@@ -15109,5 +15523,89 @@ mod tests {
             App::dialog_alt_label(&dialog(DialogKind::Overwrite { keep_both: false })),
             None
         );
+    }
+
+    #[test]
+    fn restore_changes_group_by_kind() {
+        let row = BackupRow {
+            entry: backup::BackupEntry {
+                dir: PathBuf::from("/backups/backup-1"),
+                timestamp: 1,
+                reason: None,
+            },
+            changes: Some(backup::RestoreChanges {
+                moved: vec![("a".into(), 42, 39)],
+                returning: vec!["b".into(), "c".into()],
+                leaving: vec!["d".into()],
+                overrides: 2,
+                profiles_leaving: vec!["P2".into()],
+                other_profiles: vec!["Heads Only".into(), "P3".into()],
+                ..Default::default()
+            }),
+            missing_files: vec!["b".into()],
+            names: [
+                ("a", "Alpha"),
+                ("b", "Beta"),
+                ("c", "Gamma"),
+                ("d", "Delta"),
+            ]
+            .into_iter()
+            .map(|(id, name)| (id.to_string(), name.to_string()))
+            .collect(),
+        };
+        let item = |text: &str, note: Option<&str>| ChangeItem {
+            text: text.to_string(),
+            note: note.map(str::to_string),
+        };
+        let group = |kind, items, note: Option<&str>| ChangeGroup {
+            kind,
+            items,
+            note: note.map(str::to_string),
+        };
+        let groups = vec![
+            group(
+                ChangeKind::Moved,
+                vec![item("Alpha", Some("42 → 39"))],
+                None,
+            ),
+            // Mods with files come first; the one without stays off.
+            group(
+                ChangeKind::ReAdded,
+                vec![
+                    item("Gamma", None),
+                    item("Beta", Some("no files, stays off")),
+                ],
+                None,
+            ),
+            group(
+                ChangeKind::Removed,
+                vec![item("Delta", None)],
+                Some("files stay on disk"),
+            ),
+            group(ChangeKind::Overrides, vec![item("2 changed", None)], None),
+            group(
+                ChangeKind::Profiles,
+                vec![
+                    item("P2 is removed", None),
+                    item("Heads Only and P3 change too", None),
+                ],
+                None,
+            ),
+        ];
+        assert_eq!(row.change_groups(true), groups);
+
+        let mut with_deploy = groups;
+        with_deploy.push(group(
+            ChangeKind::Deploy,
+            vec![item("Yes", Some("Auto-Deploy is off"))],
+            None,
+        ));
+        assert_eq!(row.change_groups(false), with_deploy);
+
+        let same = BackupRow {
+            changes: Some(backup::RestoreChanges::default()),
+            ..row
+        };
+        assert!(same.change_groups(false).is_empty());
     }
 }

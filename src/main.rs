@@ -7,6 +7,7 @@ mod deploy;
 mod game;
 mod importer;
 mod library;
+mod localtime;
 mod metadata;
 mod native_pak;
 mod script_extender;

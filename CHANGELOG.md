@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- Backups list: `b` (or Settings → Backups) lists the newest 50 backups with when each was made, what started that deploy, and what restoring it would change, color-coded ("1 moved, 2 on, 1 removed"). A details pane lists the mods under labels (Moved, On, Off, Re-added, Removed, and so on). Enter asks first, shows the full list, and defaults to Cancel. Restoring saves your current setup as "Before restore" first, so a restore can be undone from the same list. Before, `b` could only go back to the last backup.
+- A restore takes the order, on/off state, targets, override choices and profiles from the backup, and keeps today's mod details (names, dependencies, dates). Mods the backup brings back whose files have since been deleted stay off. A restore deploys even with Auto-Deploy off, and the confirm says so.
+- Dates and times (Last Rank, the Created and Added columns, Details, `mods list`) show in your local time zone; they were in UTC.
+- "Time ago" text goes on to months and years ("8 months ago") instead of counting days.
+- Dialogs size themselves to their wrapped text, so long lines are no longer cut off.
+- Two backups made in the same second get separate folders; before, the second overwrote the first.
+
+## 0.9.9
+
 - The mod list marks mods that use the Script Extender (`SE`) or ship Osiris story scripts (`Os`), found from the same files BG3 Mod Manager checks. The details panel shows the required Script Extender version and features. `mods list` shows the markers too, and its JSON output gains `scripts`. Existing libraries rescan once on the first start.
 - Script Extender setup: SigilSmith checks that Steam runs BG3 through Proton, that `DWrite.dll` is in the game's `bin` folder, and that Proton loads it (a `WINEDLLOVERRIDES="DWrite.dll=n,b"` launch option, or a DWrite override in BG3's Proton prefix). The details panel names the first missing piece, and the Context panel adds a Script Extender line while enabled mods need it. Enabling such a mod opens a checklist with a "Set up for me" button and a "Copy launch option" button for anyone who prefers Steam's launch option. Set up for me downloads the latest Script Extender from Norbyte's GitHub releases (checked against GitHub's published SHA-256), puts `DWrite.dll` in `bin`, and turns on the DWrite override in the Proton prefix (keeping the old registry as `user.reg.sigilsmith-backup`). It won't run while BG3 is running. SigilSmith never edits Steam's own settings: forcing Proton stays a Steam setting, and before Proton has run the game once, it copies the launch option for you to paste instead. Settings gains "Script Extender Setup" to open the checklist any time, and "Script Extender Notice" to turn the popup off.
 - The mod list keeps names readable in narrow windows: it hides Created, then Added, then Target, then Kind before squeezing the name (Details still shows them). Before, below about 110 columns the name column shrank to a letter or two.

@@ -1632,6 +1632,7 @@ dependencies = [
  "filetime",
  "flate2",
  "larian-formats",
+ "libc",
  "lz4_flex",
  "quick-xml 0.31.0",
  "ratatui",

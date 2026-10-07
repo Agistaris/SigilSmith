@@ -1,9 +1,10 @@
 use crate::{
     app::{
-        expand_tilde, App, DependencyStatus, DialogChoice, DialogKind, ExplorerItem,
-        ExplorerItemKind, ExportKind, Focus, InputMode, InputPurpose, LogLevel, ModSort,
-        ModSortColumn, PathBrowser, PathBrowserEntryKind, PathBrowserFocus, PathBrowserPurpose,
-        SetupStep, SigilLinkCacheAction, SigilLinkMissingTrigger, ToastLevel, UpdateStatus,
+        expand_tilde, App, ChangeGroup, ChangeKind, DependencyStatus, DialogChoice, DialogKind,
+        ExplorerItem, ExplorerItemKind, ExportKind, Focus, InputMode, InputPurpose, LogLevel,
+        ModSort, ModSortColumn, PathBrowser, PathBrowserEntryKind, PathBrowserFocus,
+        PathBrowserPurpose, SetupStep, SigilLinkCacheAction, SigilLinkMissingTrigger, ToastLevel,
+        UpdateStatus,
     },
     bg3::{ScriptExtenderSetup, SetupCheck},
     library::{InstallTarget, ModEntry, TargetKind},
@@ -205,6 +206,9 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Result<()> {
     }
     if app.override_picker_active() {
         return handle_override_picker(app, key);
+    }
+    if app.backup_browser_active() {
+        return handle_backup_browser(app, key);
     }
     if app.sigillink_missing_queue_active() {
         return handle_sigillink_missing_queue(app, key);
@@ -575,6 +579,23 @@ fn handle_override_picker(app: &mut App, key: KeyEvent) -> Result<()> {
     Ok(())
 }
 
+fn handle_backup_browser(app: &mut App, key: KeyEvent) -> Result<()> {
+    match key.code {
+        KeyCode::Up | KeyCode::Char('k') | KeyCode::Char('K') => app.backup_browser_move(-1),
+        KeyCode::Down | KeyCode::Char('j') | KeyCode::Char('J') => app.backup_browser_move(1),
+        KeyCode::PageUp => app.backup_browser_move(-app.backup_browser_page_step()),
+        KeyCode::PageDown => app.backup_browser_move(app.backup_browser_page_step()),
+        KeyCode::Home => app.backup_browser_home(),
+        KeyCode::End => app.backup_browser_end(),
+        KeyCode::Enter => app.backup_browser_select(),
+        KeyCode::Esc | KeyCode::Char('b') | KeyCode::Char('B') | KeyCode::Char('q') => {
+            app.close_backup_browser()
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
 #[derive(Debug, Clone, Copy)]
 enum SettingsItemKind {
     ActionSetupPaths,
@@ -588,6 +609,7 @@ enum SettingsItemKind {
     ProfilesHeader,
     ActionExportModList,
     ActionImportModList,
+    ActionBackups,
     SigilLinkHeader,
     SigilLinkDebugHeader,
     SigilLinkToggle,
@@ -807,6 +829,12 @@ fn settings_items(app: &App) -> Vec<SettingsItem> {
         SettingsItem {
             label: "Import Mod List".to_string(),
             kind: SettingsItemKind::ActionImportModList,
+            checked: None,
+            selectable: true,
+        },
+        SettingsItem {
+            label: "Backups (Restore Or Undo)".to_string(),
+            kind: SettingsItemKind::ActionBackups,
             checked: None,
             selectable: true,
         },
@@ -1077,6 +1105,10 @@ fn handle_settings_menu(app: &mut App, key: KeyEvent) -> Result<()> {
                         app.close_settings_menu();
                         app.enter_import_profile();
                     }
+                    SettingsItemKind::ActionBackups => {
+                        app.close_settings_menu();
+                        app.open_backup_browser();
+                    }
                     SettingsItemKind::ActionSigilLinkSoloRank => {
                         app.request_settings_menu_return();
                         app.close_settings_menu();
@@ -1182,10 +1214,7 @@ fn handle_normal_mode(app: &mut App, key: KeyEvent) -> Result<()> {
         (KeyCode::Char('b'), mods) | (KeyCode::Char('B'), mods)
             if !mods.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
         {
-            if let Err(err) = app.prompt_rollback() {
-                app.status = format!("Rollback failed: {err}");
-                app.log_error(format!("Rollback failed: {err}"));
-            }
+            app.open_backup_browser();
         }
         (KeyCode::Esc, _) if app.move_mode => {}
         (KeyCode::Esc, _) => app.toggle_settings_menu(),
@@ -3058,6 +3087,9 @@ fn draw(frame: &mut Frame<'_>, app: &mut App) {
     if app.override_picker_active() {
         draw_override_picker(frame, app, &theme);
     }
+    if app.backup_browser_active() {
+        draw_backup_browser(frame, app, &theme);
+    }
     if app.sigillink_missing_queue_active() {
         draw_sigillink_missing_queue(frame, app, &theme);
     }
@@ -3672,7 +3704,9 @@ fn draw_dialog(frame: &mut Frame<'_>, app: &mut App, theme: &Theme) {
     };
 
     let area = frame.size();
-    let message_lines = build_dialog_message_lines(dialog, theme);
+    // Widest content line that fits inside the dialog without wrapping.
+    let content_max = (area.width.saturating_sub(2).min(72)).saturating_sub(4) as usize;
+    let message_lines = build_dialog_message_lines(dialog, content_max, theme);
 
     let has_cancel = matches!(dialog.kind, DialogKind::DeleteMod { .. });
     let alt_label = App::dialog_alt_label(dialog);
@@ -3798,9 +3832,14 @@ fn draw_dialog(frame: &mut Frame<'_>, app: &mut App, theme: &Theme) {
     }
     let max_width = area.width.saturating_sub(2).max(1);
     let width = (max_line as u16 + 6).clamp(38, max_width.min(72));
+    // Long lines wrap, so count the rows they take inside the borders.
+    let message_rows: usize = message_lines
+        .iter()
+        .map(|line| wrapped_rows(&line.to_string(), width.saturating_sub(2) as usize))
+        .sum();
     let content_height = header_lines
         .len()
-        .saturating_add(message_lines.len())
+        .saturating_add(message_rows)
         .saturating_add(footer_lines.len())
         .max(1) as u16;
     let mut height = content_height + 2;
@@ -3838,7 +3877,7 @@ fn draw_dialog(frame: &mut Frame<'_>, app: &mut App, theme: &Theme) {
 
     let body_area = chunks[1];
     let body_height = body_area.height.max(1) as usize;
-    let max_scroll = message_lines.len().saturating_sub(body_height);
+    let max_scroll = message_rows.saturating_sub(body_height);
     if dialog.scroll > max_scroll {
         dialog.scroll = max_scroll;
     }
@@ -3884,7 +3923,228 @@ fn draw_dialog(frame: &mut Frame<'_>, app: &mut App, theme: &Theme) {
     frame.render_widget(footer_widget, chunks[2]);
 }
 
-fn build_dialog_message_lines(dialog: &crate::app::Dialog, theme: &Theme) -> Vec<Line<'static>> {
+/// Rows a line takes when word-wrapped to `width` columns, as Paragraph wraps.
+/// Width of the label column in a restore's change list ("Overrides" + gap).
+const CHANGE_LABEL_WIDTH: usize = 11;
+
+fn change_color(kind: ChangeKind, theme: &Theme) -> Color {
+    match kind {
+        ChangeKind::On | ChangeKind::ReAdded => theme.success,
+        ChangeKind::Off => theme.warning,
+        ChangeKind::Removed => theme.error,
+        ChangeKind::Deploy => theme.muted,
+        _ => theme.accent,
+    }
+}
+
+fn change_label_style(kind: ChangeKind, theme: &Theme) -> Style {
+    Style::default()
+        .fg(change_color(kind, theme))
+        .add_modifier(Modifier::BOLD)
+}
+
+/// A backup's change counts in the colors of the change labels, cut off
+/// with "…" when they don't fit `width`.
+fn summary_spans(
+    parts: &[(ChangeKind, String)],
+    width: usize,
+    theme: &Theme,
+) -> Vec<Span<'static>> {
+    let muted = Style::default().fg(theme.muted);
+    let mut spans = Vec::new();
+    let mut used = 0;
+    for (index, (kind, text)) in parts.iter().enumerate() {
+        let sep = if index == 0 { "" } else { ", " };
+        let len = sep.len() + text.chars().count();
+        // Leave room for " …" unless this is the last part.
+        let reserve = if index + 1 < parts.len() { 2 } else { 0 };
+        if used + len + reserve > width {
+            if used + 2 <= width {
+                spans.push(Span::styled(" …", muted));
+            }
+            break;
+        }
+        if !sep.is_empty() {
+            spans.push(Span::styled(sep, muted));
+        }
+        spans.push(Span::styled(
+            text.clone(),
+            Style::default().fg(change_color(*kind, theme)),
+        ));
+        used += len;
+    }
+    spans
+}
+
+/// A restore's changes as a list: a colored label on each group's first row,
+/// then one item per row. A group with more than `cap + 1` items shows `cap`
+/// of them and "+N more". Notes line up after the longest name in a group,
+/// and names are shortened to fit `width`.
+fn change_group_lines(
+    groups: &[ChangeGroup],
+    cap: usize,
+    width: usize,
+    theme: &Theme,
+) -> Vec<Line<'static>> {
+    let text = Style::default().fg(theme.text);
+    let muted = Style::default().fg(theme.muted);
+    let indent = " ".repeat(CHANGE_LABEL_WIDTH);
+    let room = width.saturating_sub(CHANGE_LABEL_WIDTH).max(1);
+    let lead = |label: &mut Option<Span<'static>>| {
+        label.take().unwrap_or_else(|| Span::raw(indent.clone()))
+    };
+    let mut lines = Vec::new();
+    for group in groups {
+        let shown = if group.items.len() > cap + 1 {
+            cap
+        } else {
+            group.items.len()
+        };
+        let items = &group.items[..shown];
+        let hidden = group.items.len() - shown;
+        // A group note sits after a lone item, or else on a row of its own.
+        let inline_note = group
+            .note
+            .as_ref()
+            .filter(|_| shown == 1 && hidden == 0 && items[0].note.is_none());
+        let notes: Vec<Option<&String>> = items
+            .iter()
+            .map(|item| item.note.as_ref().or(inline_note))
+            .collect();
+        let note_width = notes
+            .iter()
+            .flatten()
+            .map(|note| note.chars().count() + 2)
+            .max()
+            .unwrap_or(0);
+        let name_room = room.saturating_sub(note_width).max(room.min(12));
+        let name_width = items
+            .iter()
+            .map(|item| item.text.chars().count())
+            .max()
+            .unwrap_or(0)
+            .min(name_room);
+        let mut label = Some(Span::styled(
+            format!("{:<CHANGE_LABEL_WIDTH$}", group.kind.label()),
+            change_label_style(group.kind, theme),
+        ));
+        for (item, note) in items.iter().zip(notes) {
+            let name = truncate_text(&item.text, name_width);
+            let mut spans = vec![lead(&mut label)];
+            match note {
+                Some(note) => {
+                    spans.push(Span::styled(format!("{name:<name_width$}"), text));
+                    spans.push(Span::styled(format!("  {note}"), muted));
+                }
+                None => spans.push(Span::styled(name, text)),
+            }
+            lines.push(Line::from(spans));
+        }
+        if hidden > 0 {
+            lines.push(Line::from(vec![
+                lead(&mut label),
+                Span::styled(format!("+{hidden} more"), muted),
+            ]));
+        }
+        if let Some(note) = group.note.as_ref().filter(|_| inline_note.is_none()) {
+            lines.push(Line::from(vec![
+                lead(&mut label),
+                Span::styled(note.clone(), muted),
+            ]));
+        }
+    }
+    lines
+}
+
+/// The change list cut down to `max_rows`: fewer names per group first, then
+/// whole rows, ending with a note that the confirm shows everything.
+fn fit_change_lines(
+    groups: &[ChangeGroup],
+    width: usize,
+    max_rows: usize,
+    theme: &Theme,
+) -> Vec<Line<'static>> {
+    for cap in (1..=4).rev() {
+        let lines = change_group_lines(groups, cap, width, theme);
+        if lines.len() <= max_rows {
+            return lines;
+        }
+    }
+    let mut lines = change_group_lines(groups, 1, width, theme);
+    lines.truncate(max_rows.saturating_sub(1));
+    lines.push(Line::from(Span::styled(
+        "… more (Enter shows them all)",
+        Style::default().fg(theme.muted),
+    )));
+    lines
+}
+
+/// The restore confirm: when the backup is from, what it changes, and the
+/// undo note. The change list is left-aligned, padded to one width so the
+/// centered dialog centers it as a block.
+fn restore_backup_lines(
+    reason: &str,
+    timestamp: u64,
+    groups: &[ChangeGroup],
+    max_width: usize,
+    theme: &Theme,
+) -> Vec<Line<'static>> {
+    let muted = Style::default().fg(theme.muted);
+    let mut list = change_group_lines(groups, 4, max_width, theme);
+    let list_width = list.iter().map(Line::width).max().unwrap_or(0);
+    for line in &mut list {
+        let pad = list_width.saturating_sub(line.width());
+        if pad > 0 {
+            line.spans.push(Span::raw(" ".repeat(pad)));
+        }
+    }
+    let mut lines = vec![
+        Line::from(Span::styled(
+            format!(
+                "{reason} · {}",
+                format_rank_timestamp(Some(timestamp as i64))
+            ),
+            muted,
+        )),
+        Line::from(""),
+    ];
+    lines.extend(list);
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        "Your setup is saved first as \"Before restore\", so you can undo.",
+        muted,
+    )));
+    lines
+}
+
+fn wrapped_rows(text: &str, width: usize) -> usize {
+    if width == 0 {
+        return 1;
+    }
+    let mut rows = 1;
+    let mut used = 0;
+    for word in text.split(' ') {
+        let len = word.chars().count();
+        let needed = if used == 0 { len } else { used + 1 + len };
+        if needed <= width {
+            used = needed;
+        } else if len > width {
+            // A word longer than the line is broken across rows.
+            rows += usize::from(used > 0) + (len - 1) / width;
+            used = (len - 1) % width + 1;
+        } else {
+            rows += 1;
+            used = len;
+        }
+    }
+    rows
+}
+
+fn build_dialog_message_lines(
+    dialog: &crate::app::Dialog,
+    max_width: usize,
+    theme: &Theme,
+) -> Vec<Line<'static>> {
     match &dialog.kind {
         DialogKind::DeleteProfile { name } => {
             let line1 = Line::from(vec![
@@ -4012,6 +4272,12 @@ fn build_dialog_message_lines(dialog: &crate::app::Dialog, theme: &Theme) -> Vec
         DialogKind::ScriptExtenderSetup { mods, setup } => {
             script_extender_setup_lines(mods, setup, theme)
         }
+        DialogKind::RestoreBackup {
+            reason,
+            timestamp,
+            groups,
+            ..
+        } => restore_backup_lines(reason, *timestamp, groups, max_width, theme),
         _ => dialog
             .message
             .lines()
@@ -5120,6 +5386,205 @@ fn draw_override_picker(frame: &mut Frame<'_>, app: &mut App, theme: &Theme) {
         .style(Style::default().bg(theme.overlay_panel_bg))
         .alignment(Alignment::Left);
     frame.render_widget(footer_widget, chunks[2]);
+}
+
+fn draw_backup_browser(frame: &mut Frame<'_>, app: &mut App, theme: &Theme) {
+    let (rows, selected) = {
+        let Some(browser) = app.backup_browser() else {
+            return;
+        };
+        (browser.rows.clone(), browser.selected)
+    };
+
+    let area = frame.size();
+    let width = area.width.saturating_sub(6).clamp(56, 112);
+    let height = area.height.saturating_sub(4).clamp(16, 36);
+    let (outer_area, modal) = padded_modal(area, width, height, 2, 1);
+    render_modal_backdrop(frame, outer_area, theme);
+    let panel_block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(theme.overlay_border))
+        .style(Style::default().bg(theme.overlay_panel_bg))
+        .title(Span::styled(
+            format!("Backups ({})", rows.len()),
+            Style::default()
+                .fg(theme.accent)
+                .add_modifier(Modifier::BOLD),
+        ));
+    let inner = panel_block.inner(modal);
+    frame.render_widget(panel_block, modal);
+
+    let muted = Style::default().fg(theme.muted);
+    let text = Style::default().fg(theme.text);
+    let width = inner.width as usize;
+    let long_header =
+        "Each deploy saves one. Restoring saves your setup first, so you can undo it here.";
+    let header_text = if long_header.chars().count() <= width {
+        long_header
+    } else {
+        "Each deploy saves one. You can undo a restore here."
+    };
+    let header = Paragraph::new(vec![Line::from(Span::styled(
+        truncate_text(header_text, width),
+        muted,
+    ))])
+    .style(Style::default().bg(theme.overlay_panel_bg));
+
+    // Header (2) and footer (1) are fixed, and the list keeps at least 6 rows.
+    // The details get up to 14 rows under their top border: a title row, then
+    // the change list.
+    let detail_rows = inner.height.saturating_sub(2 + 1 + 6 + 1).clamp(2, 14) as usize;
+    let details: Vec<Line<'static>> = match rows.get(selected) {
+        None => Vec::new(),
+        Some(row) => match &row.changes {
+            None => vec![Line::from(Span::styled(
+                "This backup can't be read.",
+                Style::default().fg(theme.warning),
+            ))],
+            Some(changes) if changes.is_empty() => vec![Line::from(Span::styled(
+                "Same as now: restoring it changes nothing.",
+                muted,
+            ))],
+            Some(_) => fit_change_lines(
+                &row.change_groups(app.app_config.auto_deploy_enabled),
+                width,
+                detail_rows - 1,
+                theme,
+            ),
+        },
+    };
+    let detail_height = (1 + 1 + details.len()) as u16;
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(2),
+            Constraint::Min(4),
+            Constraint::Length(detail_height),
+            Constraint::Length(1),
+        ])
+        .split(inner);
+    frame.render_widget(header, chunks[0]);
+
+    // Columns: age, date and time (when there's room), reason, changes.
+    let show_date = width >= 84;
+    let age_width = 15;
+    let date_width = if show_date { 17 } else { 0 };
+    let reason_width = 20;
+    let changes_width = width.saturating_sub(age_width + date_width + reason_width + 1);
+    let list_area = chunks[1];
+    let view_items = list_area.height as usize;
+    app.set_backup_browser_view(view_items);
+    let list_items: Vec<ListItem<'_>> = rows
+        .iter()
+        .map(|row| {
+            let summary = match &row.changes {
+                None => vec![Span::styled(
+                    truncate_text("Can't be read", changes_width),
+                    Style::default().fg(theme.warning),
+                )],
+                Some(changes) if changes.is_empty() => vec![Span::styled(
+                    truncate_text("Same as now", changes_width),
+                    muted,
+                )],
+                Some(changes) => summary_spans(&changes.short_parts(), changes_width, theme),
+            };
+            let mut spans = vec![Span::styled(
+                format!("{:<age_width$}", truncate_text(&row.age(), age_width - 1)),
+                text,
+            )];
+            if show_date {
+                spans.push(Span::styled(
+                    format!(
+                        "{:<date_width$}",
+                        format_rank_timestamp(Some(row.entry.timestamp as i64))
+                    ),
+                    muted,
+                ));
+            }
+            spans.push(Span::styled(
+                format!(
+                    "{:<reason_width$}",
+                    truncate_text(&row.reason(), reason_width - 1)
+                ),
+                text,
+            ));
+            spans.extend(summary);
+            ListItem::new(Line::from(spans))
+        })
+        .collect();
+    let highlight_style = Style::default()
+        .bg(theme.accent_soft)
+        .fg(Color::Black)
+        .add_modifier(Modifier::BOLD);
+    let list = List::new(list_items)
+        .style(Style::default().bg(theme.overlay_panel_bg))
+        .highlight_style(highlight_style)
+        .highlight_symbol("");
+    let total_items = rows.len();
+    let mut offset = 0usize;
+    if total_items > view_items && selected >= view_items {
+        offset = (selected + 1 - view_items).min(total_items - view_items);
+    }
+    let mut state = ListState::default();
+    if total_items > 0 {
+        state.select(Some(selected));
+        *state.offset_mut() = offset;
+    }
+    let show_scroll = total_items > view_items;
+    let list_chunks = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Min(1),
+            Constraint::Length(if show_scroll { 1 } else { 0 }),
+        ])
+        .split(list_area);
+    frame.render_stateful_widget(list, list_chunks[0], &mut state);
+    if show_scroll && list_chunks[1].width > 0 {
+        let scroll_len = total_items.saturating_sub(view_items).saturating_add(1);
+        let mut scroll_state = ScrollbarState::new(scroll_len)
+            .position(offset)
+            .viewport_content_length(view_items);
+        let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
+            .track_symbol(Some("░"))
+            .thumb_symbol("▓")
+            .begin_symbol(Some("▲"))
+            .end_symbol(Some("▼"))
+            .track_style(Style::default().fg(theme.border))
+            .thumb_style(Style::default().fg(theme.accent));
+        frame.render_stateful_widget(scrollbar, list_chunks[1], &mut scroll_state);
+    }
+
+    let mut detail_lines = vec![Line::from(Span::styled(
+        "Restoring the selected backup:",
+        Style::default()
+            .fg(theme.accent)
+            .add_modifier(Modifier::BOLD),
+    ))];
+    detail_lines.extend(details);
+    let details_widget = Paragraph::new(detail_lines)
+        .style(Style::default().bg(theme.overlay_panel_bg))
+        .block(
+            Block::default()
+                .borders(Borders::TOP)
+                .border_style(Style::default().fg(theme.border)),
+        )
+        .wrap(Wrap { trim: false });
+    frame.render_widget(details_widget, chunks[2]);
+
+    let key_style = Style::default()
+        .fg(theme.accent)
+        .add_modifier(Modifier::BOLD);
+    let footer = Paragraph::new(Line::from(vec![
+        Span::styled("↑/↓", key_style),
+        Span::styled(" Select  ", muted),
+        Span::styled("[Enter]", key_style),
+        Span::styled(" Restore (asks first)  ", muted),
+        Span::styled("[Esc]", key_style),
+        Span::styled(" Close", muted),
+    ]))
+    .style(Style::default().bg(theme.overlay_panel_bg));
+    frame.render_widget(footer, chunks[3]);
 }
 
 fn draw_sigillink_missing_queue(frame: &mut Frame<'_>, app: &mut App, theme: &Theme) {
@@ -6642,6 +7107,7 @@ fn build_settings_menu_lines(
             | SettingsItemKind::ActionSigilLinkSoloRank
             | SettingsItemKind::ActionExportModList
             | SettingsItemKind::ActionImportModList
+            | SettingsItemKind::ActionBackups
             | SettingsItemKind::ActionCopyLogTail
             | SettingsItemKind::ActionCopyLogAll
             | SettingsItemKind::ActionExportLogFile
@@ -7901,8 +8367,7 @@ fn format_rank_timestamp(timestamp: Option<i64>) -> String {
     let Some(date) = format_short_date(timestamp) else {
         return "never".to_string();
     };
-    let time = time::OffsetDateTime::from_unix_timestamp(timestamp)
-        .ok()
+    let time = crate::localtime::local_datetime(timestamp)
         .map(|dt| format!("{:02}:{:02}", dt.hour(), dt.minute()))
         .unwrap_or_else(|| "--:--".to_string());
     format!("{date} {time}")
@@ -7912,7 +8377,7 @@ fn format_short_date(timestamp: i64) -> Option<String> {
     if timestamp <= 0 {
         return None;
     }
-    let date = time::OffsetDateTime::from_unix_timestamp(timestamp).ok()?;
+    let date = crate::localtime::local_datetime(timestamp)?;
     let year = date.year();
     let month = date.month() as u8;
     let day = date.day();
@@ -9367,7 +9832,7 @@ fn help_sections() -> Vec<HelpSection> {
                 },
                 LegendRow {
                     key: "b".to_string(),
-                    action: "Restore Last Backup (Asks First)".to_string(),
+                    action: "Backups: Restore Or Undo (Asks First)".to_string(),
                 },
                 LegendRow {
                     key: "q".to_string(),
@@ -9678,6 +10143,23 @@ fn help_sections() -> Vec<HelpSection> {
                 LegendRow {
                     key: "Esc".to_string(),
                     action: "Cancel Import".to_string(),
+                },
+            ],
+        },
+        HelpSection {
+            title: "Backups",
+            rows: vec![
+                LegendRow {
+                    key: "↑/↓".to_string(),
+                    action: "Select Backup (Newest First)".to_string(),
+                },
+                LegendRow {
+                    key: "Enter".to_string(),
+                    action: "Restore (Asks First; Undo From The List)".to_string(),
+                },
+                LegendRow {
+                    key: "Esc/b".to_string(),
+                    action: "Close".to_string(),
                 },
             ],
         },
@@ -10198,6 +10680,116 @@ fn format_kv_line_split(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn wrapped_rows_match_word_wrapping() {
+        assert_eq!(wrapped_rows("", 10), 1);
+        assert_eq!(wrapped_rows("short", 10), 1);
+        assert_eq!(wrapped_rows("one two three", 9), 2);
+        assert_eq!(wrapped_rows("aaaaaaaaaaaaaaaaaaaaaaaaa", 10), 3);
+        assert_eq!(wrapped_rows("hi aaaaaaaaaaaaaaaaaaaa", 10), 3);
+    }
+
+    #[test]
+    fn change_list_lines_up_and_caps_long_groups() {
+        let theme = Theme::new();
+        let item = |text: &str, note: Option<&str>| crate::app::ChangeItem {
+            text: text.to_string(),
+            note: note.map(str::to_string),
+        };
+        let names = |count: usize| {
+            (1..=count)
+                .map(|i| item(&format!("Mod {i}"), None))
+                .collect()
+        };
+        let groups = vec![
+            ChangeGroup {
+                kind: ChangeKind::Moved,
+                items: vec![
+                    item("Short", Some("1 → 2")),
+                    item("A longer name", Some("10 → 3")),
+                ],
+                note: None,
+            },
+            ChangeGroup {
+                kind: ChangeKind::On,
+                items: names(5),
+                note: None,
+            },
+            ChangeGroup {
+                kind: ChangeKind::Off,
+                items: names(6),
+                note: None,
+            },
+            ChangeGroup {
+                kind: ChangeKind::Removed,
+                items: names(1),
+                note: Some("files stay on disk".to_string()),
+            },
+            ChangeGroup {
+                kind: ChangeKind::Removed,
+                items: names(2),
+                note: Some("files stay on disk".to_string()),
+            },
+        ];
+        let lines = text(&change_group_lines(&groups, 4, 60, &theme));
+        assert_eq!(
+            lines,
+            [
+                "Moved      Short          1 → 2",
+                "           A longer name  10 → 3",
+                // Five fit (cap + 1), so no "+1 more".
+                "On         Mod 1",
+                "           Mod 2",
+                "           Mod 3",
+                "           Mod 4",
+                "           Mod 5",
+                "Off        Mod 1",
+                "           Mod 2",
+                "           Mod 3",
+                "           Mod 4",
+                "           +2 more",
+                "Removed    Mod 1  files stay on disk",
+                "Removed    Mod 1",
+                "           Mod 2",
+                "           files stay on disk",
+            ]
+        );
+        // Long names are shortened to keep notes on the same row.
+        let long = vec![ChangeGroup {
+            kind: ChangeKind::Moved,
+            items: vec![item("A very long mod name indeed", Some("1 → 2"))],
+            note: None,
+        }];
+        assert_eq!(
+            text(&change_group_lines(&long, 4, 30, &theme)),
+            ["Moved      A very lo...  1 → 2"]
+        );
+        let summary = summary_spans(
+            &[
+                (ChangeKind::Moved, "1 moved".to_string()),
+                (ChangeKind::On, "5 on".to_string()),
+                (ChangeKind::Removed, "1 removed".to_string()),
+            ],
+            19,
+            &theme,
+        );
+        assert_eq!(Line::from(summary).to_string(), "1 moved, 5 on …");
+        assert_eq!(
+            Line::from(summary_spans(
+                &[(ChangeKind::On, "5 on".to_string())],
+                4,
+                &theme
+            ))
+            .to_string(),
+            "5 on"
+        );
+        // The details pane trims names per group before cutting rows.
+        assert_eq!(fit_change_lines(&groups, 60, 10, &theme).len(), 10);
+        let tight = text(&fit_change_lines(&groups, 60, 4, &theme));
+        assert_eq!(tight.len(), 4);
+        assert_eq!(tight[3], "… more (Enter shows them all)");
+    }
 
     fn text(lines: &[Line<'_>]) -> Vec<String> {
         lines.iter().map(|line| line.to_string()).collect()

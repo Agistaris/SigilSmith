@@ -15,6 +15,7 @@ directories = "5.0.1"
 filetime = "0.2.23"
 flate2 = "1.0.30"
 larian-formats = "0.3.0"
+libc = "0.2"
 lz4_flex = "0.11.1"
 quick-xml = { version = "0.31.0", features = ["serialize"] }
 ratatui = "0.27.0"

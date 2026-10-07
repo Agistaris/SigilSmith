@@ -175,7 +175,7 @@ cargo run
 - `Backspace` clear conflict override (Overrides)
 - `PgUp/PgDn` scroll log
 - `Esc` settings menu (SigiLink, confirmations, configure paths, keybinds)
-- `b` rollback last backup
+- `b` backups: restore an earlier setup, or undo a restore (asks first)
 - `Del` remove mod from library
 - `d` deploy to game
 - `q` quit
@@ -215,7 +215,7 @@ SigilSmith keeps its mod library here:
 - Importing copies mod files into the library.
 - Deploy writes `modsettings.lsx` and merges loose files in the profile order (last wins).
 - Deploy uses the SigiLink cache and hardlink/symlink targets (no full-copy fallback).
-- Each deploy snapshots `library.json`, `deploy_manifest.json`, and `modsettings.lsx` under `backups/`.
+- Each deploy snapshots `library.json`, `deploy_manifest.json`, and `modsettings.lsx` under `backups/` and keeps the newest 50. `b` lists them and shows what restoring each one would change.
 
 ## Config
 
