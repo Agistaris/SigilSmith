@@ -8,6 +8,9 @@
 - "Time ago" text goes on to months and years ("8 months ago") instead of counting days.
 - Dialogs size themselves to their wrapped text, so long lines are no longer cut off.
 - Two backups made in the same second get separate folders; before, the second overwrote the first.
+- Updates ask first: when a new version is out, a popup lists its highlights with Update now, Skip this version, or Later, and Restart now starts the new version. Before, every check downloaded the update in the background.
+- Settings → Updates: Ask (the default), Automatic (AppImage and .tar.gz installs update themselves), or Off.
+- Downloads must match their published SHA-256, or the update is refused; before, a release without SHA256SUMS.txt installed unchecked. AUR installs and source builds are left to pacman and git, and .deb and .rpm updates show the command to install them.
 
 ## 0.9.9
 

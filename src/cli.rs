@@ -5,7 +5,7 @@ use crate::{
     library::{library_mod_root, InstallTarget, Library, ModEntry, ModScripts, Profile},
     metadata, native_pak, ui,
 };
-use anyhow::{bail, Result};
+use anyhow::{bail, Context, Result};
 use serde::Serialize;
 use std::collections::{HashMap, HashSet};
 
@@ -90,7 +90,14 @@ pub fn run() -> Result<()> {
     match action {
         CliAction::Ui => {
             let mut app = App::initialize(StartupMode::Ui)?;
-            ui::run(&mut app)
+            ui::run(&mut app)?;
+            match app.restart_exec.take() {
+                Some(exe) => {
+                    drop(app);
+                    restart_into(&exe)
+                }
+                None => Ok(()),
+            }
         }
         CliAction::Import { paths, options } => {
             let mut app = App::initialize(StartupMode::Cli)?;
@@ -115,6 +122,14 @@ pub fn run() -> Result<()> {
             }
         },
     }
+}
+
+/// Replaces this process with the updated SigilSmith, once the terminal is
+/// back to normal.
+fn restart_into(exe: &std::path::Path) -> Result<()> {
+    use std::os::unix::process::CommandExt;
+    let err = std::process::Command::new(exe).exec();
+    Err(err).with_context(|| format!("start {}", exe.display()))
 }
 
 fn parse_args(args: &[String]) -> Result<CliAction> {

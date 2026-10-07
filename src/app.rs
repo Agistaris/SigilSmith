@@ -1,7 +1,7 @@
 use crate::{
     backup,
     bg3::{self, ScriptExtenderSetup, SetupCheck},
-    config::{AppConfig, GameConfig},
+    config::{AppConfig, GameConfig, UpdateMode},
     deploy,
     game::{self, GameId},
     importer,
@@ -331,6 +331,14 @@ pub enum DialogKind {
     SigilLinkRankPrompt,
     SigilLinkClearPins,
     SigilLinkPinNotice,
+    UpdateAvailable {
+        release: update::Release,
+    },
+    UpdateRestart,
+    UpdateCommand {
+        command: String,
+    },
+    UpdateNotice,
     RestoreBackup {
         backup_dir: PathBuf,
         /// What started the deploy that made it, e.g. "Order changed".
@@ -726,21 +734,24 @@ pub enum UpdateStatus {
     UpToDate {
         version: String,
     },
+    /// A newer release is out; nothing is downloaded yet.
     Available {
-        info: update::UpdateInfo,
-        path: PathBuf,
-        instructions: String,
+        release: update::Release,
     },
-    Applied {
-        info: update::UpdateInfo,
+    Downloading {
+        release: update::Release,
     },
-    Skipped {
+    /// Downloaded and checked; `command` installs it.
+    Ready {
+        release: update::Release,
+        command: String,
+    },
+    /// In place; starting `restart` runs it.
+    Installed {
         version: String,
-        reason: String,
+        restart: PathBuf,
     },
-    Failed {
-        error: String,
-    },
+    Failed,
 }
 
 enum ImportMessage {
@@ -804,8 +815,21 @@ enum ConflictMessage {
 }
 
 enum UpdateMessage {
-    Completed(update::UpdateResult),
-    Failed { error: String },
+    Checked(std::result::Result<update::CheckResult, String>),
+    Installed {
+        release: Box<update::Release>,
+        /// Started by the Automatic setting rather than by the user.
+        automatic: bool,
+        result: std::result::Result<update::InstallOutcome, String>,
+    },
+}
+
+/// An update dialog waiting for the screen to be free.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum UpdateDialog {
+    Prompt,
+    Restart,
+    Command,
 }
 
 #[derive(Debug, Clone)]
@@ -1099,6 +1123,16 @@ pub struct App {
     update_rx: Receiver<UpdateMessage>,
     update_active: bool,
     update_started_at: Option<Instant>,
+    update_checked_at: Option<Instant>,
+    /// The running check was asked for from Settings.
+    update_check_manual: bool,
+    update_dialog_pending: Option<UpdateDialog>,
+    /// Set when the user restarts into an installed update; `ui::run`
+    /// starts it once the terminal is restored.
+    pub restart_exec: Option<PathBuf>,
+    /// When the last key was pressed, so popups don't catch keys meant for
+    /// something else.
+    pub last_key_at: Instant,
     startup_pending: bool,
     startup_mode: StartupMode,
     startup_post_sync_pending: bool,
@@ -1567,6 +1601,11 @@ impl App {
             update_rx,
             update_active: false,
             update_started_at: None,
+            update_checked_at: None,
+            update_check_manual: false,
+            update_dialog_pending: None,
+            restart_exec: None,
+            last_key_at: Instant::now(),
             startup_pending: true,
             startup_mode: mode,
             startup_post_sync_pending: false,
@@ -1709,7 +1748,7 @@ impl App {
         }
         self.maybe_start_metadata_refresh();
         self.queue_conflict_scan("startup");
-        self.start_update_check();
+        self.start_update_check(false);
     }
 
     pub fn profile_counts(&self) -> (usize, usize) {
@@ -2045,7 +2084,7 @@ impl App {
         let selected = self.settings_menu_last_selected;
         self.settings_menu = Some(SettingsMenu { selected });
         self.settings_menu_return = false;
-        self.start_update_check();
+        self.start_update_check(false);
     }
 
     pub fn close_settings_menu(&mut self) {
@@ -5396,15 +5435,17 @@ Use Ctrl+R to reset this mod or F12 to reset all pins."
         self.maybe_show_script_extender_notice();
         self.maybe_start_sigillink_rank_pending();
         self.maybe_return_to_settings_menu();
+        self.maybe_show_update_dialog();
 
         if self.update_active {
             if let Some(started_at) = self.update_started_at {
                 if started_at.elapsed() >= Duration::from_secs(15) {
                     self.update_active = false;
                     self.update_started_at = None;
-                    self.update_status = UpdateStatus::Failed {
-                        error: "timeout".to_string(),
-                    };
+                    self.update_status = UpdateStatus::Failed;
+                    if std::mem::take(&mut self.update_check_manual) {
+                        self.status = "Update check timed out".to_string();
+                    }
                     self.log_warn("Update check timed out".to_string());
                 }
             }
@@ -5517,6 +5558,7 @@ Use Ctrl+R to reset this mod or F12 to reset all pins."
             || !self.duplicate_queue.is_empty()
             || self.dependency_queue.is_some()
             || self.startup_pending
+            || self.backup_browser.is_some()
     }
 
     /// Re-reads the game folder and Steam's settings so fixes made outside
@@ -8001,103 +8043,313 @@ Use Ctrl+R to reset this mod or F12 to reset all pins."
         }
     }
 
-    fn start_update_check(&mut self) {
-        if self.update_active {
+    /// Looks for a newer release in the background; nothing is downloaded.
+    /// Automatic checks (startup, opening Settings) follow the Updates
+    /// setting and run at most every 10 minutes; `manual` ones always run.
+    fn start_update_check(&mut self, manual: bool) {
+        if self.update_active
+            || matches!(
+                self.update_status,
+                UpdateStatus::Downloading { .. }
+                    | UpdateStatus::Ready { .. }
+                    | UpdateStatus::Installed { .. }
+            )
+        {
             return;
         }
+        if !manual {
+            let recent = self
+                .update_checked_at
+                .is_some_and(|at| at.elapsed() < Duration::from_secs(600));
+            if self.app_config.update_mode == UpdateMode::Off || recent {
+                return;
+            }
+        }
+        self.update_check_manual = manual;
         self.update_status = UpdateStatus::Checking;
         self.update_active = true;
         self.update_started_at = Some(Instant::now());
         let tx = self.update_tx.clone();
         let current_version = env!("CARGO_PKG_VERSION").to_string();
         thread::spawn(move || {
-            let message = match update::check_for_updates(&current_version) {
-                Ok(result) => UpdateMessage::Completed(result),
-                Err(err) => UpdateMessage::Failed {
-                    error: err.to_string(),
-                },
-            };
-            let _ = tx.send(message);
+            let result = update::check(&current_version).map_err(|err| format!("{err:#}"));
+            let _ = tx.send(UpdateMessage::Checked(result));
         });
     }
 
-    pub fn request_update_check(&mut self) {
-        if let UpdateStatus::Available {
-            path, instructions, ..
-        } = &self.update_status
+    /// Settings → Check For Updates: checks, or picks up where an update is.
+    pub fn update_menu_action(&mut self) {
+        match &self.update_status {
+            UpdateStatus::Available { .. } => self.queue_update_dialog(UpdateDialog::Prompt, true),
+            UpdateStatus::Downloading { release } => {
+                let message = format!("Downloading v{}...", release.version);
+                self.set_toast(&message, ToastLevel::Info, Duration::from_secs(3));
+            }
+            UpdateStatus::Ready { .. } => self.queue_update_dialog(UpdateDialog::Command, true),
+            UpdateStatus::Installed { .. } => self.queue_update_dialog(UpdateDialog::Restart, true),
+            _ => {
+                self.start_update_check(true);
+                if self.update_active {
+                    self.status = "Checking for updates...".to_string();
+                }
+            }
+        }
+    }
+
+    pub fn cycle_update_mode(&mut self) -> Result<()> {
+        self.app_config.update_mode = self.app_config.update_mode.next();
+        self.app_config.save()?;
+        self.status = format!("Updates: {}", self.app_config.update_mode.label());
+        Ok(())
+    }
+
+    /// A short header note while an update needs attention.
+    pub fn update_header_note(&self) -> Option<String> {
+        match &self.update_status {
+            UpdateStatus::Available { release } if !self.update_skipped(&release.version) => {
+                Some(format!("Update available: v{} (Esc)", release.version))
+            }
+            UpdateStatus::Downloading { release } => {
+                Some(format!("Downloading v{}...", release.version))
+            }
+            UpdateStatus::Ready { release, .. } => {
+                Some(format!("v{} downloaded (Esc)", release.version))
+            }
+            UpdateStatus::Installed { version, .. } => Some(format!("Restart to use v{version}")),
+            _ => None,
+        }
+    }
+
+    pub fn update_skipped(&self, version: &str) -> bool {
+        self.app_config.skipped_update_version.as_deref() == Some(version)
+    }
+
+    fn update_found(&mut self, release: update::Release, manual: bool) {
+        let version = release.version.clone();
+        self.log_info(format!("Update available: v{version}"));
+        let skipped = self.update_skipped(&version);
+        let automatic = self.app_config.update_mode == UpdateMode::Automatic
+            && release.installs_in_place()
+            && !skipped
+            && !manual;
+        self.update_status = UpdateStatus::Available {
+            release: release.clone(),
+        };
+        if automatic {
+            self.start_update_install(release, true);
+        } else if manual || !skipped {
+            self.queue_update_dialog(UpdateDialog::Prompt, manual);
+        }
+    }
+
+    /// Shows an update dialog now when asked for and nothing else is open,
+    /// or else once the screen is free.
+    fn queue_update_dialog(&mut self, which: UpdateDialog, now: bool) {
+        // Asked for from Settings: the menu steps aside and comes back after.
+        if now && self.settings_menu.is_some() && self.dialog.is_none() {
+            self.request_settings_menu_return();
+            self.close_settings_menu();
+        }
+        if now && !self.overlay_or_task_open() {
+            self.show_update_dialog(which);
+        } else {
+            self.update_dialog_pending = Some(which);
+        }
+    }
+
+    fn maybe_show_update_dialog(&mut self) {
+        if self.update_dialog_pending.is_none()
+            || self.whats_new_open
+            || self.whats_new_pending
+            || self.sigillink_onboarding_pending
+            || self.overlay_or_task_open()
         {
-            let path = path.clone();
-            let instructions = instructions.clone();
-            self.log_info(format!("Update package ready: {}", path.display()));
-            self.log_info(instructions);
-            self.set_toast(
-                "Update ready: see log",
-                ToastLevel::Info,
-                Duration::from_secs(3),
-            );
+            return;
         }
-        self.start_update_check();
-        if self.update_active {
-            self.status = "Checking for updates...".to_string();
+        // Not while keys are coming in: one meant for the list could answer it.
+        if self.last_key_at.elapsed() < Duration::from_secs(2) {
+            return;
+        }
+        if let Some(which) = self.update_dialog_pending.take() {
+            self.show_update_dialog(which);
         }
     }
 
-    pub fn apply_ready_update(&mut self) {
-        let UpdateStatus::Available { info, path, .. } = self.update_status.clone() else {
-            self.request_update_check();
-            return;
-        };
-
-        self.status = "Applying update...".to_string();
-        self.log_info(format!("Applying update v{}", info.version));
-        match update::apply_downloaded_update(&info, &path) {
-            Ok(update::ApplyOutcome::Applied) => {
-                self.update_status = UpdateStatus::Applied { info: info.clone() };
-                self.status = format!("Update applied: v{} (restarting)", info.version);
-                self.set_toast(
-                    &format!("Updated to v{} (restarting)", info.version),
-                    ToastLevel::Info,
-                    Duration::from_secs(3),
-                );
-                self.restart_after_update();
-            }
-            Ok(update::ApplyOutcome::Manual { instructions }) => {
-                self.log_info(instructions.clone());
-                self.set_toast(
-                    "Update ready: see log",
-                    ToastLevel::Info,
-                    Duration::from_secs(3),
-                );
-            }
-            Err(err) => {
-                self.update_status = UpdateStatus::Failed {
-                    error: err.to_string(),
+    fn show_update_dialog(&mut self, which: UpdateDialog) {
+        let dialog = match (which, &self.update_status) {
+            (UpdateDialog::Prompt, UpdateStatus::Available { release }) => {
+                let (yes, choice) = if release.can_install() {
+                    ("Update now", DialogChoice::Yes)
+                } else {
+                    ("Skip this version", DialogChoice::No)
                 };
-                self.status = format!("Update apply failed: {err}");
-                self.log_error(format!("Update apply failed: {err}"));
+                Dialog {
+                    title: format!("SigilSmith v{} is out", release.version),
+                    message: release
+                        .notes
+                        .iter()
+                        .map(|note| format!("• {note}\n"))
+                        .collect(),
+                    yes_label: yes.to_string(),
+                    no_label: "Later".to_string(),
+                    choice,
+                    kind: DialogKind::UpdateAvailable {
+                        release: release.clone(),
+                    },
+                    toggle: None,
+                    toggle_alt: None,
+                    scroll: 0,
+                }
+            }
+            (UpdateDialog::Restart, UpdateStatus::Installed { version, .. }) => Dialog {
+                title: format!("Updated to v{version}"),
+                message: "Restart SigilSmith now to use it? Your mod list is already saved."
+                    .to_string(),
+                yes_label: "Restart now".to_string(),
+                no_label: "Later".to_string(),
+                choice: DialogChoice::Yes,
+                kind: DialogKind::UpdateRestart,
+                toggle: None,
+                toggle_alt: None,
+                scroll: 0,
+            },
+            (UpdateDialog::Command, UpdateStatus::Ready { release, command }) => Dialog {
+                title: format!("v{} is downloaded and checked", release.version),
+                message: format!(
+                    "Install it with this command, then restart SigilSmith:\n\n{command}"
+                ),
+                yes_label: "Copy command".to_string(),
+                no_label: "Close".to_string(),
+                choice: DialogChoice::Yes,
+                kind: DialogKind::UpdateCommand {
+                    command: command.clone(),
+                },
+                toggle: None,
+                toggle_alt: None,
+                scroll: 0,
+            },
+            _ => return,
+        };
+        self.open_dialog(dialog);
+    }
+
+    fn start_update_install(&mut self, release: update::Release, automatic: bool) {
+        self.status = format!("Downloading v{}...", release.version);
+        self.log_info(format!("Downloading v{}", release.version));
+        self.update_status = UpdateStatus::Downloading {
+            release: release.clone(),
+        };
+        let tx = self.update_tx.clone();
+        thread::spawn(move || {
+            let result = update::install(&release).map_err(|err| format!("{err:#}"));
+            let _ = tx.send(UpdateMessage::Installed {
+                release: Box::new(release),
+                automatic,
+                result,
+            });
+        });
+    }
+
+    fn update_install_finished(
+        &mut self,
+        release: update::Release,
+        automatic: bool,
+        result: std::result::Result<update::InstallOutcome, String>,
+    ) {
+        let version = release.version.clone();
+        match result {
+            Ok(update::InstallOutcome::Installed { restart }) => {
+                self.log_info(format!("Installed v{version} at {}", restart.display()));
+                self.update_status = UpdateStatus::Installed {
+                    version: version.clone(),
+                    restart,
+                };
+                self.status = format!("Updated to v{version}: restart to use it");
+                if automatic {
+                    self.set_toast(
+                        &format!("Updated to v{version}: restart to use it"),
+                        ToastLevel::Info,
+                        Duration::from_secs(5),
+                    );
+                } else {
+                    self.queue_update_dialog(UpdateDialog::Restart, false);
+                }
+            }
+            Ok(update::InstallOutcome::Manual { path, command }) => {
+                self.log_info(format!(
+                    "Downloaded and checked v{version}: {}",
+                    path.display()
+                ));
+                self.log_info(format!("Install it with: {command}"));
+                self.status = format!("v{version} downloaded: install it from Esc → Updates");
+                self.update_status = UpdateStatus::Ready { release, command };
+                self.queue_update_dialog(UpdateDialog::Command, false);
+            }
+            Err(error) => {
+                self.log_error(format!("Update to v{version} failed: {error}"));
+                self.status = "Update failed: see log".to_string();
+                // Back to available, so it can be tried again from Settings.
+                self.update_status = UpdateStatus::Available { release };
+                if automatic {
+                    self.set_toast(
+                        "Automatic update failed: see log",
+                        ToastLevel::Warn,
+                        Duration::from_secs(5),
+                    );
+                } else if self.dialog.is_none() {
+                    self.open_dialog(Dialog {
+                        title: "Update failed".to_string(),
+                        message: format!("Nothing was changed.\n\n{}", capitalize_first(&error)),
+                        yes_label: "OK".to_string(),
+                        no_label: String::new(),
+                        choice: DialogChoice::Yes,
+                        kind: DialogKind::UpdateNotice,
+                        toggle: None,
+                        toggle_alt: None,
+                        scroll: 0,
+                    });
+                }
             }
         }
     }
 
-    fn restart_after_update(&mut self) {
-        let args: Vec<String> = std::env::args().skip(1).collect();
-        let exec = std::env::var("APPIMAGE")
-            .ok()
-            .map(PathBuf::from)
-            .or_else(|| std::env::current_exe().ok());
-        let Some(exec) = exec else {
-            self.log_warn("Restart failed: no executable path".to_string());
+    fn skip_update_version(&mut self, version: &str) {
+        self.app_config.skipped_update_version = Some(version.to_string());
+        if let Err(err) = self.app_config.save() {
+            self.log_error(format!("Save settings failed: {err}"));
+        }
+        self.status = format!("Skipped v{version}");
+        self.set_toast(
+            &format!("Skipped v{version}: Esc → Check For Updates still offers it"),
+            ToastLevel::Info,
+            Duration::from_secs(4),
+        );
+    }
+
+    /// Quits so `ui::run` can start the installed update.
+    fn restart_into_update(&mut self) {
+        let UpdateStatus::Installed { restart, .. } = &self.update_status else {
             return;
         };
-
-        match std::process::Command::new(&exec).args(&args).spawn() {
-            Ok(_) => {
-                self.log_info("Restarting after update".to_string());
-                self.should_quit = true;
-            }
-            Err(err) => {
-                self.log_warn(format!("Restart failed: {err}"));
-            }
+        let busy = self.deploy_active
+            || self.deploy_pending
+            || self.import_active.is_some()
+            || self.import_apply_active
+            || !self.import_queue.is_empty();
+        if busy {
+            self.set_toast(
+                "Restart once the deploy or import finishes",
+                ToastLevel::Warn,
+                Duration::from_secs(4),
+            );
+            self.update_dialog_pending = Some(UpdateDialog::Restart);
+            return;
+        }
+        let restart = restart.clone();
+        self.request_quit();
+        if self.should_quit {
+            self.log_info("Restarting into the update".to_string());
+            self.restart_exec = Some(restart);
         }
     }
 
@@ -8210,81 +8462,39 @@ Use Ctrl+R to reset this mod or F12 to reset all pins."
     }
 
     pub fn poll_updates(&mut self) {
-        loop {
-            match self.update_rx.try_recv() {
-                Ok(message) => {
+        while let Ok(message) = self.update_rx.try_recv() {
+            match message {
+                UpdateMessage::Checked(result) => {
                     self.update_active = false;
                     self.update_started_at = None;
-                    match message {
-                        UpdateMessage::Completed(result) => match result {
-                            update::UpdateResult::UpToDate => {
-                                self.update_status = UpdateStatus::UpToDate {
-                                    version: env!("CARGO_PKG_VERSION").to_string(),
-                                };
-                                self.log_info("Update check: up to date".to_string());
+                    self.update_checked_at = Some(Instant::now());
+                    let manual = std::mem::take(&mut self.update_check_manual);
+                    match result {
+                        Ok(update::CheckResult::UpToDate) => {
+                            let version = env!("CARGO_PKG_VERSION").to_string();
+                            self.log_info("Update check: up to date".to_string());
+                            if manual {
+                                self.status = format!("SigilSmith v{version} is the latest");
                             }
-                            update::UpdateResult::Applied(info) => {
-                                self.update_status = UpdateStatus::Applied { info: info.clone() };
-                                self.status = format!("Update applied: v{}", info.version);
-                                self.log_info(format!(
-                                    "Update applied: v{} ({:?}, {})",
-                                    info.version, info.kind, info.asset_name
-                                ));
-                                self.set_toast(
-                                    &format!("Updated to v{} (restart to use)", info.version),
-                                    ToastLevel::Info,
-                                    Duration::from_secs(4),
-                                );
-                            }
-                            update::UpdateResult::Ready {
-                                info,
-                                path,
-                                instructions,
-                            } => {
-                                self.update_status = UpdateStatus::Available {
-                                    info: info.clone(),
-                                    path: path.clone(),
-                                    instructions: instructions.clone(),
-                                };
-                                self.status = format!("Update ready: v{}", info.version);
-                                self.log_info(format!(
-                                    "Update ready: v{} ({:?}, {})",
-                                    info.version,
-                                    info.kind,
-                                    path.display()
-                                ));
-                                self.log_info(instructions.clone());
-                                self.set_toast(
-                                    &format!("Update ready: v{} (see log)", info.version),
-                                    ToastLevel::Info,
-                                    Duration::from_secs(4),
-                                );
-                            }
-                            update::UpdateResult::Skipped { version, reason } => {
-                                self.update_status = UpdateStatus::Skipped {
-                                    version: version.clone(),
-                                    reason: reason.clone(),
-                                };
-                                self.log_warn(format!(
-                                    "Update available (v{version}) skipped: {reason}"
-                                ));
-                            }
-                        },
-                        UpdateMessage::Failed { error } => {
-                            self.update_active = false;
-                            self.update_status = UpdateStatus::Failed {
-                                error: error.clone(),
-                            };
+                            self.update_status = UpdateStatus::UpToDate { version };
+                        }
+                        Ok(update::CheckResult::Available(release)) => {
+                            self.update_found(*release, manual);
+                        }
+                        Err(error) => {
                             self.log_warn(format!("Update check failed: {error}"));
+                            if manual {
+                                self.status = "Update check failed: see log".to_string();
+                            }
+                            self.update_status = UpdateStatus::Failed;
                         }
                     }
                 }
-                Err(TryRecvError::Empty) => break,
-                Err(TryRecvError::Disconnected) => {
-                    self.update_active = false;
-                    self.update_started_at = None;
-                    break;
-                }
+                UpdateMessage::Installed {
+                    release,
+                    automatic,
+                    result,
+                } => self.update_install_finished(*release, automatic, result),
             }
         }
     }
@@ -10757,6 +10967,9 @@ Use Ctrl+R to reset this mod or F12 to reset all pins."
             {
                 return Some("Copy launch option");
             }
+            DialogKind::UpdateAvailable { release } if release.can_install() => {
+                return Some("Skip this version");
+            }
             _ => return None,
         };
         Some(if count == 1 {
@@ -11179,6 +11392,34 @@ Use Ctrl+R to reset this mod or F12 to reset all pins."
                     }
                 }
             }
+            DialogKind::UpdateAvailable { release } => match choice {
+                DialogChoice::Yes if release.can_install() => {
+                    self.start_update_install(release, false);
+                }
+                DialogChoice::Yes | DialogChoice::Alt => {
+                    self.skip_update_version(&release.version);
+                }
+                DialogChoice::No | DialogChoice::Cancel => {
+                    self.status =
+                        format!("v{} is waiting in Esc → Check For Updates", release.version);
+                }
+            },
+            DialogKind::UpdateRestart => {
+                if matches!(choice, DialogChoice::Yes) {
+                    self.restart_into_update();
+                }
+            }
+            DialogKind::UpdateCommand { command } => {
+                if matches!(choice, DialogChoice::Yes) {
+                    let message = if self.copy_to_clipboard(&command) {
+                        "Copied the install command"
+                    } else {
+                        "Couldn't copy: the command is in the log"
+                    };
+                    self.set_toast(message, ToastLevel::Info, Duration::from_secs(3));
+                }
+            }
+            DialogKind::UpdateNotice => {}
             DialogKind::ImportSummary => {}
             DialogKind::EnableAllVisible => {}
             DialogKind::DisableAllVisible => {}
@@ -15312,6 +15553,15 @@ fn path_within_root(path: &Path, root: &Path) -> bool {
         }
     }
     path.starts_with(root)
+}
+
+/// "the download failed" → "The download failed".
+fn capitalize_first(text: &str) -> String {
+    let mut chars = text.chars();
+    match chars.next() {
+        Some(first) => first.to_uppercase().chain(chars).collect(),
+        None => String::new(),
+    }
 }
 
 #[cfg(test)]

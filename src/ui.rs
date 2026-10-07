@@ -7,7 +7,9 @@ use crate::{
         UpdateStatus,
     },
     bg3::{ScriptExtenderSetup, SetupCheck},
+    config::UpdateMode,
     library::{InstallTarget, ModEntry, TargetKind},
+    update::{self, UpdateKind},
 };
 use anyhow::Result;
 use arboard::Clipboard;
@@ -201,6 +203,7 @@ fn run_loop(terminal: &mut Terminal<impl Backend>, app: &mut App) -> Result<()> 
 }
 
 fn handle_key(app: &mut App, key: KeyEvent) -> Result<()> {
+    app.last_key_at = Instant::now();
     if app.dialog.is_some() {
         return handle_dialog_mode(app, key);
     }
@@ -627,6 +630,7 @@ enum SettingsItemKind {
     ToggleStartupDependencyNotice,
     ToggleScriptExtenderNotice,
     DefaultSortColumn,
+    UpdateMode,
     ActionCheckUpdates,
     ActionWhatsNew,
     ActionScriptExtenderSetup,
@@ -742,6 +746,12 @@ fn settings_items(app: &App) -> Vec<SettingsItem> {
         SettingsItem {
             label: "Default Sort Column".to_string(),
             kind: SettingsItemKind::DefaultSortColumn,
+            checked: None,
+            selectable: true,
+        },
+        SettingsItem {
+            label: "Updates".to_string(),
+            kind: SettingsItemKind::UpdateMode,
             checked: None,
             selectable: true,
         },
@@ -893,13 +903,18 @@ fn export_menu_items() -> Vec<ExportMenuItem> {
 fn update_menu_label(app: &App) -> String {
     match &app.update_status {
         UpdateStatus::Checking => "Check For Updates (Checking...)".to_string(),
-        UpdateStatus::Available { info, .. } => {
-            format!("Update Available: v{} (Enter To Update)", info.version)
+        UpdateStatus::Available { release } => {
+            format!("Update Available: v{} (Enter)", release.version)
         }
-        UpdateStatus::Applied { info } => format!("Update Applied: v{} (Restart)", info.version),
+        UpdateStatus::Downloading { release } => {
+            format!("Downloading v{}...", release.version)
+        }
+        UpdateStatus::Ready { release, .. } => {
+            format!("Install v{} (Enter Shows How)", release.version)
+        }
+        UpdateStatus::Installed { version, .. } => format!("Restart To Use v{version}"),
         UpdateStatus::UpToDate { .. } => "Check For Updates (Latest)".to_string(),
-        UpdateStatus::Failed { .. } => "Check For Updates (Failed; Retry)".to_string(),
-        UpdateStatus::Skipped { .. } => "Check For Updates (See Log)".to_string(),
+        UpdateStatus::Failed => "Check For Updates (Failed; Retry)".to_string(),
         UpdateStatus::Idle => "Check For Updates".to_string(),
     }
 }
@@ -1134,13 +1149,13 @@ fn handle_settings_menu(app: &mut App, key: KeyEvent) -> Result<()> {
                         app.close_settings_menu();
                         app.open_script_extender_setup();
                     }
-                    SettingsItemKind::ActionCheckUpdates => {
-                        if matches!(app.update_status, UpdateStatus::Available { .. }) {
-                            app.apply_ready_update();
-                        } else {
-                            app.request_update_check();
+                    SettingsItemKind::UpdateMode => {
+                        if let Err(err) = app.cycle_update_mode() {
+                            app.status = format!("Settings update failed: {err}");
+                            app.log_error(format!("Settings update failed: {err}"));
                         }
                     }
+                    SettingsItemKind::ActionCheckUpdates => app.update_menu_action(),
                     SettingsItemKind::SigilLinkHeader
                     | SettingsItemKind::SigilLinkDebugHeader
                     | SettingsItemKind::ProfilesHeader
@@ -2301,6 +2316,34 @@ fn draw(frame: &mut Frame<'_>, app: &mut App) {
         .style(Style::default().bg(theme.header_bg))
         .alignment(Alignment::Left);
     frame.render_widget(title, header_line_chunks[0]);
+    if let Some(note) = app.update_header_note() {
+        // Right-aligned, in the room the centered tabs leave.
+        let width = tabs_area.width as usize;
+        let tabs_width = build_focus_tabs_line(app, &theme).width();
+        let room = width.saturating_sub((width.saturating_sub(tabs_width)) / 2 + tabs_width);
+        let short = note.strip_suffix(" (Esc)").unwrap_or(&note).to_string();
+        if let Some(text) = [note, short]
+            .into_iter()
+            .find(|text| display_width(text) + 2 <= room)
+        {
+            let text_width = display_width(&text) as u16;
+            let area = Rect {
+                x: tabs_area.x + tabs_area.width - text_width,
+                width: text_width,
+                ..tabs_area
+            };
+            frame.render_widget(
+                Paragraph::new(Span::styled(
+                    text,
+                    Style::default()
+                        .fg(theme.warning)
+                        .add_modifier(Modifier::BOLD),
+                ))
+                .style(Style::default().bg(theme.header_bg)),
+                area,
+            );
+        }
+    }
     if status_area.width > 0 && status_area.height > 0 {
         let overrides_focused = app.focus == Focus::Conflicts;
         draw_status_panel(
@@ -4117,6 +4160,125 @@ fn restore_backup_lines(
     lines
 }
 
+/// The update prompt: how this install updates, What's New, and the
+/// release page. The notes are a left-aligned block, centered as one.
+fn update_prompt_lines(
+    release: &update::Release,
+    max_width: usize,
+    theme: &Theme,
+) -> Vec<Line<'static>> {
+    const MAX_NOTES: usize = 10;
+    let muted = Style::default().fg(theme.muted);
+    let text = Style::default().fg(theme.text);
+    let how = match release.kind {
+        UpdateKind::Pacman => {
+            "Installed with pacman: update it with your AUR helper (e.g. yay -Syu)."
+        }
+        UpdateKind::SourceBuild => "Built from source: git pull, then cargo build --release.",
+        _ if !release.can_install() => "No download for this install: see the release page.",
+        _ if release.installs_in_place() => {
+            "Update now downloads it, checks it, and replaces this copy."
+        }
+        _ => "Update now downloads and checks it, then shows the install command.",
+    };
+    let mut lines = vec![
+        Line::from(Span::styled(
+            format!("You have v{}.", env!("CARGO_PKG_VERSION")),
+            muted,
+        )),
+        Line::from(Span::styled(how.to_string(), text)),
+    ];
+    if !release.notes.is_empty() {
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            "What's new",
+            Style::default()
+                .fg(theme.accent)
+                .add_modifier(Modifier::BOLD),
+        )));
+        let width = max_width.max(12);
+        let mut notes = Vec::new();
+        for note in release.notes.iter().take(MAX_NOTES) {
+            for (index, row) in wrap_words(note, width - 2).into_iter().enumerate() {
+                let lead = if index == 0 { "• " } else { "  " };
+                notes.push(Line::from(vec![
+                    Span::styled(lead, muted),
+                    Span::styled(row, text),
+                ]));
+            }
+        }
+        if release.notes.len() > MAX_NOTES {
+            let more = release.notes.len() - MAX_NOTES;
+            notes.push(Line::from(Span::styled(
+                format!("  +{more} more on the release page"),
+                muted,
+            )));
+        }
+        let block_width = notes.iter().map(Line::width).max().unwrap_or(0);
+        for line in &mut notes {
+            let pad = block_width.saturating_sub(line.width());
+            if pad > 0 {
+                line.spans.push(Span::raw(" ".repeat(pad)));
+            }
+        }
+        lines.extend(notes);
+    }
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(release.page_url.clone(), muted)));
+    lines
+}
+
+/// The install command for a downloaded update, as a left-aligned block so
+/// long paths read in one piece.
+fn update_command_lines(command: &str, max_width: usize, theme: &Theme) -> Vec<Line<'static>> {
+    let text = Style::default().fg(theme.text);
+    let mut lines = vec![
+        Line::from(Span::styled(
+            "Install it with this command, then restart SigilSmith:",
+            text,
+        )),
+        Line::from(""),
+    ];
+    let rows = wrap_words(command, max_width.max(12));
+    let width = rows.iter().map(|row| display_width(row)).max().unwrap_or(0);
+    for row in rows {
+        let pad = width.saturating_sub(display_width(&row));
+        lines.push(Line::from(Span::styled(
+            format!("{row}{}", " ".repeat(pad)),
+            Style::default().fg(theme.accent),
+        )));
+    }
+    lines
+}
+
+/// Splits `text` into rows of at most `width` columns at spaces; a word
+/// longer than a row is broken.
+fn wrap_words(text: &str, width: usize) -> Vec<String> {
+    let width = width.max(1);
+    let mut rows = Vec::new();
+    let mut row = String::new();
+    for word in text.split_whitespace() {
+        let mut word: Vec<char> = word.chars().collect();
+        let used = row.chars().count();
+        if used > 0 && used + 1 + word.len() <= width {
+            row.push(' ');
+            row.extend(&word);
+            continue;
+        }
+        if used > 0 {
+            rows.push(std::mem::take(&mut row));
+        }
+        while word.len() > width {
+            rows.push(word.drain(..width).collect());
+        }
+        row.extend(word);
+    }
+    if !row.is_empty() || rows.is_empty() {
+        rows.push(row);
+    }
+    rows
+}
+
 fn wrapped_rows(text: &str, width: usize) -> usize {
     if width == 0 {
         return 1;
@@ -4278,6 +4440,8 @@ fn build_dialog_message_lines(
             groups,
             ..
         } => restore_backup_lines(reason, *timestamp, groups, max_width, theme),
+        DialogKind::UpdateAvailable { release } => update_prompt_lines(release, max_width, theme),
+        DialogKind::UpdateCommand { command } => update_command_lines(command, max_width, theme),
         _ => dialog
             .message
             .lines()
@@ -7131,6 +7295,16 @@ fn build_settings_menu_lines(
                     vec![Span::styled(value, Style::default().fg(theme.text))],
                 ));
             }
+            SettingsItemKind::UpdateMode => {
+                let value = app.app_config.update_mode.label();
+                lines.push(kv_row(
+                    MenuRowKind::None,
+                    &item.label,
+                    default_sort_key_w,
+                    style,
+                    vec![Span::styled(value, Style::default().fg(theme.text))],
+                ));
+            }
             SettingsItemKind::ToggleEnableModsAfterImport
             | SettingsItemKind::ToggleDeleteModFilesOnRemove
             | SettingsItemKind::SigilLinkToggle
@@ -7344,14 +7518,25 @@ fn build_export_menu_lines(theme: &Theme, menu: &crate::app::ExportMenu) -> Vec<
 fn update_status_line(app: &App) -> String {
     match &app.update_status {
         UpdateStatus::Checking => "Updates: Checking...".to_string(),
-        UpdateStatus::Available { info, .. } => {
-            format!("Updates: v{} Available (Press Enter)", info.version)
+        UpdateStatus::Available { release } if app.update_skipped(&release.version) => {
+            format!("Updates: v{} Skipped", release.version)
         }
-        UpdateStatus::Applied { info } => format!("Updates: Applied v{} (Restart)", info.version),
-        UpdateStatus::UpToDate { version } => format!("Updates: Latest (v{})", version),
-        UpdateStatus::Failed { error } => format!("Updates: Failed ({error})"),
-        UpdateStatus::Skipped { version, reason } => {
-            format!("Updates: v{version} Skipped ({reason})")
+        UpdateStatus::Available { release } => {
+            format!("Updates: v{} Available", release.version)
+        }
+        UpdateStatus::Downloading { release } => {
+            format!("Updates: Downloading v{}", release.version)
+        }
+        UpdateStatus::Ready { release, .. } => {
+            format!("Updates: v{} Downloaded", release.version)
+        }
+        UpdateStatus::Installed { version, .. } => {
+            format!("Updates: v{version} Installed (Restart)")
+        }
+        UpdateStatus::UpToDate { version } => format!("Updates: Latest (v{version})"),
+        UpdateStatus::Failed => "Updates: Check Failed (See Log)".to_string(),
+        UpdateStatus::Idle if app.app_config.update_mode == UpdateMode::Off => {
+            "Updates: Off".to_string()
         }
         UpdateStatus::Idle => "Updates: Not Checked".to_string(),
     }

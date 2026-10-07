@@ -55,7 +55,7 @@ Multi-game support is coming next via an open adapter template (BG3-first today,
 - Overrides panel for fast conflict resolution with inline winners.
 - Missing mod placeholders + dependency dialogs to keep order clean.
 - Native mod.io entries alongside manual installs.
-- Auto-update checks with clear release notes.
+- Updates that ask first, show What's New, and check every download against its published SHA-256 (Settings → Updates: Ask, Automatic or Off).
 - Fast, readable TUI layout with clear focus states and full-width striping.
 
 ## What's New (0.5.0 → 0.9.0)

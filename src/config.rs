@@ -43,6 +43,42 @@ pub struct AppConfig {
     pub last_whats_new_version: Option<String>,
     #[serde(default)]
     pub default_sort_column: Option<String>,
+    #[serde(default)]
+    pub update_mode: UpdateMode,
+    /// A release the user chose to skip: no prompt or header note for it.
+    #[serde(default)]
+    pub skipped_update_version: Option<String>,
+}
+
+/// What SigilSmith does when a new version is out.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum UpdateMode {
+    /// Check at startup and ask before downloading anything.
+    #[default]
+    Ask,
+    /// Check at startup and install in place where possible; ask otherwise.
+    Automatic,
+    /// Only check from Settings.
+    Off,
+}
+
+impl UpdateMode {
+    pub fn label(self) -> &'static str {
+        match self {
+            UpdateMode::Ask => "Ask",
+            UpdateMode::Automatic => "Automatic",
+            UpdateMode::Off => "Off",
+        }
+    }
+
+    pub fn next(self) -> Self {
+        match self {
+            UpdateMode::Ask => UpdateMode::Automatic,
+            UpdateMode::Automatic => UpdateMode::Off,
+            UpdateMode::Off => UpdateMode::Ask,
+        }
+    }
 }
 
 impl AppConfig {
@@ -80,6 +116,8 @@ impl AppConfig {
             sigillink_pin_notice_dismissed: false,
             last_whats_new_version: None,
             default_sort_column: None,
+            update_mode: UpdateMode::Ask,
+            skipped_update_version: None,
         };
         config.save()?;
         Ok(config)
