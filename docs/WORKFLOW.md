@@ -13,8 +13,8 @@ ignored; never commit it. This index and its checks work without that file.
 | Documentation/routing only | Run `python3 -B scripts/test_workflow_docs.py` from the repository root; [the local check](../scripts/test_workflow_docs.py) also runs in docs-only CI |
 
 Release, push, tag, upload, and publication require explicit user authorization.
-Keep application data and unrelated work intact. The release checklist has no
-maintained mod-site publishing runbook; establish those steps before publishing.
+Keep application data and unrelated work intact. The release checklist covers
+Nexus Mods only; establish the steps for any other mod site before publishing.
 
 Open only the task's relevant documentation and source. Use the narrowest useful
 verification; documentation checks do not run Rust builds, packaging, releases,
