@@ -10472,12 +10472,15 @@ fn build_whats_new_lines(theme: &Theme, width: usize) -> Vec<Line<'static>> {
 
     let banner_width = 108usize;
     let banner = [
-        "      .-====================-.",
-        "   .-'  *  o  *  o  *  o  *  '-.",
-        "  /  *   .-''-.  /\\  .-''-.   * \\",
-        " |  o   /  /\\  \\ || /  /\\  \\   o |",
-        "  \\ *  \\  \\/  / || \\  \\/  /  * /",
-        "   '-.  '----'  ||  '----'  .-' v0.9.8",
+        "      .-====================-.".to_string(),
+        "   .-'  *  o  *  o  *  o  *  '-.".to_string(),
+        "  /  *   .-''-.  /\\  .-''-.   * \\".to_string(),
+        " |  o   /  /\\  \\ || /  /\\  \\   o |".to_string(),
+        "  \\ *  \\  \\/  / || \\  \\/  /  * /".to_string(),
+        format!(
+            "   '-.  '----'  ||  '----'  .-' v{}",
+            env!("CARGO_PKG_VERSION")
+        ),
     ];
     for line in banner {
         let padded = format!("{line:<banner_width$}");
@@ -10519,6 +10522,104 @@ fn build_whats_new_lines(theme: &Theme, width: usize) -> Vec<Line<'static>> {
         )));
     }
 
+    push_section(&mut lines, "Backups You Can Undo", width, theme);
+    push_bullet(
+        &mut lines,
+        width,
+        "b opens a Backups list that shows what each restore would change before you pick one.",
+        body_style,
+    );
+    push_bullet(
+        &mut lines,
+        width,
+        "Restoring saves your setup as \"Before restore\" first, so any restore can be undone.",
+        body_style,
+    );
+    push_bullet(
+        &mut lines,
+        width,
+        "SigilSmith keeps the newest 50 backups and deletes older ones.",
+        body_style,
+    );
+    lines.push(Line::from(""));
+
+    push_section(&mut lines, "Updates Ask First", width, theme);
+    push_bullet(
+        &mut lines,
+        width,
+        "A popup shows what's new, with Update now, Skip this version, or Later.",
+        body_style,
+    );
+    push_bullet(
+        &mut lines,
+        width,
+        "Settings → Updates: Ask, Automatic, or Off.",
+        body_style,
+    );
+    push_bullet(
+        &mut lines,
+        width,
+        "Every download must match its published SHA-256, or it isn't installed.",
+        body_style,
+    );
+    lines.push(Line::from(""));
+
+    push_section(&mut lines, "Script Extender", width, theme);
+    push_bullet(
+        &mut lines,
+        width,
+        "SE and Os in the mod list mark Script Extender and Osiris mods.",
+        body_style,
+    );
+    push_bullet(
+        &mut lines,
+        width,
+        "Enabling one checks your setup; \"Set up for me\" installs the Script Extender under Proton.",
+        body_style,
+    );
+    lines.push(Line::from(""));
+
+    push_section(&mut lines, "Fixes", width, theme);
+    push_bullet(
+        &mut lines,
+        width,
+        "Paks in the older LSPK v15/v16 format (KaiLime UI is one) import as Pak mods. If Details says \"Remove and import again\", do that once.",
+        body_style,
+    );
+    push_bullet(
+        &mut lines,
+        width,
+        "Choosing a target a mod can't use now says why.",
+        body_style,
+    );
+    push_bullet(
+        &mut lines,
+        width,
+        "Dates and times show in your local time zone.",
+        body_style,
+    );
+    lines.push(Line::from(""));
+
+    push_section(&mut lines, "Easier Keys", width, theme);
+    push_bullet(
+        &mut lines,
+        width,
+        "File pickers: type a name to jump to it.",
+        body_style,
+    );
+    push_bullet(
+        &mut lines,
+        width,
+        "Clear target overrides is now Shift+C.",
+        body_style,
+    );
+    lines.push(Line::from(""));
+
+    lines.push(Line::from(Span::styled(
+        truncate_text("Earlier versions", width),
+        muted_style,
+    )));
+    lines.push(Line::from(""));
     push_section(&mut lines, "More Choices", width, theme);
     push_bullet(
         &mut lines,

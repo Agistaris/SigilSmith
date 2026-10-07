@@ -1,37 +1,23 @@
 # Changelog
 
-## Unreleased
+## 0.9.10
 
-- Backups list: `b` (or Settings → Backups) lists the newest 50 backups with when each was made, what started that deploy, and what restoring it would change, color-coded ("1 moved, 2 on, 1 removed"). A details pane lists the mods under labels (Moved, On, Off, Re-added, Removed, and so on). Enter asks first, shows the full list, and defaults to Cancel. Restoring saves your current setup as "Before restore" first, so a restore can be undone from the same list. Before, `b` could only go back to the last backup.
-- A restore takes the order, on/off state, targets, override choices and profiles from the backup, and keeps today's mod details (names, dependencies, dates). Mods the backup brings back whose files have since been deleted stay off. A restore deploys even with Auto-Deploy off, and the confirm says so.
-- Dates and times (Last Rank, the Created and Added columns, Details, `mods list`) show in your local time zone; they were in UTC.
-- "Time ago" text goes on to months and years ("8 months ago") instead of counting days.
-- Dialogs size themselves to their wrapped text, so long lines are no longer cut off.
-- Two backups made in the same second get separate folders; before, the second overwrote the first.
-- Updates ask first: when a new version is out, a popup lists its highlights with Update now, Skip this version, or Later, and Restart now starts the new version. Before, every check downloaded the update in the background.
-- Settings → Updates: Ask (the default), Automatic (AppImage and .tar.gz installs update themselves), or Off.
-- Downloads must match their published SHA-256, or the update is refused; before, a release without SHA256SUMS.txt installed unchecked. AUR installs and source builds are left to pacman and git, and .deb and .rpm updates show the command to install them.
-
-## 0.9.9
-
-- The mod list marks mods that use the Script Extender (`SE`) or ship Osiris story scripts (`Os`), found from the same files BG3 Mod Manager checks. The details panel shows the required Script Extender version and features. `mods list` shows the markers too, and its JSON output gains `scripts`. Existing libraries rescan once on the first start.
-- Script Extender setup: SigilSmith checks that Steam runs BG3 through Proton, that `DWrite.dll` is in the game's `bin` folder, and that Proton loads it (a `WINEDLLOVERRIDES="DWrite.dll=n,b"` launch option, or a DWrite override in BG3's Proton prefix). The details panel names the first missing piece, and the Context panel adds a Script Extender line while enabled mods need it. Enabling such a mod opens a checklist with a "Set up for me" button and a "Copy launch option" button for anyone who prefers Steam's launch option. Set up for me downloads the latest Script Extender from Norbyte's GitHub releases (checked against GitHub's published SHA-256), puts `DWrite.dll` in `bin`, and turns on the DWrite override in the Proton prefix (keeping the old registry as `user.reg.sigilsmith-backup`). It won't run while BG3 is running. SigilSmith never edits Steam's own settings: forcing Proton stays a Steam setting, and before Proton has run the game once, it copies the launch option for you to paste instead. Settings gains "Script Extender Setup" to open the checklist any time, and "Script Extender Notice" to turn the popup off.
-- The mod list keeps names readable in narrow windows: it hides Created, then Added, then Target, then Kind before squeezing the name (Details still shows them). Before, below about 110 columns the name column shrank to a letter or two.
-- Help gains a "Mod List Markers" section explaining every icon (N, SE, Os, Dep, ⛓, ⛕, 👻); the side legend shows SE and Os on one row so the Manual Pin and Missing Mod File rows fit again.
-- Fix: paks in the older LSPK v15/v16 format, which some LSLib builds still write (KaiLime UI is one), import as Pak mods. SigilSmith couldn't read their meta.lsx before, so it imported them as an Override Pak in the game's Data folder, shown as Loose. SigiLink ranking reads their file lists now too. A mod already imported that way needs removing and importing again.
-- Override paks (a .pak with no meta.lsx, which SigilSmith deploys to the game's Data folder) show as "Override" in the Kind column instead of "Loose", and as "Override Pak" in Details and `mods list`.
-- Choosing a target a mod can't use says why (for example "Override pak (no meta.lsx): Data only" or "Can't use Mods: this mod has no .pak") instead of "Target not present for this mod".
-- Mods an older SigilSmith imported as override paks but that are real Pak mods (like KaiLime UI before the v15/v16 fix) get a "Remove and import again" note in Details and a warning in the log at startup.
-- File pickers (import/export mod lists, log export, folder setup, SigiLink cache): type a name to jump to it, as in a desktop file manager. The typed text shows on the Status line and clears after a second's pause; press `/` first to keep it on until Esc. Pressing the same letter again cycles through names starting with it. j/k now type letters there instead of moving, and Home goes to the top.
-- `b` (restore last backup) asks first, says when that backup was made, and defaults to Cancel. Before, one press replaced the mod list with no prompt. Ctrl+B and Alt+B no longer trigger it.
-- Clear target overrides is Shift+C, like the other bulk actions (A/S/X). Ctrl+C no longer clears them.
-- Leaving move mode any other way (Tab, search, sorting, deploying, opening a dialog) places the mod, as m/Enter does; before, the mod stayed moved on screen but wasn't saved or deployed. Esc still puts it back, and `q` asks you to finish the move first.
-- Deploys and SigiLink auto-ranking wait while a mod is being moved, so a half-finished move is never deployed and ranking can't reshuffle the list mid-move.
-- Backups: SigilSmith keeps the newest 50 and deletes older ones (each deploy writes one, so they could reach hundreds of megabytes). The first deploy after updating removes the old ones.
-- Help and the side legend list the Overrides panel keys correctly (←/→ or 1-9 choose a winner, p picks from a list, c/Backspace clear), and add Esc to cancel a move, O in dialogs, and the file picker keys.
-- Fix: the startup native mod sync no longer marks an outdated metadata cache as current, which could skip the refresh that fills in dependencies and dates.
-- Packaging: the RPM states the SigilSmith Community License (it said MIT) and installs the LICENSE file.
-- Packaging: RPMs build in the v4 format when the build machine has rpmbuild 6.
+- Backups list: `b` (or Settings → Backups) lists the newest 50 backups with when each was made, what started that deploy, and a color-coded summary of what restoring it would change; a details pane lists the mods under labels (Moved, On, Off, Re-added, Removed, and so on). Restoring asks first, shows the full list, defaults to Cancel, and saves your current setup as "Before restore" so it can be undone from the same list. Before, `b` restored only the last backup, with no prompt.
+- A restore takes the order, on/off state, targets, override choices and profiles from the backup, and keeps today's mod details (names, dependencies, dates). Mods whose files have since been deleted stay off. A restore deploys even with Auto-Deploy off.
+- SigilSmith keeps the newest 50 backups and deletes older ones (each deploy writes one, so they could reach hundreds of megabytes). Two backups made in the same second no longer overwrite each other.
+- Updates ask first: a popup lists the new version's highlights with Update now, Skip this version, or Later, and Restart now starts the new version. Before, every check downloaded the update in the background. Settings → Updates picks Ask (the default), Automatic (AppImage and .tar.gz installs update themselves), or Off.
+- Update downloads must match their published SHA-256, or the update is refused; before, a release without SHA256SUMS.txt installed unchecked. AUR installs and source builds are left to pacman and git, and .deb and .rpm updates show the command to install them.
+- The mod list marks mods that use the Script Extender (`SE`) or ship Osiris story scripts (`Os`), found from the same files BG3 Mod Manager checks. Details shows the Script Extender version and features a mod needs; `mods list` shows the markers, and its JSON gains `scripts`. Existing libraries rescan once on first start.
+- Script Extender setup: SigilSmith checks that Steam runs BG3 through Proton, that `DWrite.dll` is in the game's `bin` folder, and that Proton loads it. Enabling a mod that needs it opens a checklist with "Set up for me", which downloads the latest Script Extender from Norbyte's GitHub releases (checked against GitHub's SHA-256), puts `DWrite.dll` in `bin` and turns on the DWrite override in the Proton prefix (backing up `user.reg` first), and "Copy launch option" for anyone who prefers `WINEDLLOVERRIDES="DWrite.dll=n,b" %command%`. SigilSmith never edits Steam's own settings and won't set up while BG3 is running. Settings gains "Script Extender Setup" and "Script Extender Notice".
+- Fix: paks in the older LSPK v15/v16 format (KaiLime UI is one) import as Pak mods; before, they were imported as override paks in the Data folder and shown as Loose. A mod already imported that way gets a "Remove and import again" note in Details.
+- Override paks (a .pak with no meta.lsx, deployed to the game's Data folder) show as "Override" instead of "Loose", and choosing a target a mod can't use says why instead of "Target not present for this mod".
+- The mod list keeps names readable in narrow windows by hiding Created, Added, Target, then Kind first (Details still shows them).
+- File pickers: type a name to jump to it, as in a desktop file manager. The same letter again cycles through matches, and `/` keeps the typed text until Esc.
+- Clear target overrides is Shift+C, like the other bulk actions (A/S/X); Ctrl+C no longer clears them. Leaving move mode any other way places the mod as m/Enter does, and deploys and SigiLink auto-ranking wait until a move is finished.
+- Dates and times show in your local time zone instead of UTC, "time ago" goes on to months and years, and dialogs size themselves to their text so long lines are no longer cut off.
+- Help gains a "Mod List Markers" section explaining every icon, and Help and the side legend list the Overrides panel and file picker keys correctly.
+- Fix: the startup native mod sync no longer marks an outdated metadata cache as current, which could skip filling in dependencies and dates.
+- Packaging: the RPM states the SigilSmith Community License (it said MIT), installs the LICENSE file, and builds in the v4 format with rpmbuild 6.
 
 ## 0.9.8
 
