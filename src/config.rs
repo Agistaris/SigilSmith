@@ -144,6 +144,12 @@ pub struct GameConfig {
     pub game_root: PathBuf,
     pub larian_dir: PathBuf,
     pub active_profile: String,
+    /// A Larian folder the person chose not to move their setup to; not offered again.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub declined_move: Option<PathBuf>,
+    /// Larian folders whose leftover SigilSmith links the person chose to keep.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub keep_links_in: Vec<PathBuf>,
 }
 
 impl GameConfig {
@@ -175,6 +181,8 @@ impl GameConfig {
             game_root,
             larian_dir,
             active_profile: "Default".to_string(),
+            declined_move: None,
+            keep_links_in: Vec::new(),
         };
 
         config.save()?;

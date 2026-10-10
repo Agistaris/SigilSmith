@@ -61,6 +61,11 @@ pub fn create_backup(
     if let Some(modsettings_path) = modsettings_path.filter(|path| path.exists()) {
         let _ = fs::copy(modsettings_path, backup_dir.join("modsettings.lsx"));
     }
+    // The game paths, so a backup also records which Larian folder it was for.
+    let config_path = config.data_dir.join("config.json");
+    if config_path.exists() {
+        let _ = fs::copy(&config_path, backup_dir.join("config.json"));
+    }
 
     let meta = BackupMeta {
         timestamp: stamp,
@@ -506,6 +511,7 @@ pub fn restored_library(now: &Library, mut then: Library) -> Library {
         .iter()
         .map(|entry| (entry.id.as_str(), entry))
         .collect();
+    crate::repair::apply_renamed_ids(&mut then, &now.renamed_ids);
     for entry in &mut then.mods {
         if let Some(existing) = current.get(entry.id.as_str()) {
             let target_overrides = std::mem::take(&mut entry.target_overrides);
@@ -518,6 +524,8 @@ pub fn restored_library(now: &Library, mut then: Library) -> Library {
     then.metadata_cache_key = now.metadata_cache_key.clone();
     then.modsettings_hash = now.modsettings_hash.clone();
     then.modsettings_sync_enabled = now.modsettings_sync_enabled;
+    then.repair_version = now.repair_version;
+    then.renamed_ids = now.renamed_ids.clone();
     if !then
         .profiles
         .iter()
@@ -584,6 +592,8 @@ mod tests {
             metadata_cache_key: None,
             modsettings_hash: None,
             modsettings_sync_enabled: true,
+            repair_version: 0,
+            renamed_ids: HashMap::new(),
         }
     }
 
@@ -737,6 +747,8 @@ mod tests {
             game_root: root.join("game"),
             larian_dir: root.join("larian"),
             active_profile: "Default".to_string(),
+            declined_move: None,
+            keep_links_in: Vec::new(),
         };
         let first =
             create_backup(&config, &library(&[("Default", &["a"])]), None, Some("one")).unwrap();

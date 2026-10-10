@@ -358,6 +358,12 @@ fn handle_dialog_mode(app: &mut App, key: KeyEvent) -> Result<()> {
                         app.dialog_set_choice(DialogChoice::Cancel);
                         app.dialog_confirm();
                     }
+                    // Either answer lasts, so Esc only puts the question off until the
+                    // next start.
+                    DialogKind::ResumeMove { .. } | DialogKind::StrayLinks { .. } => {
+                        app.close_dialog();
+                        app.status = "Skipped until next start".to_string();
+                    }
                     _ => {
                         app.dialog_set_choice(DialogChoice::No);
                         app.dialog_confirm();
@@ -1655,7 +1661,9 @@ fn handle_browser_mode(app: &mut App, key: KeyEvent, browser: &mut PathBrowser) 
                 KeyCode::Enter | KeyCode::Char(' ') => {
                     if let Some(entry) = browser.entries.get(browser.selected) {
                         match entry.kind {
-                            PathBrowserEntryKind::Select | PathBrowserEntryKind::SaveHere => {
+                            PathBrowserEntryKind::Select
+                            | PathBrowserEntryKind::SaveHere
+                            | PathBrowserEntryKind::Suggested => {
                                 if entry.selectable {
                                     app.apply_path_browser_selection(
                                         &browser.purpose,
@@ -4483,7 +4491,11 @@ fn script_extender_setup_lines(
             }
         }
     }
+    let launcher_check = setup.needs_launcher_check();
     let summary = match (ready, mods.len()) {
+        (true, _) if launcher_check => {
+            "DWrite.dll is in place. One setting is up to your launcher."
+        }
         (true, _) => "The Script Extender is set up.",
         (false, 0) => "The Script Extender isn't set up yet.",
         (false, 1) => "It isn't set up yet, so the mod's scripts won't run.",
@@ -4491,7 +4503,7 @@ fn script_extender_setup_lines(
     };
     lines.push(Line::from(Span::styled(
         summary,
-        if ready {
+        if ready && !launcher_check {
             Style::default().fg(theme.success)
         } else {
             muted
@@ -4501,14 +4513,39 @@ fn script_extender_setup_lines(
     // The body is centered; padding the checklist and steps to one width
     // keeps them left-aligned as a block.
     let mut block: Vec<Vec<Span<'static>>> = Vec::new();
-    let checks = [
-        (setup.proton_check(), "Steam runs BG3 with Proton"),
-        (
-            setup.installed_check(),
-            "DWrite.dll in the game's bin folder",
-        ),
-        (setup.launch_option_check(), "DWrite override for Proton"),
-    ];
+    let checks: Vec<(SetupCheck, String)> = match &setup.native_extender {
+        Some(extender) if setup.uses_bg3le() => vec![
+            (
+                SetupCheck::Ok,
+                "Steam runs the native Linux build".to_string(),
+            ),
+            (
+                SetupCheck::Ok,
+                match &extender.version {
+                    Some(version) => format!("BG3LE {version} installed"),
+                    None => "BG3LE installed".to_string(),
+                },
+            ),
+            (
+                setup.launch_option_check(),
+                "BG3LE in Steam's launch options".to_string(),
+            ),
+        ],
+        _ => vec![
+            (
+                setup.proton_check(),
+                "Steam runs BG3 with Proton".to_string(),
+            ),
+            (
+                setup.installed_check(),
+                "DWrite.dll in the game's bin folder".to_string(),
+            ),
+            (
+                setup.launch_option_check(),
+                "DWrite override for Proton".to_string(),
+            ),
+        ],
+    };
     for (check, label) in checks {
         let (mark, color) = match check {
             SetupCheck::Ok => ("✓", theme.success),
@@ -4518,6 +4555,12 @@ fn script_extender_setup_lines(
         block.push(vec![
             Span::styled(mark, Style::default().fg(color)),
             Span::styled(format!(" {label}"), text),
+        ]);
+    }
+    if setup.other_launcher {
+        block.push(vec![
+            Span::styled("?", Style::default().fg(theme.warning)),
+            Span::styled(" DWrite override (a launcher setting)", text),
         ]);
     }
     let heading = |label: &'static str| {
@@ -4547,10 +4590,19 @@ fn script_extender_setup_lines(
     if setup.proton_check() == SetupCheck::Missing {
         manual.push([
             "Steam: BG3 > Properties > Compatibility,",
-            "force a Proton version.",
+            "force a Proton version, or install BG3LE",
+        ]);
+        manual.push([
+            "(Nexus mod 25431), the Script Extender",
+            "for the native Linux build.",
         ]);
     }
-    if launch_option_manual {
+    if launch_option_manual && setup.uses_bg3le() {
+        manual.push([
+            "Run BG3LE's install.py again with Steam",
+            "closed, or paste this launch option:",
+        ]);
+    } else if launch_option_manual {
         manual.push([
             "Steam: BG3 > Properties > Launch Options,",
             "paste the copied launch option:",
@@ -4601,6 +4653,21 @@ fn script_extender_setup_lines(
         )));
         lines.push(Line::from(Span::styled(
             setup.suggested_launch_options(),
+            accent,
+        )));
+    }
+    if launcher_check {
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            "SigilSmith can't read the Wine settings of Lutris, Heroic,",
+            muted,
+        )));
+        lines.push(Line::from(Span::styled(
+            "Bottles or other launchers. Add this to BG3's environment there:",
+            muted,
+        )));
+        lines.push(Line::from(Span::styled(
+            crate::bg3::LAUNCHER_DLL_OVERRIDE,
             accent,
         )));
     }
@@ -5752,11 +5819,12 @@ fn draw_backup_browser(frame: &mut Frame<'_>, app: &mut App, theme: &Theme) {
 }
 
 fn draw_sigillink_missing_queue(frame: &mut Frame<'_>, app: &mut App, theme: &Theme) {
-    let (total, trigger) = {
+    let (total, trigger, in_game) = {
         let Some(queue) = app.sigillink_missing_queue() else {
             return;
         };
-        (queue.items.len(), queue.trigger)
+        let in_game = queue.items.iter().filter(|item| item.in_game).count();
+        (queue.items.len(), queue.trigger, in_game)
     };
 
     let area = frame.size();
@@ -5799,8 +5867,15 @@ fn draw_sigillink_missing_queue(frame: &mut Frame<'_>, app: &mut App, theme: &Th
         truncate_text(&summary, inner.width as usize),
         Style::default().fg(theme.muted),
     )));
+    let advice = if in_game == total {
+        "These are in-game mods: start BG3 and its mod manager downloads them."
+    } else if in_game > 0 {
+        "In-game mods: start BG3 to download them. Others: open the Nexus search page and re-import."
+    } else {
+        "Open the Nexus search page and re-import to resolve."
+    };
     header_lines.push(Line::from(Span::styled(
-        "Open the Nexus search page and re-import to resolve.",
+        truncate_text(advice, inner.width as usize),
         Style::default().fg(theme.muted),
     )));
 
@@ -6125,6 +6200,7 @@ fn draw_path_browser(frame: &mut Frame<'_>, app: &App, theme: &Theme, browser: &
                     Style::default().fg(theme.warning)
                 }
             }
+            PathBrowserEntryKind::Suggested => Style::default().fg(theme.accent),
             PathBrowserEntryKind::Parent => Style::default().fg(theme.muted),
             PathBrowserEntryKind::Dir => Style::default().fg(theme.text),
             PathBrowserEntryKind::File => Style::default().fg(theme.text),
@@ -10470,7 +10546,8 @@ fn build_whats_new_lines(theme: &Theme, width: usize) -> Vec<Line<'static>> {
     let body_style = Style::default().fg(theme.text);
     let muted_style = Style::default().fg(theme.muted);
 
-    let banner_width = 108usize;
+    // Padding past the body width would make truncate_text add "...".
+    let banner_width = 108usize.min(width);
     let banner = [
         "      .-====================-.".to_string(),
         "   .-'  *  o  *  o  *  o  *  '-.".to_string(),
@@ -10522,6 +10599,74 @@ fn build_whats_new_lines(theme: &Theme, width: usize) -> Vec<Line<'static>> {
         )));
     }
 
+    push_section(&mut lines, "Native and Proton", width, theme);
+    push_bullet(
+        &mut lines,
+        width,
+        "When Steam starts BG3 in a different Larian folder, SigilSmith asks to move your setup there. Each mod stays one file in SigilSmith's library, and the load order comes along.",
+        body_style,
+    );
+    push_bullet(
+        &mut lines,
+        width,
+        "A backup is made first. Saves only the old folder has can be copied over; nothing is overwritten.",
+        body_style,
+    );
+    push_bullet(
+        &mut lines,
+        width,
+        "In-game mods the new folder hasn't downloaded yet stay on your list and join the load order once the game downloads them.",
+        body_style,
+    );
+    push_bullet(
+        &mut lines,
+        width,
+        "Configure Game Paths lists the Larian folders it finds, including Lutris, Heroic, Faugus and Bottles prefixes.",
+        body_style,
+    );
+    lines.push(Line::from(""));
+
+    push_section(&mut lines, "Script Extender", width, theme);
+    push_bullet(
+        &mut lines,
+        width,
+        "BG3LE, the Script Extender for the native Linux build, is detected.",
+        body_style,
+    );
+    push_bullet(
+        &mut lines,
+        width,
+        "For Lutris, Heroic, Bottles and other launchers, the checklist says what to set there. SigilSmith never changes their settings.",
+        body_style,
+    );
+    lines.push(Line::from(""));
+
+    push_section(&mut lines, "Fixes", width, theme);
+    push_bullet(
+        &mut lines,
+        width,
+        "Mods like KaiLime UI were imported under the wrong ID, which could reset the load order. The first start fixes them after a backup.",
+        body_style,
+    );
+    push_bullet(
+        &mut lines,
+        width,
+        "The crash marker that makes BG3 turn every mod off is removed while the game is closed.",
+        body_style,
+    );
+    push_bullet(
+        &mut lines,
+        width,
+        "Deploys only remove SigilSmith's own links. A file in the way is set aside and put back later.",
+        body_style,
+    );
+    lines.push(Line::from(""));
+
+    lines.push(Line::from(Span::styled(
+        truncate_text("Earlier versions", width),
+        muted_style,
+    )));
+    lines.push(Line::from(""));
     push_section(&mut lines, "Backups You Can Undo", width, theme);
     push_bullet(
         &mut lines,
@@ -10615,11 +10760,6 @@ fn build_whats_new_lines(theme: &Theme, width: usize) -> Vec<Line<'static>> {
     );
     lines.push(Line::from(""));
 
-    lines.push(Line::from(Span::styled(
-        truncate_text("Earlier versions", width),
-        muted_style,
-    )));
-    lines.push(Line::from(""));
     push_section(&mut lines, "More Choices", width, theme);
     push_bullet(
         &mut lines,
@@ -11117,6 +11257,7 @@ mod tests {
             launch_options: Some("gamemoderun %command%".to_string()),
             prefix_override: false,
             prefix_exists: false,
+            ..ScriptExtenderSetup::default()
         };
         let lines = text(&script_extender_setup_lines(
             &["Example".to_string()],
@@ -11177,6 +11318,7 @@ mod tests {
             uses_proton: None,
             prefix_override: false,
             prefix_exists: false,
+            ..ScriptExtenderSetup::default()
         };
         let lines = text(&script_extender_setup_lines(
             &[
@@ -11195,5 +11337,63 @@ mod tests {
             .any(|line| line == "The Script Extender is set up."));
         assert!(!lines.iter().any(|line| line.contains("Set up for me")));
         assert!(!lines.iter().any(|line| line.contains("WINEDLLOVERRIDES")));
+    }
+
+    #[test]
+    fn script_extender_popup_is_honest_about_other_launchers() {
+        let theme = Theme::new();
+        let setup = ScriptExtenderSetup {
+            installed: true,
+            other_launcher: true,
+            ..ScriptExtenderSetup::default()
+        };
+        let lines = text(&script_extender_setup_lines(&[], &setup, &theme));
+        assert!(!lines
+            .iter()
+            .any(|line| line == "The Script Extender is set up."));
+        assert!(lines.iter().any(|line| line.starts_with("✓ DWrite.dll")));
+        assert!(lines
+            .iter()
+            .any(|line| line.starts_with("? DWrite override")));
+        assert!(lines
+            .iter()
+            .any(|line| line == "WINEDLLOVERRIDES=\"DWrite.dll=n,b\""));
+        assert!(!lines.iter().any(|line| line.contains("Steam:")));
+    }
+
+    #[test]
+    fn script_extender_popup_shows_bg3le_on_the_native_build() {
+        let theme = Theme::new();
+        let wrapper = PathBuf::from("/home/me/.local/share/bg3le/bin/bg3le-launch");
+        let setup = ScriptExtenderSetup {
+            uses_proton: Some(false),
+            launch_options: Some("%command%".to_string()),
+            native_extender: Some(crate::bg3::NativeExtender {
+                version: Some("v0.3.4".to_string()),
+                wrapper: wrapper.clone(),
+            }),
+            ..ScriptExtenderSetup::default()
+        };
+        let lines = text(&script_extender_setup_lines(&[], &setup, &theme));
+        assert!(lines
+            .iter()
+            .any(|line| line.starts_with("✓ BG3LE v0.3.4 installed")));
+        assert!(lines
+            .iter()
+            .any(|line| line.starts_with("✗ BG3LE in Steam's launch options")));
+        assert!(!lines.iter().any(|line| line.contains("DWrite")));
+        assert!(!lines.iter().any(|line| line.contains("Proton")));
+        assert!(lines
+            .iter()
+            .any(|line| line == &format!("\"{}\" %command%", wrapper.display())));
+
+        // The native build without BG3LE: Proton or BG3LE.
+        let setup = ScriptExtenderSetup {
+            uses_proton: Some(false),
+            launch_options: Some(String::new()),
+            ..ScriptExtenderSetup::default()
+        };
+        let lines = text(&script_extender_setup_lines(&[], &setup, &theme));
+        assert!(lines.iter().any(|line| line.contains("install BG3LE")));
     }
 }

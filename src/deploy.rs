@@ -4,7 +4,7 @@ use crate::{
     config::GameConfig,
     game,
     library::{FileOverride, InstallTarget, Library, ModEntry, PakInfo, TargetKind},
-    metadata, sigillink,
+    metadata, native_pak, sigillink,
 };
 use anyhow::{Context, Result};
 use larian_formats::bg3::raw::{
@@ -28,6 +28,10 @@ pub struct DeployReport {
     pub overridden_files: usize,
     pub link_mode_summary: String,
     pub warnings: Vec<String>,
+    /// Mods left out of modsettings because their file is missing.
+    pub missing_mods: Vec<String>,
+    /// Fingerprint of the modsettings.lsx this deploy wrote.
+    pub modsettings_hash: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -62,7 +66,8 @@ impl Default for DeployOptions {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum SigilLinkMode {
     Hardlink,
     Symlink,
@@ -252,6 +257,217 @@ fn link_with_mode(
 struct DeployManifest {
     files: Vec<DeployedFile>,
     pak_files: Vec<String>,
+    /// How each path in `files` and `pak_files` was linked, so a later deploy removes a
+    /// file only while it is still SigilSmith's link. Manifests from before 0.9.11 have none.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    links: HashMap<String, LinkRecord>,
+    /// Files that were already at a deploy path, moved aside for SigilSmith's link and put
+    /// back when that link goes away.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    set_aside: Vec<SetAsideFile>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct LinkRecord {
+    source: String,
+    mode: SigilLinkMode,
+    /// Device, inode and size of a hardlink when it was made.
+    #[serde(default)]
+    dev: u64,
+    #[serde(default)]
+    ino: u64,
+    #[serde(default)]
+    size: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct SetAsideFile {
+    original: String,
+    saved: String,
+}
+
+/// File identities in SigilSmith's mod store, read only when an old manifest without link
+/// records has to be checked.
+struct StoreIndex {
+    root: PathBuf,
+    identities: Option<HashSet<(u64, u64)>>,
+}
+
+impl StoreIndex {
+    fn new(cache_root: &Path) -> Self {
+        Self {
+            root: cache_root.join("mods"),
+            identities: None,
+        }
+    }
+
+    fn contains(&mut self, identity: (u64, u64)) -> bool {
+        // No identity to compare (not a Unix filesystem): nothing counts as ours.
+        if identity == (0, 0) {
+            return false;
+        }
+        let root = &self.root;
+        self.identities
+            .get_or_insert_with(|| {
+                WalkDir::new(root)
+                    .follow_links(false)
+                    .into_iter()
+                    .filter_map(Result::ok)
+                    .filter(|entry| entry.file_type().is_file())
+                    .filter_map(|entry| entry.metadata().ok())
+                    .map(|meta| file_identity(&meta))
+                    .collect()
+            })
+            .contains(&identity)
+    }
+}
+
+#[cfg(unix)]
+fn file_identity(meta: &fs::Metadata) -> (u64, u64) {
+    (meta.dev(), meta.ino())
+}
+
+#[cfg(not(unix))]
+fn file_identity(_meta: &fs::Metadata) -> (u64, u64) {
+    (0, 0)
+}
+
+fn record_link(source: &Path, dest: &Path, mode: SigilLinkMode) -> LinkRecord {
+    let meta = fs::symlink_metadata(dest).ok();
+    let (dev, ino) = match (&meta, mode) {
+        (Some(meta), SigilLinkMode::Hardlink) => file_identity(meta),
+        _ => (0, 0),
+    };
+    LinkRecord {
+        source: source.to_string_lossy().to_string(),
+        mode,
+        dev,
+        ino,
+        size: meta.map(|meta| meta.len()).unwrap_or(0),
+    }
+}
+
+/// Whether `path` still holds the link SigilSmith made there: a symlink into the store, or
+/// the same file (device and inode) it hardlinked. Anything else was put there or changed by
+/// someone else and is left alone.
+fn is_our_link(path: &Path, record: Option<&LinkRecord>, store: &mut StoreIndex) -> bool {
+    let Ok(meta) = fs::symlink_metadata(path) else {
+        return false;
+    };
+    if path.starts_with(&store.root) {
+        return false;
+    }
+    if meta.file_type().is_symlink() {
+        let Ok(target) = fs::read_link(path) else {
+            return false;
+        };
+        return target.starts_with(&store.root)
+            || record.is_some_and(|record| target == Path::new(&record.source));
+    }
+    if !meta.is_file() {
+        return false;
+    }
+    match record {
+        Some(record) => {
+            record.mode == SigilLinkMode::Hardlink
+                && record.ino != 0
+                && file_identity(&meta) == (record.dev, record.ino)
+                && meta.len() == record.size
+        }
+        None => store.contains(file_identity(&meta)),
+    }
+}
+
+/// SigilSmith's own deployed files, for code that must not mistake them for files the game
+/// or the player put in the game's folders.
+pub struct DeployedFiles {
+    manifest: DeployManifest,
+    store: std::cell::RefCell<StoreIndex>,
+}
+
+impl DeployedFiles {
+    pub fn load(data_dir: &Path, cache_root: &Path) -> Self {
+        Self {
+            manifest: load_manifest(data_dir).unwrap_or_default(),
+            store: std::cell::RefCell::new(StoreIndex::new(cache_root)),
+        }
+    }
+
+    /// True for a link into SigilSmith's store at `path`, whether or not the last deploy
+    /// recorded it.
+    pub fn is_ours(&self, path: &Path) -> bool {
+        let key = path.to_string_lossy();
+        let record = self.manifest.links.get(key.as_ref());
+        is_our_link(path, record, &mut self.store.borrow_mut())
+    }
+
+    fn recorded(&self) -> impl Iterator<Item = &String> {
+        self.manifest
+            .files
+            .iter()
+            .map(|file| &file.path)
+            .chain(self.manifest.pak_files.iter())
+    }
+
+    /// How the last deploy's links compare with what is on disk now, for a Mods folder in
+    /// `larian_dir`.
+    pub fn drift(&self, larian_dir: &Path) -> LinkDrift {
+        let mut drift = LinkDrift::default();
+        let mut store = self.store.borrow_mut();
+        let paks: HashSet<&String> = self.manifest.pak_files.iter().collect();
+        for path_text in self.recorded() {
+            let path = Path::new(path_text);
+            if paks.contains(path_text) && !path.starts_with(larian_dir) {
+                if fs::symlink_metadata(path).is_ok() {
+                    drift.elsewhere += 1;
+                }
+                continue;
+            }
+            if fs::symlink_metadata(path).is_err() {
+                drift.missing += 1;
+            } else if !is_our_link(path, self.manifest.links.get(path_text), &mut store) {
+                drift.changed += 1;
+            }
+        }
+        drift
+    }
+
+    /// Links to SigilSmith's store in `mods_dir` that the last deploy didn't record, as an
+    /// older version could leave behind when it changed folders.
+    pub fn stray_links_in(&self, mods_dir: &Path) -> Vec<PathBuf> {
+        let recorded: HashSet<&str> = self.recorded().map(String::as_str).collect();
+        let Ok(entries) = fs::read_dir(mods_dir) else {
+            return Vec::new();
+        };
+        let mut store = self.store.borrow_mut();
+        let mut found: Vec<PathBuf> = entries
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .filter(|path| !recorded.contains(path.to_string_lossy().as_ref()))
+            .filter(|path| is_our_link(path, None, &mut store))
+            .collect();
+        found.sort();
+        found
+    }
+
+    /// Removes the paths that are still links to SigilSmith's store and returns how many.
+    pub fn remove_links(&self, paths: &[PathBuf]) -> usize {
+        let mut store = self.store.borrow_mut();
+        paths
+            .iter()
+            .filter(|path| is_our_link(path, None, &mut store) && fs::remove_file(path).is_ok())
+            .count()
+    }
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct LinkDrift {
+    /// Recorded links that are gone.
+    pub missing: usize,
+    /// Recorded paths that hold something else now.
+    pub changed: usize,
+    /// Recorded paks still in another Larian folder's Mods.
+    pub elsewhere: usize,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -330,6 +546,35 @@ pub fn deploy_with_options(
         .filter_map(|entry| mod_map.get(&entry.id).cloned())
         .collect();
 
+    // A mod whose file is gone is left out of modsettings (BG3 drops such entries itself)
+    // and listed, so the rest of the load order still deploys.
+    let native_pak_index = native_pak::build_native_pak_index_cached(&paths.larian_mods_dir);
+    let mut missing_mods = Vec::new();
+    let mut present: HashSet<String> = HashSet::new();
+    for mod_entry in &all_mods {
+        let has_file = mod_entry.targets.iter().all(|target| match target {
+            InstallTarget::Pak { file, info } => {
+                if mod_entry.is_native() {
+                    native_pak::resolve_native_pak_path(info, &native_pak_index).is_some()
+                        || paths.larian_mods_dir.join(file).exists()
+                } else {
+                    library_mod_path(&cache_root, &mod_entry.id)
+                        .join(file)
+                        .exists()
+                }
+            }
+            _ => true,
+        });
+        if has_file {
+            present.insert(mod_entry.id.clone());
+        } else if ordered_mods
+            .iter()
+            .any(|enabled| enabled.id == mod_entry.id)
+        {
+            missing_mods.push(mod_entry.display_name());
+        }
+    }
+
     let mut enabled_paks = Vec::new();
     let mut installed_paks = Vec::new();
     let mut loose_targets = Vec::new();
@@ -342,7 +587,11 @@ pub fn deploy_with_options(
                 continue;
             }
             match target {
-                InstallTarget::Pak { info, .. } => enabled_paks.push(info.clone()),
+                InstallTarget::Pak { info, .. } => {
+                    if present.contains(&mod_entry.id) {
+                        enabled_paks.push(info.clone());
+                    }
+                }
                 InstallTarget::Generated { .. }
                 | InstallTarget::Data { .. }
                 | InstallTarget::Bin { .. } => has_loose = true,
@@ -354,6 +603,9 @@ pub fn deploy_with_options(
     }
 
     for mod_entry in &all_mods {
+        if !present.contains(&mod_entry.id) {
+            continue;
+        }
         for target in &mod_entry.targets {
             let kind = target.kind();
             if !mod_entry.is_target_enabled(kind) {
@@ -375,47 +627,61 @@ pub fn deploy_with_options(
     }
 
     let mut manifest = load_manifest(&config.data_dir)?;
-    let removed_count = remove_previous_deploy(&paths, &mut manifest)?;
-    let warnings = Vec::new();
-    let mut link_modes = LinkModeCache::new(&cache_root)?;
+    merge_set_aside_journal(&config.data_dir, &mut manifest);
+    let mut warnings = Vec::new();
+    let mut store = StoreIndex::new(&cache_root);
+    let (removed_count, restored) =
+        remove_previous_deploy(&mut manifest, &mut store, &mut warnings);
+    let mut deploy_state = DeployState {
+        data_dir: config.data_dir.clone(),
+        store,
+        links: HashMap::new(),
+        pak_files: Vec::new(),
+        set_aside: std::mem::take(&mut manifest.set_aside),
+        restored,
+        warnings,
+    };
 
-    let mut pak_files = Vec::new();
-    for mod_entry in &all_mods {
-        if mod_entry.is_native() {
-            continue;
-        }
-        for target in &mod_entry.targets {
-            let kind = target.kind();
-            if !mod_entry.is_target_enabled(kind) {
-                continue;
-            }
-            if let InstallTarget::Pak { file, info } = target {
-                let source = library_mod_path(&cache_root, &mod_entry.id).join(file);
-                let dest = paths.larian_mods_dir.join(format!("{}.pak", info.folder));
-                fs::create_dir_all(&paths.larian_mods_dir).context("create mods dir")?;
-                let mode = link_modes.mode_for(&paths.larian_mods_dir)?;
-                link_with_mode(&source, &dest, &paths.larian_mods_dir, mode)
-                    .with_context(|| format!("deploy pak {:?}", source))?;
-                pak_files.push(dest.to_string_lossy().to_string());
-            }
-        }
+    let linked = link_mods(
+        &paths,
+        &cache_root,
+        &all_mods,
+        &present,
+        &loose_targets,
+        &file_overrides,
+        &mut manifest,
+        &mut deploy_state,
+    );
+    // Record what was linked even when a link failed part way, so the next deploy can
+    // clean it up and put back anything moved aside.
+    manifest.pak_files = std::mem::take(&mut deploy_state.pak_files);
+    manifest.links = std::mem::take(&mut deploy_state.links);
+    manifest.set_aside = std::mem::take(&mut deploy_state.set_aside);
+    save_manifest(&config.data_dir, &manifest)?;
+    let _ = fs::remove_file(config.data_dir.join(SET_ASIDE_JOURNAL));
+    let (overridden_files, link_mode_summary) = linked?;
+    update_modsettings(&paths, &installed_paks, &enabled_paks)?;
+    let modsettings_hash = read_modsettings_snapshot(&paths.modsettings_path)
+        .ok()
+        .map(|snapshot| modsettings_fingerprint(&snapshot));
+    if modsettings_hash.is_some() {
+        library.modsettings_hash = modsettings_hash.clone();
+    }
+    if let Some(marker) = crate::bg3::clear_crash_marker(&paths.larian_dir) {
+        deploy_state.warnings.push(format!(
+            "Removed {}: BG3 left it after a crash and would have turned every mod off on its next launch",
+            marker.display()
+        ));
     }
 
-    let overridden_files = deploy_loose_files(
-        &paths,
-        &loose_targets,
-        &cache_root,
-        &mut manifest,
-        &file_overrides,
-        &mut link_modes,
-    )?;
-    update_modsettings(&paths, &installed_paks, &enabled_paks)?;
-
-    manifest.pak_files = pak_files;
-    save_manifest(&config.data_dir, &manifest)?;
-
     let file_count = manifest.files.len() + manifest.pak_files.len();
-    let link_mode_summary = link_modes.summary();
+    let mut warnings = deploy_state.warnings;
+    if !missing_mods.is_empty() {
+        warnings.push(format!(
+            "Left out of the load order until their files are back: {}",
+            missing_mods.join(", ")
+        ));
+    }
 
     Ok(DeployReport {
         pak_count: installed_paks.len(),
@@ -425,7 +691,60 @@ pub fn deploy_with_options(
         overridden_files,
         link_mode_summary,
         warnings,
+        missing_mods,
+        modsettings_hash,
     })
+}
+
+/// Links every managed pak into the Mods folder and loose files into the game folder.
+/// Returns the overridden loose file count and the link mode summary.
+#[allow(clippy::too_many_arguments)]
+fn link_mods(
+    paths: &GamePaths,
+    cache_root: &Path,
+    all_mods: &[ModEntry],
+    present: &HashSet<String>,
+    loose_targets: &[ModEntry],
+    file_overrides: &[FileOverride],
+    manifest: &mut DeployManifest,
+    deploy_state: &mut DeployState,
+) -> Result<(usize, String)> {
+    let mut link_modes = LinkModeCache::new(cache_root)?;
+    for mod_entry in all_mods {
+        if mod_entry.is_native() || !present.contains(&mod_entry.id) {
+            continue;
+        }
+        for target in &mod_entry.targets {
+            let kind = target.kind();
+            if !mod_entry.is_target_enabled(kind) {
+                continue;
+            }
+            if let InstallTarget::Pak { file, info } = target {
+                let source = library_mod_path(cache_root, &mod_entry.id).join(file);
+                let dest = paths.larian_mods_dir.join(format!("{}.pak", info.folder));
+                fs::create_dir_all(&paths.larian_mods_dir).context("create mods dir")?;
+                let mode = link_modes.mode_for(&paths.larian_mods_dir)?;
+                deploy_state.make_room(&dest)?;
+                link_with_mode(&source, &dest, &paths.larian_mods_dir, mode)
+                    .with_context(|| format!("deploy pak {:?}", source))?;
+                deploy_state.record(&source, &dest, mode);
+                deploy_state
+                    .pak_files
+                    .push(dest.to_string_lossy().to_string());
+            }
+        }
+    }
+
+    let overridden_files = deploy_loose_files(
+        paths,
+        loose_targets,
+        cache_root,
+        manifest,
+        file_overrides,
+        &mut link_modes,
+        deploy_state,
+    )?;
+    Ok((overridden_files, link_modes.summary()))
 }
 
 pub fn scan_conflicts(config: &GameConfig, library: &Library) -> Result<Vec<ConflictEntry>> {
@@ -453,6 +772,32 @@ pub fn scan_conflicts(config: &GameConfig, library: &Library) -> Result<Vec<Conf
         &file_overrides,
     )?;
     Ok(conflicts)
+}
+
+/// What the native sync compares to notice modsettings.lsx changing outside SigilSmith.
+pub fn modsettings_fingerprint(snapshot: &ModSettingsSnapshot) -> String {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"modsettings-v2");
+    let mut module_ids: Vec<&str> = snapshot
+        .modules
+        .iter()
+        .map(|module| module.info.uuid.as_str())
+        .collect();
+    module_ids.sort();
+    for id in module_ids {
+        hasher.update(id.as_bytes());
+    }
+    let mut enabled_ids: Vec<&str> = snapshot.enabled.iter().map(|id| id.as_str()).collect();
+    enabled_ids.sort();
+    hasher.update(b"|enabled|");
+    for id in enabled_ids {
+        hasher.update(id.as_bytes());
+    }
+    hasher.update(b"|order|");
+    for id in &snapshot.order {
+        hasher.update(id.as_bytes());
+    }
+    hasher.finalize().to_hex().to_string()
 }
 
 pub fn read_modsettings_snapshot(path: &Path) -> Result<ModSettingsSnapshot> {
@@ -768,6 +1113,7 @@ fn deploy_loose_files(
     manifest: &mut DeployManifest,
     file_overrides: &[FileOverride],
     link_modes: &mut LinkModeCache,
+    deploy_state: &mut DeployState,
 ) -> Result<usize> {
     let (plans, _conflicts, overridden_files) =
         build_loose_plan(paths, mods, cache_root, file_overrides)?;
@@ -779,12 +1125,16 @@ fn deploy_loose_files(
             fs::create_dir_all(parent).context("create dir")?;
         }
         let mode = link_modes.mode_for(&plan.dest_root)?;
-        if let Err(err) = link_with_mode(&plan.source, &plan.dest, &plan.dest_root, mode) {
+        let linked = deploy_state
+            .make_room(&plan.dest)
+            .and_then(|()| link_with_mode(&plan.source, &plan.dest, &plan.dest_root, mode));
+        if let Err(err) = linked {
             for path in created.iter().rev() {
                 let _ = fs::remove_file(path);
             }
             return Err(err).context("deploy loose file");
         }
+        deploy_state.record(&plan.source, &plan.dest, mode);
         created.push(plan.dest.clone());
         deployed.push(DeployedFile {
             target: plan.dest_root.to_string_lossy().to_string(),
@@ -1032,35 +1382,177 @@ fn is_ignored_deploy_path(path: &Path) -> bool {
     })
 }
 
-fn remove_previous_deploy(paths: &GamePaths, manifest: &mut DeployManifest) -> Result<usize> {
+/// Removes the last deploy's links wherever they were made (also in a Mods folder SigilSmith
+/// no longer points at), but only while each is still SigilSmith's link, then puts back files
+/// that were moved aside for them. Returns the count removed and the paths put back.
+fn remove_previous_deploy(
+    manifest: &mut DeployManifest,
+    store: &mut StoreIndex,
+    warnings: &mut Vec<String>,
+) -> (usize, HashSet<PathBuf>) {
     let mut removed = 0;
-
-    for file in &manifest.files {
-        let path = PathBuf::from(&file.path);
-        if !path.exists() {
+    let recorded: Vec<String> = manifest
+        .files
+        .iter()
+        .map(|file| file.path.clone())
+        .chain(manifest.pak_files.iter().cloned())
+        .collect();
+    for path_text in recorded {
+        let path = PathBuf::from(&path_text);
+        if fs::symlink_metadata(&path).is_err() {
             continue;
         }
-
-        let allowed = path.starts_with(&paths.data_dir) || path.starts_with(&paths.game_root);
-        if !allowed {
+        if !is_our_link(&path, manifest.links.get(&path_text), store) {
+            warnings.push(format!(
+                "Left {} in place: it changed after SigilSmith deployed it",
+                path.display()
+            ));
             continue;
         }
-
         if fs::remove_file(&path).is_ok() {
             removed += 1;
         }
     }
+    manifest.files.clear();
+    manifest.pak_files.clear();
+    manifest.links.clear();
 
-    for pak_path in &manifest.pak_files {
-        let path = PathBuf::from(pak_path);
-        if path.starts_with(&paths.larian_mods_dir) && path.exists() {
-            if fs::remove_file(&path).is_ok() {
-                removed += 1;
+    let mut restored = HashSet::new();
+    let mut kept = Vec::new();
+    for item in manifest.set_aside.drain(..) {
+        let original = PathBuf::from(&item.original);
+        let saved = PathBuf::from(&item.saved);
+        if fs::symlink_metadata(&saved).is_err() {
+            continue;
+        }
+        if fs::symlink_metadata(&original).is_ok() {
+            // A link an interrupted deploy made there is SigilSmith's own and makes way.
+            let ours = is_our_link(&original, None, store) && fs::remove_file(&original).is_ok();
+            if !ours {
+                warnings.push(format!(
+                    "Kept {} aside: something else is at {} now",
+                    saved.display(),
+                    original.display()
+                ));
+                kept.push(item);
+                continue;
+            }
+        }
+        let moved = original
+            .parent()
+            .map_or(Ok(()), fs::create_dir_all)
+            .and_then(|()| move_file(&saved, &original));
+        match moved {
+            Ok(()) => {
+                remove_empty_parents(&saved);
+                restored.insert(original);
+            }
+            Err(err) => {
+                warnings.push(format!(
+                    "Could not put {} back at {}: {err}",
+                    saved.display(),
+                    original.display()
+                ));
+                kept.push(item);
             }
         }
     }
+    manifest.set_aside = kept;
+    (removed, restored)
+}
 
-    Ok(removed)
+struct DeployState {
+    data_dir: PathBuf,
+    store: StoreIndex,
+    links: HashMap<String, LinkRecord>,
+    pak_files: Vec<String>,
+    set_aside: Vec<SetAsideFile>,
+    /// Files put back at the start of this deploy; moving them aside again isn't news.
+    restored: HashSet<PathBuf>,
+    warnings: Vec<String>,
+}
+
+impl DeployState {
+    /// Clears `dest` for a link. SigilSmith's own link (one this deploy made, or one an
+    /// interrupted deploy left behind) is replaced; any other file is moved aside, never
+    /// deleted.
+    fn make_room(&mut self, dest: &Path) -> Result<()> {
+        let Ok(meta) = fs::symlink_metadata(dest) else {
+            return Ok(());
+        };
+        if meta.file_type().is_dir() {
+            return Err(anyhow::anyhow!(
+                "destination exists as directory: {:?}",
+                dest
+            ));
+        }
+        if self.links.contains_key(dest.to_string_lossy().as_ref())
+            || is_our_link(dest, None, &mut self.store)
+        {
+            return Ok(());
+        }
+        let name = dest
+            .file_name()
+            .map(|name| name.to_os_string())
+            .unwrap_or_else(|| "file".into());
+        let set_aside_root = self.data_dir.join("set-aside");
+        let mut index = self.set_aside.len();
+        let saved = loop {
+            let candidate = set_aside_root.join(index.to_string()).join(&name);
+            if fs::symlink_metadata(&candidate).is_err() {
+                break candidate;
+            }
+            index += 1;
+        };
+        if let Some(parent) = saved.parent() {
+            fs::create_dir_all(parent).context("create set-aside dir")?;
+        }
+        move_file(dest, &saved).with_context(|| format!("move {:?} aside", dest))?;
+        if !self.restored.contains(dest) {
+            self.warnings.push(format!(
+                "Moved {} to {} so SigilSmith's copy could go there; it goes back when that mod is no longer deployed",
+                dest.display(),
+                saved.display()
+            ));
+        }
+        self.set_aside.push(SetAsideFile {
+            original: dest.to_string_lossy().to_string(),
+            saved: saved.to_string_lossy().to_string(),
+        });
+        // Recorded at once: if the deploy stops before the manifest is saved, the next one
+        // still knows to put the file back.
+        let raw = serde_json::to_string_pretty(&self.set_aside).context("serialize set-aside")?;
+        fs::write(self.data_dir.join(SET_ASIDE_JOURNAL), raw).context("record set-aside file")?;
+        Ok(())
+    }
+
+    fn record(&mut self, source: &Path, dest: &Path, mode: SigilLinkMode) {
+        self.links.insert(
+            dest.to_string_lossy().to_string(),
+            record_link(source, dest, mode),
+        );
+    }
+}
+
+/// Renames `from` to `to`, copying across filesystems. A symlink stays a symlink.
+fn move_file(from: &Path, to: &Path) -> io::Result<()> {
+    if fs::rename(from, to).is_ok() {
+        return Ok(());
+    }
+    let meta = fs::symlink_metadata(from)?;
+    if meta.file_type().is_symlink() {
+        create_symlink(&fs::read_link(from)?, to)?;
+    } else {
+        fs::copy(from, to)?;
+    }
+    fs::remove_file(from)
+}
+
+/// Removes the numbered folder a set-aside file sat in once it is empty.
+fn remove_empty_parents(saved: &Path) {
+    if let Some(parent) = saved.parent() {
+        let _ = fs::remove_dir(parent);
+    }
 }
 
 fn load_manifest(data_dir: &Path) -> Result<DeployManifest> {
@@ -1074,6 +1566,27 @@ fn load_manifest(data_dir: &Path) -> Result<DeployManifest> {
     Ok(manifest)
 }
 
+/// Files moved aside by a deploy that stopped before saving its manifest.
+const SET_ASIDE_JOURNAL: &str = "set-aside/journal.json";
+
+fn merge_set_aside_journal(data_dir: &Path, manifest: &mut DeployManifest) {
+    let Some(entries) = fs::read_to_string(data_dir.join(SET_ASIDE_JOURNAL))
+        .ok()
+        .and_then(|raw| serde_json::from_str::<Vec<SetAsideFile>>(&raw).ok())
+    else {
+        return;
+    };
+    for entry in entries {
+        if !manifest
+            .set_aside
+            .iter()
+            .any(|known| known.saved == entry.saved)
+        {
+            manifest.set_aside.push(entry);
+        }
+    }
+}
+
 fn save_manifest(data_dir: &Path, manifest: &DeployManifest) -> Result<()> {
     let path = data_dir.join("deploy_manifest.json");
     let raw = serde_json::to_string_pretty(manifest).context("serialize manifest")?;
@@ -1083,4 +1596,373 @@ fn save_manifest(data_dir: &Path, manifest: &DeployManifest) -> Result<()> {
 
 fn library_mod_path(cache_root: &Path, id: &str) -> PathBuf {
     cache_root.join("mods").join(id)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::library::{ModScripts, ModSource, Profile, ProfileEntry};
+
+    struct Fixture {
+        root: PathBuf,
+        config: GameConfig,
+    }
+
+    impl Fixture {
+        fn new(name: &str) -> Self {
+            let root = std::env::temp_dir()
+                .join(format!("sigilsmith-deploy-{name}-{}", std::process::id()));
+            let _ = fs::remove_dir_all(&root);
+            for dir in ["game/Data", "game/bin", "native/PlayerProfiles/Public"] {
+                fs::create_dir_all(root.join(dir)).unwrap();
+            }
+            fs::create_dir_all(root.join("proton/PlayerProfiles/Public")).unwrap();
+            let config = GameConfig {
+                game_id: Default::default(),
+                game_name: "Baldur's Gate 3".to_string(),
+                data_dir: root.join("data"),
+                sigillink_cache_dir: None,
+                game_root: root.join("game"),
+                larian_dir: root.join("native"),
+                active_profile: "Default".to_string(),
+                declined_move: None,
+                keep_links_in: Vec::new(),
+            };
+            fs::create_dir_all(&config.data_dir).unwrap();
+            Self { root, config }
+        }
+
+        fn mods_dir(&self, larian: &str) -> PathBuf {
+            self.root.join(larian).join("Mods")
+        }
+
+        /// A managed pak mod in the store, enabled in the Default profile.
+        fn add_managed(&self, library: &mut Library, id: &str, folder: &str) {
+            let store = self.config.sigillink_mods_root().join(id);
+            fs::create_dir_all(&store).unwrap();
+            fs::write(store.join(format!("{folder}.pak")), folder.as_bytes()).unwrap();
+            add_entry(library, id, folder, ModSource::Managed);
+        }
+
+        fn deploy(&self, library: &mut Library) -> DeployReport {
+            deploy_to(&self.config, library)
+        }
+
+        fn modsettings_uuids(&self, larian: &str) -> Vec<String> {
+            let path = self
+                .root
+                .join(larian)
+                .join("PlayerProfiles/Public/modsettings.lsx");
+            read_modsettings_snapshot(&path)
+                .unwrap()
+                .modules
+                .into_iter()
+                .map(|module| module.info.uuid)
+                .collect()
+        }
+    }
+
+    fn deploy_to(config: &GameConfig, library: &mut Library) -> DeployReport {
+        deploy_with_options(
+            config,
+            library,
+            DeployOptions {
+                backup: false,
+                reason: None,
+            },
+        )
+        .unwrap()
+    }
+
+    impl Drop for Fixture {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.root);
+        }
+    }
+
+    fn add_entry(library: &mut Library, id: &str, folder: &str, source: ModSource) {
+        library.mods.push(ModEntry {
+            id: id.to_string(),
+            name: folder.to_string(),
+            created_at: None,
+            modified_at: None,
+            added_at: 0,
+            targets: vec![InstallTarget::Pak {
+                file: format!("{folder}.pak"),
+                info: PakInfo {
+                    uuid: id.to_string(),
+                    name: folder.to_string(),
+                    folder: folder.to_string(),
+                    version: 1,
+                    md5: None,
+                    publish_handle: None,
+                    author: None,
+                    description: None,
+                    module_type: None,
+                },
+            }],
+            target_overrides: Vec::new(),
+            source_label: None,
+            source,
+            dependencies: Vec::new(),
+            scripts: ModScripts::default(),
+        });
+        library.profiles[0].order.push(ProfileEntry {
+            id: id.to_string(),
+            enabled: true,
+            missing_label: None,
+        });
+    }
+
+    fn library() -> Library {
+        Library {
+            mods: Vec::new(),
+            profiles: vec![Profile::new("Default")],
+            active_profile: "Default".to_string(),
+            dependency_blocks: HashSet::new(),
+            metadata_cache_version: 0,
+            metadata_cache_key: None,
+            modsettings_hash: None,
+            modsettings_sync_enabled: true,
+            repair_version: 0,
+            renamed_ids: HashMap::new(),
+        }
+    }
+
+    const KAI: &str = "baf029fa-af6e-4080-bd6a-abacdea9e684";
+    const CAMERA: &str = "6e84559a-1b7a-4441-bfc6-c2bae5538491";
+
+    #[test]
+    fn switching_folders_leaves_links_only_in_the_new_one() {
+        let fixture = Fixture::new("switch");
+        let mut library = library();
+        fixture.add_managed(&mut library, KAI, "KaiLimeUI");
+        fixture.deploy(&mut library);
+        let old_link = fixture.mods_dir("native").join("KaiLimeUI.pak");
+        assert!(old_link.exists());
+
+        let mut proton = fixture.config.clone();
+        proton.larian_dir = fixture.root.join("proton");
+        let report = deploy_to(&proton, &mut library);
+
+        assert!(!old_link.exists(), "old folder still has the link");
+        assert!(fixture.mods_dir("proton").join("KaiLimeUI.pak").exists());
+        assert_eq!(report.removed_count, 1);
+        assert!(report.warnings.is_empty(), "{:?}", report.warnings);
+        // The store copy is untouched.
+        let store = fixture
+            .config
+            .sigillink_mods_root()
+            .join(KAI)
+            .join("KaiLimeUI.pak");
+        assert_eq!(fs::read(store).unwrap(), b"KaiLimeUI");
+    }
+
+    #[test]
+    fn a_file_replaced_after_deploy_is_left_alone() {
+        let fixture = Fixture::new("replaced");
+        let mut library = library();
+        fixture.add_managed(&mut library, KAI, "KaiLimeUI");
+        fixture.deploy(&mut library);
+        let link = fixture.mods_dir("native").join("KaiLimeUI.pak");
+        fs::remove_file(&link).unwrap();
+        fs::write(&link, b"someone else's copy").unwrap();
+
+        library.mods.clear();
+        library.profiles[0].order.clear();
+        let report = fixture.deploy(&mut library);
+
+        assert_eq!(fs::read(&link).unwrap(), b"someone else's copy");
+        assert_eq!(report.removed_count, 0);
+        assert!(
+            report.warnings.iter().any(|w| w.contains("Left")),
+            "{:?}",
+            report.warnings
+        );
+    }
+
+    #[test]
+    fn a_file_in_the_way_is_set_aside_and_put_back() {
+        let fixture = Fixture::new("set-aside");
+        let mods = fixture.mods_dir("native");
+        fs::create_dir_all(&mods).unwrap();
+        fs::write(mods.join("KaiLimeUI.pak"), b"player's own copy").unwrap();
+        let mut library = library();
+        fixture.add_managed(&mut library, KAI, "KaiLimeUI");
+
+        let report = fixture.deploy(&mut library);
+        assert_eq!(fs::read(mods.join("KaiLimeUI.pak")).unwrap(), b"KaiLimeUI");
+        assert!(
+            report.warnings.iter().any(|w| w.contains("Moved")),
+            "{:?}",
+            report.warnings
+        );
+
+        // A second deploy keeps it aside without repeating the warning.
+        let report = fixture.deploy(&mut library);
+        assert!(report.warnings.is_empty(), "{:?}", report.warnings);
+        assert_eq!(fs::read(mods.join("KaiLimeUI.pak")).unwrap(), b"KaiLimeUI");
+
+        library.profiles[0].order.clear();
+        library.mods.clear();
+        fixture.deploy(&mut library);
+        assert_eq!(
+            fs::read(mods.join("KaiLimeUI.pak")).unwrap(),
+            b"player's own copy"
+        );
+        let manifest = load_manifest(&fixture.config.data_dir).unwrap();
+        assert!(manifest.set_aside.is_empty());
+    }
+
+    #[test]
+    fn missing_mods_are_left_out_of_modsettings_and_listed() {
+        let fixture = Fixture::new("missing");
+        let mut library = library();
+        fixture.add_managed(&mut library, KAI, "KaiLimeUI");
+        add_entry(
+            &mut library,
+            CAMERA,
+            "TrueThirdPersonCamera",
+            ModSource::Native,
+        );
+
+        let report = fixture.deploy(&mut library);
+        assert_eq!(fixture.modsettings_uuids("native"), [KAI]);
+        assert_eq!(report.missing_mods, ["TrueThirdPersonCamera"]);
+
+        // Once the game puts the file back, the mod is listed again.
+        let mods = fixture.mods_dir("native");
+        fs::write(mods.join("TrueThirdPersonCamera.pak"), b"x").unwrap();
+        let report = fixture.deploy(&mut library);
+        assert!(report.missing_mods.is_empty());
+        let uuids = fixture.modsettings_uuids("native");
+        assert!(uuids.contains(&CAMERA.to_string()), "{uuids:?}");
+        // The game's own file is never touched.
+        assert_eq!(
+            fs::read(mods.join("TrueThirdPersonCamera.pak")).unwrap(),
+            b"x"
+        );
+    }
+
+    #[test]
+    fn old_manifests_without_link_records_still_clean_up_safely() {
+        let fixture = Fixture::new("legacy");
+        let mut library = library();
+        fixture.add_managed(&mut library, KAI, "KaiLimeUI");
+        fixture.deploy(&mut library);
+        let mods = fixture.mods_dir("native");
+        let ours = mods.join("KaiLimeUI.pak");
+        let foreign = mods.join("Other.pak");
+        fs::write(&foreign, b"not ours").unwrap();
+
+        // What 0.9.10 wrote: paths only.
+        let mut manifest = load_manifest(&fixture.config.data_dir).unwrap();
+        manifest.links.clear();
+        manifest
+            .pak_files
+            .push(foreign.to_string_lossy().to_string());
+        save_manifest(&fixture.config.data_dir, &manifest).unwrap();
+
+        library.mods.clear();
+        library.profiles[0].order.clear();
+        let report = fixture.deploy(&mut library);
+        assert!(!ours.exists());
+        assert_eq!(fs::read(&foreign).unwrap(), b"not ours");
+        assert_eq!(report.removed_count, 1);
+    }
+
+    #[test]
+    fn a_file_set_aside_by_an_interrupted_deploy_is_put_back() {
+        let fixture = Fixture::new("interrupted");
+        let mut library = library();
+        fixture.add_managed(&mut library, KAI, "KaiLimeUI");
+        let mods = fixture.mods_dir("native");
+        fs::create_dir_all(&mods).unwrap();
+        fs::write(mods.join("KaiLimeUI.pak"), b"mine").unwrap();
+        fixture.deploy(&mut library);
+        // As if the deploy stopped after moving the file aside and linking, before it saved
+        // its manifest: only the set-aside journal knows.
+        let manifest = load_manifest(&fixture.config.data_dir).unwrap();
+        let journal = fixture.config.data_dir.join(SET_ASIDE_JOURNAL);
+        fs::write(
+            &journal,
+            serde_json::to_string(&manifest.set_aside).unwrap(),
+        )
+        .unwrap();
+        save_manifest(&fixture.config.data_dir, &DeployManifest::default()).unwrap();
+
+        library.profiles[0].order.clear();
+        library.mods.clear();
+        fixture.deploy(&mut library);
+        assert_eq!(fs::read(mods.join("KaiLimeUI.pak")).unwrap(), b"mine");
+        assert!(!journal.exists());
+        assert!(load_manifest(&fixture.config.data_dir)
+            .unwrap()
+            .set_aside
+            .is_empty());
+    }
+
+    #[test]
+    fn drift_and_stray_links_are_found_and_only_links_are_removed() {
+        let fixture = Fixture::new("drift");
+        let mut library = library();
+        fixture.add_managed(&mut library, "a", "Alpha");
+        fixture.add_managed(&mut library, "b", "Beta");
+        fixture.deploy(&mut library);
+        let native = fixture.root.join("native");
+        let proton = fixture.root.join("proton");
+        let deployed = DeployedFiles::load(
+            &fixture.config.data_dir,
+            &fixture.config.sigillink_cache_root(),
+        );
+        assert_eq!(deployed.drift(&native), LinkDrift::default());
+
+        // One link deleted, one replaced by the player.
+        fs::remove_file(fixture.mods_dir("native").join("Alpha.pak")).unwrap();
+        fs::remove_file(fixture.mods_dir("native").join("Beta.pak")).unwrap();
+        fs::write(fixture.mods_dir("native").join("Beta.pak"), b"mine").unwrap();
+        let drift = deployed.drift(&native);
+        assert_eq!((drift.missing, drift.changed, drift.elsewhere), (1, 1, 0));
+        // Seen from the Proton folder, the native links are left elsewhere.
+        assert_eq!(deployed.drift(&proton).elsewhere, 1);
+
+        // An unrecorded link in the other folder, next to the game's own file.
+        let proton_mods = fixture.mods_dir("proton");
+        fs::create_dir_all(&proton_mods).unwrap();
+        let store_pak = fixture.config.sigillink_mods_root().join("a/Alpha.pak");
+        fs::hard_link(&store_pak, proton_mods.join("Alpha.pak")).unwrap();
+        std::os::unix::fs::symlink(&store_pak, proton_mods.join("AlphaLink.pak")).unwrap();
+        fs::write(proton_mods.join("Game.pak"), b"game").unwrap();
+        let strays = deployed.stray_links_in(&proton_mods);
+        assert_eq!(
+            strays,
+            [
+                proton_mods.join("Alpha.pak"),
+                proton_mods.join("AlphaLink.pak")
+            ]
+        );
+        let mut with_game_file = strays.clone();
+        with_game_file.push(proton_mods.join("Game.pak"));
+        assert_eq!(deployed.remove_links(&with_game_file), 2);
+        assert!(proton_mods.join("Game.pak").exists());
+        assert!(store_pak.exists());
+    }
+
+    #[test]
+    fn deployed_files_recognizes_its_links_only() {
+        let fixture = Fixture::new("ours");
+        let mut library = library();
+        fixture.add_managed(&mut library, KAI, "KaiLimeUI");
+        fixture.deploy(&mut library);
+        let mods = fixture.mods_dir("native");
+        fs::write(mods.join("game_download.pak"), b"x").unwrap();
+
+        let deployed = DeployedFiles::load(
+            &fixture.config.data_dir,
+            &fixture.config.sigillink_cache_root(),
+        );
+        assert!(deployed.is_ours(&mods.join("KaiLimeUI.pak")));
+        assert!(!deployed.is_ours(&mods.join("game_download.pak")));
+        assert!(!deployed.is_ours(&mods.join("absent.pak")));
+    }
 }

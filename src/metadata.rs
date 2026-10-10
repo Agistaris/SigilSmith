@@ -109,6 +109,7 @@ pub fn parse_meta_lsx(bytes: &[u8]) -> ModMeta {
     let mut description = None;
     let mut publish_handle = None;
     let mut module_type = None;
+    let mut publish_version = None;
     let mut in_dependencies = false;
     let mut in_dependency = false;
     let mut in_module_info = false;
@@ -171,7 +172,22 @@ pub fn parse_meta_lsx(bytes: &[u8]) -> ModMeta {
                                     });
                                 }
                             }
+                            // Only ModuleInfo's own attributes describe the mod. Nested
+                            // nodes (Scripts, Parameters, PublishVersion) reuse names like
+                            // UUID, Type and Version64 for other things.
+                            let depth = node_stack.len();
+                            let parent = node_stack.last().map(String::as_str);
+                            let own = parent == Some("ModuleInfo");
+                            let publish = parent == Some("PublishVersion")
+                                && depth >= 2
+                                && node_stack[depth - 2] == "ModuleInfo";
+                            if publish && id == "Version64" {
+                                if let Ok(parsed) = value_str.parse::<u64>() {
+                                    publish_version = Some(parsed);
+                                }
+                            }
                             match id.as_str() {
+                                _ if !own => {}
                                 "UUID" => uuid = Some(value.clone()),
                                 "Folder" => folder = Some(value.clone()),
                                 "Name" => name = Some(value.clone()),
@@ -238,7 +254,7 @@ pub fn parse_meta_lsx(bytes: &[u8]) -> ModMeta {
         uuid,
         folder,
         name,
-        version,
+        version: version.or(publish_version),
         md5,
         author,
         description,
@@ -387,7 +403,6 @@ fn read_meta_lsx_from_pak_fuzzy(path: &Path) -> Option<ModMeta> {
     }
     None
 }
-
 
 pub fn find_meta_lsx(root: &Path) -> Option<PathBuf> {
     let mut candidates: Vec<(bool, usize, PathBuf)> = Vec::new();
@@ -856,6 +871,62 @@ fn split_tags(value: &str) -> Vec<String> {
         .collect()
 }
 
+/// Shaped like KaiLime UI's meta.lsx: ModuleInfo has nested Script nodes with
+/// their own UUIDs and Parameter nodes with a Type attribute.
+#[cfg(test)]
+pub(crate) const TEST_NESTED_META: &str = r#"<?xml version="1.0" encoding="utf-8"?>
+<save>
+  <region id="Config">
+    <node id="root">
+      <children>
+        <node id="Dependencies">
+          <children>
+            <node id="ModuleShortDesc">
+              <attribute id="Folder" type="LSString" value="NeedsThis" />
+              <attribute id="Name" type="LSString" value="Needs This" />
+              <attribute id="UUID" type="guid" value="11111111-2222-3333-4444-555555555555" />
+              <attribute id="Version64" type="int64" value="1" />
+            </node>
+          </children>
+        </node>
+        <node id="ModuleInfo">
+          <attribute id="Author" type="LSString" value="KaiLimePie" />
+          <attribute id="Folder" type="LSString" value="KaiLimeUI" />
+          <attribute id="Name" type="LSString" value="KaiLime UI" />
+          <attribute id="UUID" type="FixedString" value="baf029fa-af6e-4080-bd6a-abacdea9e684" />
+          <attribute id="Version64" type="int64" value="36169534507319296" />
+          <children>
+            <node id="PublishVersion">
+              <attribute id="Version64" type="int64" value="99" />
+            </node>
+            <node id="Scripts">
+              <children>
+                <node id="Script">
+                  <attribute id="UUID" type="FixedString" value="1953f77d-a201-45d7-a194-9b84c34b8461" />
+                  <children>
+                    <node id="Parameters">
+                      <children>
+                        <node id="Parameter">
+                          <attribute id="MapKey" type="FixedString" value="HardcoreOnly" />
+                          <attribute id="Type" type="int32" value="1" />
+                          <attribute id="Value" type="LSString" value="0" />
+                        </node>
+                      </children>
+                    </node>
+                  </children>
+                </node>
+                <node id="Script">
+                  <attribute id="UUID" type="FixedString" value="0d6510f5-50a3-4ecd-83d8-134c9a640324" />
+                </node>
+              </children>
+            </node>
+          </children>
+        </node>
+      </children>
+    </node>
+  </region>
+</save>"#;
+
 /// Writes a minimal LSPK v18 pak with the layout `read_pak_index_entries` reads.
 /// Each file is (path, contents, lz4-compress).
 #[cfg(test)]
@@ -992,6 +1063,48 @@ mod tests {
     fn unreadable_script_extender_config_still_counts() {
         let config = parse_script_extender_config(Some(b"{ not json"));
         assert_eq!(config, ScriptExtenderUse::default());
+    }
+
+    #[test]
+    fn nested_script_nodes_do_not_replace_the_mod_identity() {
+        let meta = parse_meta_lsx(TEST_NESTED_META.as_bytes());
+        assert_eq!(
+            meta.uuid.as_deref(),
+            Some("baf029fa-af6e-4080-bd6a-abacdea9e684")
+        );
+        assert_eq!(meta.folder.as_deref(), Some("KaiLimeUI"));
+        assert_eq!(meta.name.as_deref(), Some("KaiLime UI"));
+        assert_eq!(meta.version, Some(36169534507319296));
+        assert_eq!(meta.module_type, None);
+        assert_eq!(meta.dependencies.len(), 1, "{:?}", meta.dependencies);
+    }
+
+    #[test]
+    fn publish_version_fills_a_missing_version() {
+        let without_own = TEST_NESTED_META.replace(
+            r#"<attribute id="Version64" type="int64" value="36169534507319296" />"#,
+            "",
+        );
+        let meta = parse_meta_lsx(without_own.as_bytes());
+        assert_eq!(meta.version, Some(99));
+    }
+
+    #[test]
+    fn v16_pak_meta_reads_the_module_uuid() {
+        let path = temp_pak("nested-meta-v16");
+        write_test_pak_version(
+            &path,
+            16,
+            &[("Mods/KaiLimeUI/meta.lsx", TEST_NESTED_META.as_bytes(), true)],
+        );
+        let meta = read_meta_lsx_from_pak(&path);
+        let _ = fs::remove_file(&path);
+        let meta = meta.expect("meta.lsx");
+        assert_eq!(
+            meta.uuid.as_deref(),
+            Some("baf029fa-af6e-4080-bd6a-abacdea9e684")
+        );
+        assert_eq!(meta.module_type, None);
     }
 
     #[test]

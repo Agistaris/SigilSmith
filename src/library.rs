@@ -40,6 +40,12 @@ pub struct Library {
     pub modsettings_hash: Option<String>,
     #[serde(default = "default_true")]
     pub modsettings_sync_enabled: bool,
+    /// The one-time repairs (repair.rs) already applied to this library.
+    #[serde(default)]
+    pub repair_version: u32,
+    /// Mod IDs a repair changed, old to new, so restoring an older backup follows them.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub renamed_ids: HashMap<String, String>,
 }
 
 impl Library {
@@ -72,6 +78,8 @@ impl Library {
             metadata_cache_key: None,
             modsettings_hash: None,
             modsettings_sync_enabled: true,
+            repair_version: 0,
+            renamed_ids: HashMap::new(),
         };
         library.save(data_dir)?;
         Ok(library)

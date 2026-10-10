@@ -11,7 +11,7 @@ use crate::{
         ModSource, Profile, ProfileEntry, SigilLinkRankMeta, TargetKind, TargetOverride,
         SIGILLINK_RANKING_PROFILE,
     },
-    metadata, native_pak, script_extender, sigillink, smart_rank, update,
+    metadata, native_pak, repair, script_extender, sigillink, smart_rank, switch, update,
 };
 use anyhow::{Context, Result};
 use arboard::Clipboard;
@@ -119,6 +119,8 @@ pub enum PathBrowserPurpose {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PathBrowserEntryKind {
     Select,
+    /// A Larian folder found in Steam's or another launcher's files; Enter picks it.
+    Suggested,
     SaveHere,
     Parent,
     Dir,
@@ -335,6 +337,25 @@ pub enum DialogKind {
         release: update::Release,
     },
     UpdateRestart,
+    /// Moving the setup to another Larian folder, as when Steam switches BG3 between the
+    /// native build and Proton.
+    MoveSetup {
+        plan: switch::MovePlan,
+        /// Offers "Don't ask again for this folder".
+        can_decline: bool,
+    },
+    CopySaves {
+        from: PathBuf,
+        to: PathBuf,
+    },
+    ResumeMove {
+        journal: switch::MoveJournal,
+    },
+    /// Links to SigilSmith's store that no deploy recorded, found at startup.
+    StrayLinks {
+        folders: Vec<PathBuf>,
+        paths: Vec<PathBuf>,
+    },
     UpdateCommand {
         command: String,
     },
@@ -407,6 +428,8 @@ pub struct SigilLinkMissingItem {
     pub name: String,
     pub uuid: String,
     pub search_link: Option<String>,
+    /// From the in-game mod manager: the game downloads it, so re-importing isn't the fix.
+    pub in_game: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -768,9 +791,27 @@ enum ImportMessage {
 }
 
 enum DeployMessage {
-    Completed { report: deploy::DeployReport },
-    SigilLinkRelocation { error: String, target_root: PathBuf },
-    Failed { error: String },
+    Completed {
+        report: deploy::DeployReport,
+    },
+    Moved {
+        report: switch::MoveReport,
+        to: PathBuf,
+    },
+    MoveFailed {
+        error: String,
+        to: PathBuf,
+    },
+    SavesCopied {
+        result: Result<usize, String>,
+    },
+    SigilLinkRelocation {
+        error: String,
+        target_root: PathBuf,
+    },
+    Failed {
+        error: String,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -1168,6 +1209,12 @@ pub struct App {
     deploy_pending: bool,
     deploy_reason: Option<String>,
     deploy_backup: bool,
+    /// A confirmed move to another Larian folder, run in place of the next deploy.
+    pending_move: Option<PathBuf>,
+    /// Quit was asked for during a deploy; it happens once the deploy is done.
+    quit_after_deploy: bool,
+    /// Questions raised by background work, opened one at a time when the screen is free.
+    queued_dialogs: VecDeque<Dialog>,
     deploy_tx: Sender<DeployMessage>,
     deploy_rx: Receiver<DeployMessage>,
     conflict_active: bool,
@@ -1418,6 +1465,8 @@ pub struct NativeSyncDelta {
     pub modsettings_hash: Option<String>,
     pub enabled_set: HashSet<String>,
     pub order: Vec<String>,
+    /// The Larian folder this was read from.
+    pub larian_dir: PathBuf,
 }
 
 #[derive(Debug, Clone)]
@@ -1446,13 +1495,17 @@ impl App {
         }
         let game_id = app_config.active_game;
         let mut config = GameConfig::load_or_create(game_id)?;
+        let mut found_larian_dir = None;
         if let Err(err) =
             game::detect_paths(game_id, Some(&config.game_root), Some(&config.larian_dir))
         {
-            // Retry auto-detect when stored paths are missing or stale.
+            // Retry auto-detect when stored paths are missing or stale. A new game root is
+            // taken as found; a new Larian folder may mean moving a setup, decided below.
             if let Ok(paths) = game::detect_paths(game_id, None, None) {
                 config.game_root = paths.game_root;
-                config.larian_dir = paths.larian_dir;
+                if !game::looks_like_user_dir(game_id, &config.larian_dir) {
+                    found_larian_dir = Some(paths.larian_dir);
+                }
                 let _ = config.save();
             } else {
                 setup_error = Some(err.to_string());
@@ -1460,6 +1513,16 @@ impl App {
         }
 
         let mut library = Library::load_or_create(&config.data_dir)?;
+        let mut offer_move = None;
+        if let Some(found) = found_larian_dir {
+            if switch::has_setup(&config, &library) {
+                offer_move = Some(found);
+            } else {
+                config.larian_dir = found;
+                let _ = config.save();
+            }
+        }
+        let id_repairs = run_library_repairs(&config, &mut library);
         library.ensure_mods_in_profiles();
         if !library
             .profiles
@@ -1641,6 +1704,9 @@ impl App {
             deploy_pending: false,
             deploy_reason: None,
             deploy_backup: true,
+            pending_move: None,
+            quit_after_deploy: false,
+            queued_dialogs: VecDeque::new(),
             deploy_tx,
             deploy_rx,
             conflict_active: false,
@@ -1673,8 +1739,20 @@ impl App {
         app.load_smart_rank_cache();
         let mod_count = app.library.mods.len();
         app.log_info(format!("Library loaded: {mod_count} mod(s)"));
+        app.report_id_repairs(id_repairs);
         app.find_reimportable_override_paks();
         app.log_info("Detecting game paths...".to_string());
+        // A move cut short comes first: until it is finished or undone, no other move is
+        // offered.
+        if let Some(journal) = switch::pending_move(&app.config.data_dir) {
+            if journal.to == app.config.larian_dir {
+                // Only the last step was missing.
+                switch::clear_journal(&app.config.data_dir);
+            } else if matches!(mode, StartupMode::Ui) {
+                app.offer_resume_move(journal);
+            }
+        }
+        let move_unfinished = switch::pending_move(&app.config.data_dir).is_some();
         if let Some(error) = setup_error {
             app.log_warn(format!("Path auto-detect failed: {error}"));
             app.status = "Setup required: open Menu (Esc) to configure paths".to_string();
@@ -1703,22 +1781,53 @@ impl App {
                     );
                 }
             }
+            if let Some(marker) = bg3::clear_crash_marker(&app.config.larian_dir) {
+                app.log_warn(format!(
+                    "Removed {}: BG3 left it after a crash and would have turned every mod off on its next launch",
+                    marker.display()
+                ));
+            }
             if let Some(expected) =
                 game::user_dir_mismatch(app.game_id, &app.config.game_root, &app.config.larian_dir)
             {
                 app.log_warn(format!(
-                    "Steam launches BG3 with Larian data in {}, but SigilSmith is set to {}. Use Esc → Configure Game Paths to switch.",
+                    "Steam launches BG3 with Larian data in {}, but SigilSmith is set to {}. Use Esc → Configure Game Paths to move your setup there.",
                     expected.display(),
                     app.config.larian_dir.display()
                 ));
-                app.set_toast(
-                    "Larian data dir differs from the one BG3 uses: see log",
-                    ToastLevel::Warn,
-                    Duration::from_secs(8),
-                );
+                let declined = app.config.declined_move.as_ref() == Some(&expected);
+                if !declined
+                    && !move_unfinished
+                    && app.dialog.is_none()
+                    && matches!(mode, StartupMode::Ui)
+                {
+                    app.offer_move(expected, true);
+                } else {
+                    app.set_toast(
+                        "Larian data dir differs from the one BG3 uses: see log",
+                        ToastLevel::Warn,
+                        Duration::from_secs(8),
+                    );
+                }
             }
         }
-        app.ensure_setup();
+        if let Some(found) = offer_move {
+            if !move_unfinished && app.dialog.is_none() && matches!(mode, StartupMode::Ui) {
+                app.log_warn(format!(
+                    "The Larian folder {} is gone; BG3 now uses {}",
+                    app.config.larian_dir.display(),
+                    found.display()
+                ));
+                app.offer_move(found, false);
+            }
+        }
+        // An unfinished move is answered first; finishing or undoing it settles the links.
+        if !move_unfinished && app.paths_ready() && matches!(mode, StartupMode::Ui) {
+            app.check_links();
+        }
+        if app.dialog.is_none() {
+            app.ensure_setup();
+        }
         if matches!(mode, StartupMode::Cli) {
             app.finish_startup();
         }
@@ -2270,6 +2379,13 @@ impl App {
     }
 
     fn copy_launch_option(&mut self, setup: &ScriptExtenderSetup) {
+        if setup.other_launcher {
+            if self.copy_to_clipboard(bg3::LAUNCHER_DLL_OVERRIDE) {
+                self.status =
+                    "Override copied: add it to BG3's environment in your launcher".to_string();
+            }
+            return;
+        }
         if self.copy_to_clipboard(&setup.suggested_launch_options()) {
             self.status = "Launch option copied: paste it in Steam > BG3 > Properties".to_string();
         }
@@ -3768,6 +3884,7 @@ Use Ctrl+R to reset this mod or F12 to reset all pins."
 
         let mut config = GameConfig::load_or_create(game_id)?;
         let mut library = Library::load_or_create(&config.data_dir)?;
+        let id_repairs = run_library_repairs(&config, &mut library);
         library.ensure_mods_in_profiles();
         if !config.active_profile.is_empty()
             && library
@@ -3798,6 +3915,7 @@ Use Ctrl+R to reset this mod or F12 to reset all pins."
         self.set_focus(Focus::Mods);
         self.status = format!("Active game: {}", game_id.display_name());
         self.log_info(format!("Active game: {}", game_id.display_name()));
+        self.report_id_repairs(id_repairs);
         self.ensure_setup();
         self.run_native_sync_inline();
         self.queue_conflict_scan("game changed");
@@ -5436,6 +5554,7 @@ Use Ctrl+R to reset this mod or F12 to reset all pins."
         self.maybe_start_sigillink_rank_pending();
         self.maybe_return_to_settings_menu();
         self.maybe_show_update_dialog();
+        self.maybe_show_queued_dialog();
 
         if self.update_active {
             if let Some(started_at) = self.update_started_at {
@@ -5463,6 +5582,7 @@ Use Ctrl+R to reset this mod or F12 to reset all pins."
             || self.help_open
             || self.paths_overlay_open
             || self.dialog.is_some()
+            || !self.queued_dialogs.is_empty()
             || self.override_picker_active()
             || self.sigillink_missing_queue.is_some()
             || self.dependency_queue.is_some()
@@ -5676,7 +5796,9 @@ Use Ctrl+R to reset this mod or F12 to reset all pins."
             return;
         };
         let mods = self.enabled_script_extender_mod_names();
-        let title = if setup.is_ready() {
+        let title = if setup.needs_launcher_check() {
+            "Script Extender: check your launcher"
+        } else if setup.is_ready() {
             "Script Extender ready"
         } else {
             "Script Extender not set up"
@@ -5713,6 +5835,8 @@ Use Ctrl+R to reset this mod or F12 to reset all pins."
             ("Set up for me", "Not now")
         } else if setup.launch_option_check() == SetupCheck::Missing {
             ("OK", "Copy launch option")
+        } else if setup.needs_launcher_check() {
+            ("OK", "Copy override")
         } else {
             ("OK", "")
         };
@@ -6269,6 +6393,23 @@ Use Ctrl+R to reset this mod or F12 to reset all pins."
                 selectable,
             });
         }
+        if matches!(purpose, PathBrowserPurpose::Setup(SetupStep::LarianDir)) {
+            let game_root =
+                Some(self.config.game_root.as_path()).filter(|path| !path.as_os_str().is_empty());
+            for (source, path) in bg3::larian_dir_suggestions(game_root) {
+                let in_use = if path == self.config.larian_dir {
+                    " (in use)"
+                } else {
+                    ""
+                };
+                entries.push(PathBrowserEntry {
+                    label: format!("★ {source}{in_use}: {}", suggestion_path_label(&path)),
+                    path,
+                    kind: PathBrowserEntryKind::Suggested,
+                    selectable: true,
+                });
+            }
+        }
         if let Some(parent) = current.parent() {
             entries.push(PathBrowserEntry {
                 label: "..".to_string(),
@@ -6385,7 +6526,13 @@ Use Ctrl+R to reset this mod or F12 to reset all pins."
         self.log_sigillink_mode();
 
         if matches!(action, SigilLinkCacheAction::Relocate { .. }) {
-            self.queue_deploy("sigillink cache relocated");
+            // A move that stopped for the relocation carries on.
+            match switch::pending_move(&self.config.data_dir) {
+                Some(journal) if journal.to != self.config.larian_dir => {
+                    self.queue_move(journal.to)
+                }
+                _ => self.queue_deploy("sigillink cache relocated"),
+            }
         }
         Ok(())
     }
@@ -7251,22 +7398,14 @@ Use Ctrl+R to reset this mod or F12 to reset all pins."
         }
 
         self.config.game_root = path.clone();
-        match game::detect_paths(self.game_id, Some(&path), None) {
-            Ok(paths) => {
-                self.config.larian_dir = paths.larian_dir;
-                self.config.save()?;
-                self.status = "Game paths set".to_string();
-                self.log_info(format!("Game root set: {}", path.display()));
-                self.set_toast("Paths updated", ToastLevel::Info, Duration::from_secs(2));
-            }
-            Err(err) => {
-                self.status =
-                    "Game root set. Larian data dir not found; please select it.".to_string();
-                self.log_warn(format!("Larian dir auto-detect failed: {err}"));
-                self.start_setup(SetupStep::LarianDir);
-            }
-        }
-
+        self.config.save()?;
+        self.log_info(format!("Game root set: {}", path.display()));
+        // The Larian folder comes next. The picker starts at the one Steam uses and lists the
+        // others found (Steam's native and Proton folders, other launchers' prefixes), so a
+        // Lutris or Heroic setup can be chosen too. Picking a new folder with a setup offers
+        // the move.
+        self.status = "Game root set: now pick the Larian data folder".to_string();
+        self.start_setup(SetupStep::LarianDir);
         Ok(())
     }
 
@@ -7289,6 +7428,15 @@ Use Ctrl+R to reset this mod or F12 to reset all pins."
             self.status = "Game root missing: select BG3 install root".to_string();
             self.log_warn("Game root missing while setting Larian dir".to_string());
             self.start_setup(SetupStep::GameRoot);
+            return Ok(());
+        }
+
+        if path == self.config.larian_dir {
+            self.status = "Already using this Larian folder".to_string();
+            return Ok(());
+        }
+        if switch::has_setup(&self.config, &self.library) {
+            self.offer_move(path, false);
             return Ok(());
         }
 
@@ -8016,6 +8164,11 @@ Use Ctrl+R to reset this mod or F12 to reset all pins."
                     NativeSyncMessage::Completed(delta) => {
                         self.native_sync_active = false;
                         self.native_sync_progress = None;
+                        if delta.larian_dir != self.config.larian_dir {
+                            // The setup moved while this ran: read the new folder instead.
+                            self.start_native_sync();
+                            continue;
+                        }
                         self.apply_native_sync_delta(delta);
                         if self.startup_post_sync_pending {
                             self.startup_post_sync_pending = false;
@@ -8172,6 +8325,22 @@ Use Ctrl+R to reset this mod or F12 to reset all pins."
         }
         if let Some(which) = self.update_dialog_pending.take() {
             self.show_update_dialog(which);
+        }
+    }
+
+    /// Opens the next queued question once nothing else is on screen and no key came in for a
+    /// moment, so a key meant for the list can't answer it.
+    fn maybe_show_queued_dialog(&mut self) {
+        if self.queued_dialogs.is_empty()
+            || self.overlay_or_task_open()
+            || self.move_mode
+            || self.whats_new_open
+            || self.last_key_at.elapsed() < Duration::from_secs(1)
+        {
+            return;
+        }
+        if let Some(dialog) = self.queued_dialogs.pop_front() {
+            self.open_dialog(dialog);
         }
     }
 
@@ -8569,6 +8738,42 @@ Use Ctrl+R to reset this mod or F12 to reset all pins."
             self.selected = self.selected.saturating_add(delta as usize);
         }
         self.clamp_selection();
+    }
+
+    /// Logs mods whose saved UUID was fixed at load and redeploys so modsettings.lsx lists
+    /// them by the UUID BG3 knows.
+    fn report_id_repairs(&mut self, repairs: Vec<repair::IdRepair>) {
+        if repairs.is_empty() {
+            return;
+        }
+        for repair in &repairs {
+            let merged = if repair.merged_duplicate {
+                " and merged the duplicate in-game entry it had caused"
+            } else {
+                ""
+            };
+            match &repair.kept_id {
+                None => self.log_warn(format!(
+                    "Fixed {}'s mod ID ({} -> {}){merged}",
+                    repair.name, repair.old_id, repair.new_id
+                )),
+                Some(kept) => self.log_warn(format!(
+                    "Fixed {}'s load-order UUID to {} (library ID stays {kept})",
+                    repair.name, repair.new_id
+                )),
+            }
+        }
+        self.set_toast(
+            &format!(
+                "Fixed the mod ID of {} mod(s) that BG3 couldn't load: see log",
+                repairs.len()
+            ),
+            ToastLevel::Warn,
+            Duration::from_secs(8),
+        );
+        if self.paths_ready() {
+            self.queue_deploy("mod IDs fixed");
+        }
     }
 
     fn find_reimportable_override_paks(&mut self) {
@@ -10112,6 +10317,8 @@ Use Ctrl+R to reset this mod or F12 to reset all pins."
             metadata_cache_key: None,
             modsettings_hash: None,
             modsettings_sync_enabled: true,
+            repair_version: 0,
+            renamed_ids: HashMap::new(),
         };
         self.config.active_profile = "Default".to_string();
         self.config.data_dir = temp_data_dir;
@@ -10286,7 +10493,7 @@ Use Ctrl+R to reset this mod or F12 to reset all pins."
                 if paths.modsettings_path.exists() {
                     match deploy::read_modsettings_snapshot(&paths.modsettings_path) {
                         Ok(snapshot) => {
-                            let current = modsettings_fingerprint(&snapshot);
+                            let current = deploy::modsettings_fingerprint(&snapshot);
                             lines.push(format!("Modsettings hash (current): {current}"));
                             let matches = self
                                 .library
@@ -10927,6 +11134,166 @@ Use Ctrl+R to reset this mod or F12 to reset all pins."
         self.input_mode = InputMode::Normal;
     }
 
+    /// Asks before moving the setup to another Larian folder. `can_decline` adds "Don't ask
+    /// again for this folder", for the prompt at startup.
+    fn offer_move(&mut self, to: PathBuf, can_decline: bool) {
+        let plan = switch::plan_move(&self.config, &self.library, &to);
+        self.open_dialog(Dialog {
+            title: "Move your mod setup?".to_string(),
+            message: move_plan_message(&plan),
+            yes_label: "Move my setup".to_string(),
+            no_label: "Not now".to_string(),
+            choice: DialogChoice::Yes,
+            kind: DialogKind::MoveSetup { plan, can_decline },
+            toggle: can_decline.then(|| DialogToggle {
+                label: "Don't ask again for this folder".to_string(),
+                checked: false,
+            }),
+            toggle_alt: None,
+            scroll: 0,
+        });
+    }
+
+    fn offer_resume_move(&mut self, journal: switch::MoveJournal) {
+        let message = format!(
+            "Moving your setup didn't finish.\n\nFrom: {}\nTo: {}\n\nFinish the move, or go back: your mods return to the From folder, and the To folder gets its own load order back.",
+            folder_label(&journal.from),
+            folder_label(&journal.to)
+        );
+        self.queued_dialogs.push_back(Dialog {
+            title: "Finish moving your setup?".to_string(),
+            message,
+            yes_label: "Finish the move".to_string(),
+            no_label: "Go back".to_string(),
+            choice: DialogChoice::Yes,
+            kind: DialogKind::ResumeMove { journal },
+            toggle: None,
+            toggle_alt: None,
+            scroll: 0,
+        });
+    }
+
+    fn offer_copy_saves(&mut self, from: PathBuf, to: PathBuf) {
+        let names = switch::saves_only_in(&from, &to);
+        let message = format!(
+            "{} save(s) are only in the old folder:\n{}\n\nCopy them to the new one? Saves already there are never overwritten, and the old folder keeps its copies.",
+            names.len(),
+            folder_label(&from)
+        );
+        self.queued_dialogs.push_back(Dialog {
+            title: "Copy your saves?".to_string(),
+            message,
+            yes_label: "Copy saves".to_string(),
+            no_label: "Skip".to_string(),
+            choice: DialogChoice::Yes,
+            kind: DialogKind::CopySaves { from, to },
+            toggle: None,
+            toggle_alt: None,
+            scroll: 0,
+        });
+    }
+
+    /// Compares the last deploy with what is on disk: puts back links that went missing, takes
+    /// recorded links out of a folder SigilSmith isn't set to, and offers to remove links to
+    /// its store that no deploy recorded.
+    fn check_links(&mut self) {
+        let deployed =
+            deploy::DeployedFiles::load(&self.config.data_dir, &self.config.sigillink_cache_root());
+        let drift = deployed.drift(&self.config.larian_dir);
+        if drift.missing > 0 || drift.elsewhere > 0 {
+            self.log_warn(format!(
+                "Deployed links: {} missing, {} still in a Larian folder SigilSmith isn't set to. Deploying again fixes both.",
+                drift.missing, drift.elsewhere
+            ));
+            self.queue_deploy("repair links");
+        }
+        if drift.changed > 0 {
+            self.log_warn(format!(
+                "{} deployed file(s) were replaced since the last deploy. The next deploy moves them to {} and links SigilSmith's copy again.",
+                drift.changed,
+                self.config.data_dir.join("set-aside").display()
+            ));
+        }
+        if self.dialog.is_some() {
+            return;
+        }
+        let mut folders = Vec::new();
+        let mut paths = Vec::new();
+        for folder in bg3::larian_dir_candidates(Some(&self.config.game_root)) {
+            if self.config.keep_links_in.contains(&folder) {
+                continue;
+            }
+            let found = deployed.stray_links_in(&folder.join("Mods"));
+            if !found.is_empty() {
+                folders.push(folder);
+                paths.extend(found);
+            }
+        }
+        if paths.is_empty() {
+            return;
+        }
+        let mut message = format!(
+            "Found {} link(s) to SigilSmith's library that no deploy recorded, in the Mods folder of:\n",
+            paths.len()
+        );
+        for folder in &folders {
+            message.push_str(&format!("{}\n", folder_label(folder)));
+        }
+        message.push_str(
+            "\nThey're left from an earlier setup. BG3 loads them when it runs from that folder, outside your load order.\n\nRemove them? Only these links go: the mods stay in SigilSmith's library and nothing else in the folder changes. If you keep them, SigilSmith won't ask again for these folders.",
+        );
+        self.log_warn(format!(
+            "Leftover SigilSmith links: {}",
+            paths
+                .iter()
+                .map(|path| path.display().to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+        self.open_dialog(Dialog {
+            title: "Remove leftover links?".to_string(),
+            message,
+            yes_label: "Remove leftovers".to_string(),
+            no_label: "Keep them".to_string(),
+            choice: DialogChoice::Yes,
+            kind: DialogKind::StrayLinks { folders, paths },
+            toggle: None,
+            toggle_alt: None,
+            scroll: 0,
+        });
+    }
+
+    fn queue_move(&mut self, to: PathBuf) {
+        if !game::looks_like_game_root(self.game_id, &self.config.game_root) {
+            self.status = "Game root missing: select BG3 install root".to_string();
+            self.start_setup(SetupStep::GameRoot);
+            return;
+        }
+        self.status = format!("Move queued: {}", folder_label(&to));
+        // The move ends with its own toast and dialogs, so Settings doesn't reopen over them.
+        self.settings_menu_return = false;
+        self.pending_move = Some(to);
+        self.deploy_pending = true;
+    }
+
+    fn start_copy_saves(&mut self, from: PathBuf, to: PathBuf) {
+        if self.deploy_active {
+            self.set_toast(
+                "Deploy in progress - copy saves again from the log later",
+                ToastLevel::Warn,
+                Duration::from_secs(3),
+            );
+            return;
+        }
+        self.deploy_active = true;
+        self.status = "Copying saves...".to_string();
+        let tx = self.deploy_tx.clone();
+        thread::spawn(move || {
+            let result = switch::copy_missing_saves(&from, &to).map_err(|err| format!("{err:#}"));
+            let _ = tx.send(DeployMessage::SavesCopied { result });
+        });
+    }
+
     fn open_sigillink_relocation_dialog(&mut self, target_root: PathBuf) {
         self.open_dialog(Dialog {
             title: "SigiLink needs a cache location on the BG3 drive".to_string(),
@@ -11326,8 +11693,9 @@ Use Ctrl+R to reset this mod or F12 to reset all pins."
                     }
                     DialogChoice::Alt => self.copy_launch_option(&setup),
                     DialogChoice::No
-                        if !setup.can_set_up()
-                            && setup.launch_option_check() == SetupCheck::Missing =>
+                        if (!setup.can_set_up()
+                            && setup.launch_option_check() == SetupCheck::Missing)
+                            || setup.needs_launcher_check() =>
                     {
                         self.copy_launch_option(&setup);
                     }
@@ -11407,6 +11775,85 @@ Use Ctrl+R to reset this mod or F12 to reset all pins."
             DialogKind::UpdateRestart => {
                 if matches!(choice, DialogChoice::Yes) {
                     self.restart_into_update();
+                }
+            }
+            DialogKind::MoveSetup { plan, can_decline } => {
+                if matches!(choice, DialogChoice::Yes) {
+                    self.queue_move(plan.to);
+                } else {
+                    if can_decline && dialog.toggle.is_some_and(|toggle| toggle.checked) {
+                        self.config.declined_move = Some(plan.to.clone());
+                        let _ = self.config.save();
+                        self.log_info(format!("Won't offer moving to {} again", plan.to.display()));
+                    }
+                    self.status =
+                        "Move skipped: Esc → Configure Game Paths to move later".to_string();
+                    self.ensure_setup();
+                }
+            }
+            DialogKind::CopySaves { from, to } => {
+                if matches!(choice, DialogChoice::Yes) {
+                    self.start_copy_saves(from, to);
+                }
+            }
+            DialogKind::StrayLinks { folders, paths } => {
+                if matches!(choice, DialogChoice::Yes) {
+                    let deployed = deploy::DeployedFiles::load(
+                        &self.config.data_dir,
+                        &self.config.sigillink_cache_root(),
+                    );
+                    let removed = deployed.remove_links(&paths);
+                    self.log_info(format!("Removed {removed} leftover SigilSmith link(s)"));
+                    self.set_toast(
+                        &format!("Removed {removed} leftover link(s)"),
+                        ToastLevel::Info,
+                        Duration::from_secs(3),
+                    );
+                } else {
+                    for folder in folders {
+                        self.log_info(format!(
+                            "Keeping SigilSmith's leftover links in {}; won't ask again",
+                            folder.display()
+                        ));
+                        if !self.config.keep_links_in.contains(&folder) {
+                            self.config.keep_links_in.push(folder);
+                        }
+                    }
+                    let _ = self.config.save();
+                }
+            }
+            DialogKind::ResumeMove { journal } => {
+                if matches!(choice, DialogChoice::Yes) {
+                    self.queue_move(journal.to);
+                } else {
+                    // Deploying to the folder SigilSmith is still set to then takes the
+                    // recorded links out of the unfinished one.
+                    match switch::abandon_move(&self.config, &journal) {
+                        Ok(undone) => {
+                            let to = journal.to.display();
+                            if undone.removed_links > 0 {
+                                self.log_info(format!(
+                                    "Removed {} link(s) the unfinished move made in {to}",
+                                    undone.removed_links
+                                ));
+                            }
+                            if undone.restored_modsettings {
+                                self.log_info(format!(
+                                    "Put back the load order {to} had before the move"
+                                ));
+                            }
+                            self.queue_deploy("undo unfinished move");
+                        }
+                        Err(err) => {
+                            self.status = format!("Couldn't go back: {err}");
+                            self.log_error(format!("Undoing the unfinished move failed: {err:#}"));
+                            self.set_toast(
+                                &format!("Couldn't go back: {err}"),
+                                ToastLevel::Error,
+                                Duration::from_secs(5),
+                            );
+                        }
+                    }
                 }
             }
             DialogKind::UpdateCommand { command } => {
@@ -11613,6 +12060,14 @@ Use Ctrl+R to reset this mod or F12 to reset all pins."
             self.log_warn(format!(
                 "Native mod file remove skipped: outside Mods dir ({})",
                 pak_path.display()
+            ));
+            return;
+        }
+        let deployed =
+            deploy::DeployedFiles::load(&self.config.data_dir, &self.config.sigillink_cache_root());
+        if deployed.is_ours(&pak_path) {
+            self.log_warn(format!(
+                "Kept {file_name}: SigilSmith deployed it for a mod it manages"
             ));
             return;
         }
@@ -12717,6 +13172,7 @@ Use Ctrl+R to reset this mod or F12 to reset all pins."
                 name,
                 uuid,
                 search_link,
+                in_game: mod_entry.is_native(),
             });
         }
         items
@@ -12807,7 +13263,9 @@ Use Ctrl+R to reset this mod or F12 to reset all pins."
                         .collect()
                 })
                 .unwrap_or_default();
-            items.retain(|item| enabled_ids.contains(&item.mod_id));
+            // In-game mods the folder hasn't downloaded yet (as after a move) are expected:
+            // the log lists them and the mod list marks them missing.
+            items.retain(|item| enabled_ids.contains(&item.mod_id) && !item.in_game);
             if items.is_empty() {
                 return;
             }
@@ -12935,6 +13393,17 @@ Use Ctrl+R to reset this mod or F12 to reset all pins."
             self.set_toast(
                 "Finish the move first (m or Esc)",
                 ToastLevel::Warn,
+                Duration::from_secs(3),
+            );
+            return;
+        }
+        if self.deploy_active {
+            // Stopping a deploy halfway would leave links without a record of them.
+            self.quit_after_deploy = true;
+            self.status = "Quitting once the current deploy finishes".to_string();
+            self.set_toast(
+                "Quitting once the current deploy finishes",
+                ToastLevel::Info,
                 Duration::from_secs(3),
             );
             return;
@@ -13448,11 +13917,15 @@ Use Ctrl+R to reset this mod or F12 to reset all pins."
         if !self.deploy_pending || self.deploy_active {
             return;
         }
-        // Wait while a mod is being moved: its new place isn't settled yet.
+        // Wait while a mod is being moved: its new place isn't settled yet. Wait for the
+        // startup sync too, so a deploy writes the game's load order only after reading it.
         if self.move_mode
+            || self.startup_pending
+            || self.native_sync_active
             || self.import_active.is_some()
             || self.import_apply_active
             || self.dialog.is_some()
+            || !self.queued_dialogs.is_empty()
             || self.pending_duplicate.is_some()
             || !self.duplicate_queue.is_empty()
         {
@@ -13471,6 +13944,34 @@ Use Ctrl+R to reset this mod or F12 to reset all pins."
             );
         }
         self.refresh_sigillink_missing_paks();
+
+        if let Some(to) = self.pending_move.take() {
+            // The move deploys into the new folder; it covers any deploy queued with it.
+            self.deploy_reason = None;
+            self.deploy_pending = false;
+            self.deploy_active = true;
+            self.status = format!("Moving your setup to {}", to.display());
+            self.log_info(format!(
+                "Moving the setup from {} to {}",
+                self.config.larian_dir.display(),
+                to.display()
+            ));
+            let tx = self.deploy_tx.clone();
+            let mut config = self.config.clone();
+            let mut library = self.library.clone();
+            thread::spawn(move || {
+                let message = match switch::move_setup(&mut config, &mut library, &to) {
+                    Ok(report) => DeployMessage::Moved { report, to },
+                    // The move resumes once the cache has moved.
+                    Err(err) => sigillink_relocation(&err).unwrap_or(DeployMessage::MoveFailed {
+                        error: format!("{err:#}"),
+                        to,
+                    }),
+                };
+                let _ = tx.send(message);
+            });
+            return;
+        }
 
         let reason = self
             .deploy_reason
@@ -13514,25 +14015,9 @@ Use Ctrl+R to reset this mod or F12 to reset all pins."
             );
             let message = match result {
                 Ok(report) => DeployMessage::Completed { report },
-                Err(err) => {
-                    let relocate = err
-                        .downcast_ref::<deploy::SigilLinkRelocationError>()
-                        .or_else(|| {
-                            err.chain().find_map(|cause| {
-                                cause.downcast_ref::<deploy::SigilLinkRelocationError>()
-                            })
-                        });
-                    if let Some(relocate) = relocate {
-                        DeployMessage::SigilLinkRelocation {
-                            error: relocate.to_string(),
-                            target_root: relocate.target_root.clone(),
-                        }
-                    } else {
-                        DeployMessage::Failed {
-                            error: err.to_string(),
-                        }
-                    }
-                }
+                Err(err) => sigillink_relocation(&err).unwrap_or(DeployMessage::Failed {
+                    error: err.to_string(),
+                }),
             };
             let _ = tx.send(message);
         });
@@ -13577,38 +14062,119 @@ Use Ctrl+R to reset this mod or F12 to reset all pins."
         }
     }
 
+    fn finish_deploy_report(&mut self, report: deploy::DeployReport) {
+        self.status = format!(
+            "Deployed: {} pak, {} loose | Files: {} | Overrides: {}",
+            report.pak_count, report.loose_count, report.file_count, report.overridden_files
+        );
+        if report.removed_count > 0 {
+            self.log_info(format!(
+                "Cleanup: removed {} previous files",
+                report.removed_count
+            ));
+        }
+        for warning in &report.warnings {
+            self.log_warn(format!("Deploy warning: {warning}"));
+        }
+        if !report.link_mode_summary.is_empty() && report.link_mode_summary != "none" {
+            self.log_info(format!("SigiLink mode: {}", report.link_mode_summary));
+        }
+        self.log_info(format!(
+            "Deploy complete: {} pak, {} loose, {} files, {} overrides",
+            report.pak_count, report.loose_count, report.file_count, report.overridden_files
+        ));
+        if report.modsettings_hash.is_some() {
+            // SigilSmith's own write: not a change for the next sync to apply.
+            self.library.modsettings_hash = report.modsettings_hash.clone();
+        }
+        if !report.missing_mods.is_empty() {
+            self.set_toast(
+                &format!(
+                    "{} enabled mod(s) have no file in this Mods folder: see log",
+                    report.missing_mods.len()
+                ),
+                ToastLevel::Warn,
+                Duration::from_secs(6),
+            );
+        }
+        let _ = self.library.save(&self.config.data_dir);
+    }
+
     fn handle_deploy_message(&mut self, message: DeployMessage) {
         self.deploy_active = false;
         match message {
-            DeployMessage::Completed { report } => {
-                self.status = format!(
-                    "Deployed: {} pak, {} loose | Files: {} | Overrides: {}",
-                    report.pak_count,
-                    report.loose_count,
-                    report.file_count,
-                    report.overridden_files
-                );
-                if report.removed_count > 0 {
+            DeployMessage::Completed { report } => self.finish_deploy_report(report),
+            DeployMessage::Moved { report, to } => {
+                let from = std::mem::replace(&mut self.config.larian_dir, to.clone());
+                self.config.declined_move = None;
+                let _ = self.config.save();
+                switch::adopt_mods(&mut self.library, &report.adopted);
+                for entry in &report.adopted {
                     self.log_info(format!(
-                        "Cleanup: removed {} previous files",
-                        report.removed_count
+                        "Added {}: it was turned on in the new folder's load order",
+                        entry.display_name()
                     ));
                 }
-                for warning in &report.warnings {
-                    self.log_warn(format!("Deploy warning: {warning}"));
-                }
-                if !report.link_mode_summary.is_empty() && report.link_mode_summary != "none" {
-                    self.log_info(format!("SigiLink mode: {}", report.link_mode_summary));
-                }
                 self.log_info(format!(
-                    "Deploy complete: {} pak, {} loose, {} files, {} overrides",
-                    report.pak_count,
-                    report.loose_count,
-                    report.file_count,
-                    report.overridden_files
+                    "Moved the setup from {} to {}. Backup: {}",
+                    from.display(),
+                    to.display(),
+                    report.backup.display()
                 ));
-                let _ = self.library.save(&self.config.data_dir);
+                let waiting = report.deploy.missing_mods.len();
+                self.finish_deploy_report(report.deploy);
+                let toast = if waiting == 0 {
+                    "Setup moved: mods are linked in the new folder".to_string()
+                } else {
+                    format!(
+                        "Setup moved. {waiting} mod(s) wait for the game to download them: see log"
+                    )
+                };
+                self.set_toast(&toast, ToastLevel::Info, Duration::from_secs(5));
+                self.start_native_sync();
+                self.queue_conflict_scan("moved setup");
+                if !switch::saves_only_in(&from, &to).is_empty() {
+                    self.offer_copy_saves(from, to);
+                }
             }
+            DeployMessage::MoveFailed { error, to } => {
+                self.status = format!("Move failed: {error}");
+                self.log_error(format!(
+                    "Moving the setup to {} failed: {error}",
+                    to.display()
+                ));
+                self.set_toast(
+                    &format!("Move failed: {error}"),
+                    ToastLevel::Error,
+                    Duration::from_secs(5),
+                );
+                if let Some(journal) = switch::pending_move(&self.config.data_dir) {
+                    self.offer_resume_move(journal);
+                }
+            }
+            DeployMessage::SavesCopied { result } => match result {
+                Ok(count) => {
+                    self.status = format!("Copied {count} save(s)");
+                    self.log_info(format!(
+                        "Copied {count} save(s) into {}",
+                        self.config.larian_dir.display()
+                    ));
+                    self.set_toast(
+                        &format!("Copied {count} save(s)"),
+                        ToastLevel::Info,
+                        Duration::from_secs(3),
+                    );
+                }
+                Err(error) => {
+                    self.status = format!("Copying saves failed: {error}");
+                    self.log_error(format!("Copying saves failed: {error}"));
+                    self.set_toast(
+                        "Copying saves failed: see log",
+                        ToastLevel::Error,
+                        Duration::from_secs(4),
+                    );
+                }
+            },
             DeployMessage::SigilLinkRelocation { error, target_root } => {
                 self.status = format!("Deploy paused: {error}");
                 self.log_warn(format!("Deploy halted for SigiLink relocation: {error}"));
@@ -13624,6 +14190,9 @@ Use Ctrl+R to reset this mod or F12 to reset all pins."
 
         if self.deploy_pending {
             self.maybe_start_deploy();
+        }
+        if self.quit_after_deploy && !self.deploy_active {
+            self.should_quit = true;
         }
     }
 
@@ -14151,6 +14720,49 @@ fn from_hex(byte: u8) -> Option<u8> {
         b'a'..=b'f' => Some(byte - b'a' + 10),
         b'A'..=b'F' => Some(byte - b'A' + 10),
         _ => None,
+    }
+}
+
+/// `path` with the home folder shown as `~`, for dialogs where full paths are too long.
+fn home_path(path: &Path) -> String {
+    let home = BaseDirs::new().map(|base| base.home_dir().to_path_buf());
+    match home
+        .as_deref()
+        .and_then(|home| path.strip_prefix(home).ok())
+    {
+        Some(rest) => format!("~/{}", rest.display()),
+        None => path.display().to_string(),
+    }
+}
+
+/// The Wine prefix a Larian folder is in (`…/compatdata/1086940` rather than its `pfx`), if any.
+fn wine_prefix(path: &Path) -> Option<PathBuf> {
+    let text = path.to_string_lossy();
+    let prefix = Path::new(&text[..text.find("/drive_c/")?]);
+    if prefix.ends_with("pfx") {
+        return Some(prefix.parent().unwrap_or(prefix).to_path_buf());
+    }
+    Some(prefix.to_path_buf())
+}
+
+/// A suggested Larian folder shown by its Wine prefix when it has one: the rest of the path
+/// is the same for every prefix, so the prefix is the part that tells them apart.
+fn suggestion_path_label(path: &Path) -> String {
+    match wine_prefix(path) {
+        Some(prefix) => format!("prefix {}", home_path(&prefix)),
+        None => home_path(path),
+    }
+}
+
+/// A Larian folder for dialogs, named by its prefix when it's in one (see
+/// `suggestion_path_label`), which also keeps it short enough for one line.
+fn folder_label(path: &Path) -> String {
+    match wine_prefix(path) {
+        Some(prefix) if prefix.to_string_lossy().contains("/compatdata/") => {
+            format!("Proton prefix {}", home_path(&prefix))
+        }
+        Some(prefix) => format!("Wine prefix {}", home_path(&prefix)),
+        None => home_path(path),
     }
 }
 
@@ -15107,31 +15719,6 @@ fn collect_metadata_updates(
     Ok(updates)
 }
 
-fn modsettings_fingerprint(snapshot: &deploy::ModSettingsSnapshot) -> String {
-    let mut hasher = Hasher::new();
-    hasher.update(b"modsettings-v2");
-    let mut module_ids: Vec<&str> = snapshot
-        .modules
-        .iter()
-        .map(|module| module.info.uuid.as_str())
-        .collect();
-    module_ids.sort();
-    for id in module_ids {
-        hasher.update(id.as_bytes());
-    }
-    let mut enabled_ids: Vec<&str> = snapshot.enabled.iter().map(|id| id.as_str()).collect();
-    enabled_ids.sort();
-    hasher.update(b"|enabled|");
-    for id in enabled_ids {
-        hasher.update(id.as_bytes());
-    }
-    hasher.update(b"|order|");
-    for id in &snapshot.order {
-        hasher.update(id.as_bytes());
-    }
-    hasher.finalize().to_hex().to_string()
-}
-
 fn sync_native_mods_delta(
     game_id: GameId,
     config: &GameConfig,
@@ -15152,11 +15739,13 @@ fn sync_native_mods_delta(
         enabled,
     } = snapshot;
     let modsettings_hash = if modsettings_exists {
-        Some(modsettings_fingerprint(&deploy::ModSettingsSnapshot {
-            modules: modules.clone(),
-            order: order.clone(),
-            enabled: enabled.clone(),
-        }))
+        Some(deploy::modsettings_fingerprint(
+            &deploy::ModSettingsSnapshot {
+                modules: modules.clone(),
+                order: order.clone(),
+                enabled: enabled.clone(),
+            },
+        ))
     } else {
         None
     };
@@ -15376,6 +15965,7 @@ fn sync_native_mods_delta(
     }
     ordered.extend(modules_by_uuid.into_values());
 
+    let deployed = deploy::DeployedFiles::load(&config.data_dir, &config.sigillink_cache_root());
     let mut added = Vec::new();
     let total_add = ordered.len();
     for (index, module) in ordered.into_iter().enumerate() {
@@ -15395,6 +15985,11 @@ fn sync_native_mods_delta(
         let filename = native_pak::resolve_native_pak_filename(&info, &native_pak_index)
             .unwrap_or_else(|| format!("{}.pak", info.folder));
         let pak_path = paths.larian_mods_dir.join(&filename);
+        // A load-order entry for a file SigilSmith deployed belongs to a managed mod, even
+        // when the UUIDs disagree; never add that file again as an in-game mod.
+        if deployed.is_ours(&pak_path) {
+            continue;
+        }
         let pak_meta = metadata::read_meta_lsx_from_pak_cached(pak_cache, &pak_path);
         let meta_created = pak_meta.as_ref().and_then(|meta| meta.created_at);
         let mut dependencies = pak_meta
@@ -15437,7 +16032,75 @@ fn sync_native_mods_delta(
         modsettings_hash,
         enabled_set,
         order,
+        larian_dir: config.larian_dir.clone(),
     })
+}
+
+/// The pause for moving the SigiLink cache, when a deploy stopped for it.
+fn sigillink_relocation(err: &anyhow::Error) -> Option<DeployMessage> {
+    let relocate = err
+        .downcast_ref::<deploy::SigilLinkRelocationError>()
+        .or_else(|| {
+            err.chain()
+                .find_map(|cause| cause.downcast_ref::<deploy::SigilLinkRelocationError>())
+        })?;
+    Some(DeployMessage::SigilLinkRelocation {
+        error: relocate.to_string(),
+        target_root: relocate.target_root.clone(),
+    })
+}
+
+fn move_plan_message(plan: &switch::MovePlan) -> String {
+    let mut lines = vec![
+        format!("From: {}", folder_label(&plan.from)),
+        format!("To: {}", folder_label(&plan.to)),
+        String::new(),
+        "SigilSmith takes its links out of the old Mods folder and makes them in the new one, so each mod stays one file in SigilSmith's library. Your load order comes along. A backup is made first.".to_string(),
+        String::new(),
+        format!("• {} file(s) from SigilSmith's library", plan.managed),
+    ];
+    if plan.native_found > 0 {
+        lines.push(format!(
+            "• {} in-game mod(s) the new folder already has",
+            plan.native_found
+        ));
+    }
+    if !plan.native_missing.is_empty() {
+        lines.push(format!(
+            "• Not downloaded there yet: {}. They stay on your list and join the load order once the game downloads them.",
+            plan.native_missing.join(", ")
+        ));
+    }
+    if !plan.new_folder_only.is_empty() {
+        lines.push(format!(
+            "• Turned on only in the new folder, joining your list: {}",
+            plan.new_folder_only.join(", ")
+        ));
+    }
+    if !plan.saves_only_in_from.is_empty() {
+        lines.push(format!(
+            "• {} save(s) are only in the old folder: you can copy them next",
+            plan.saves_only_in_from.len()
+        ));
+    }
+    lines.push(String::new());
+    lines.push("Close the game before moving. Steam's settings aren't changed.".to_string());
+    lines.join("\n")
+}
+
+/// Applies pending one-time library repairs, backing up the library first when one changes
+/// something.
+fn run_library_repairs(config: &GameConfig, library: &mut Library) -> Vec<repair::IdRepair> {
+    if library.repair_version >= repair::REPAIR_VERSION {
+        return Vec::new();
+    }
+    let before = library.clone();
+    let repairs = repair::run_pending_repairs(library, &config.sigillink_cache_root());
+    if !repairs.is_empty() {
+        let _ = backup::create_backup(config, &before, None, Some("before mod ID repair"));
+    }
+    let _ = library.save(&config.data_dir);
+    repairs
 }
 
 fn now_timestamp() -> i64 {
@@ -15857,5 +16520,23 @@ mod tests {
             ..row
         };
         assert!(same.change_groups(false).is_empty());
+    }
+
+    #[test]
+    fn prefix_folders_are_named_by_their_prefix() {
+        let larian = "drive_c/users/steamuser/AppData/Local/Larian Studios/Baldur's Gate 3";
+        let proton = Path::new("/games/steamapps/compatdata/1086940/pfx").join(larian);
+        assert_eq!(
+            folder_label(&proton),
+            "Proton prefix /games/steamapps/compatdata/1086940"
+        );
+        assert_eq!(
+            suggestion_path_label(&proton),
+            "prefix /games/steamapps/compatdata/1086940"
+        );
+        let lutris = Path::new("/games/baldurs-gate-3").join(larian);
+        assert_eq!(folder_label(&lutris), "Wine prefix /games/baldurs-gate-3");
+        let native = Path::new("/data/Larian Studios/Baldur's Gate 3");
+        assert_eq!(folder_label(native), "/data/Larian Studios/Baldur's Gate 3");
     }
 }

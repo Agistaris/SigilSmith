@@ -787,27 +787,8 @@ fn import_single_pak(
     json_mods: &[metadata::JsonModInfo],
     _reporter: Option<&ProgressReporter>,
 ) -> Result<ImportMod> {
-    let file = fs::File::open(path).context("open .pak")?;
-    let lspk = lspk::Reader::new(file)
-        .ok()
-        .and_then(|mut reader| reader.read().ok());
-    let mut meta_info = None;
-    let mut module_info = None;
-    if let Some(lspk) = lspk {
-        if let Ok(meta) = lspk.extract_meta_lsx() {
-            meta_info = Some(metadata::parse_meta_lsx(&meta.decompressed_bytes));
-            if let Ok(parsed) = meta.deserialize_as_mod_pak() {
-                module_info = Some(parsed.module_info);
-            }
-        }
-    }
-    if meta_info.is_none() {
-        meta_info = metadata::read_meta_lsx_from_pak(path);
-    }
-    let meta_info = meta_info.unwrap_or_default();
-    let pak_info = module_info
-        .map(PakInfo::from_module_info)
-        .or_else(|| pak_info_from_meta(&meta_info));
+    fs::File::open(path).context("open .pak")?;
+    let (pak_info, meta_info) = read_pak_info(path);
     let Some(pak_info) = pak_info else {
         return import_override_pak(path, data_dir, source_label, source_times);
     };
@@ -881,6 +862,33 @@ fn import_single_pak(
         staging_root: Some(staging_root),
         sigillink: None,
     })
+}
+
+/// The module BG3 knows a pak by (None for a pak without a usable meta.lsx), with the rest
+/// of its meta.lsx.
+pub fn read_pak_info(path: &Path) -> (Option<PakInfo>, metadata::ModMeta) {
+    let lspk = fs::File::open(path)
+        .ok()
+        .and_then(|file| lspk::Reader::new(file).ok())
+        .and_then(|mut reader| reader.read().ok());
+    let mut meta_info = None;
+    let mut module_info = None;
+    if let Some(lspk) = lspk {
+        if let Ok(meta) = lspk.extract_meta_lsx() {
+            meta_info = Some(metadata::parse_meta_lsx(&meta.decompressed_bytes));
+            if let Ok(parsed) = meta.deserialize_as_mod_pak() {
+                module_info = Some(parsed.module_info);
+            }
+        }
+    }
+    if meta_info.is_none() {
+        meta_info = metadata::read_meta_lsx_from_pak(path);
+    }
+    let meta_info = meta_info.unwrap_or_default();
+    let pak_info = module_info
+        .map(PakInfo::from_module_info)
+        .or_else(|| pak_info_from_meta(&meta_info));
+    (pak_info, meta_info)
 }
 
 fn pak_info_from_meta(meta: &metadata::ModMeta) -> Option<PakInfo> {

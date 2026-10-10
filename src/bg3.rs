@@ -74,6 +74,40 @@ pub fn larian_dir_candidates(game_root: Option<&Path>) -> Vec<PathBuf> {
     }
 }
 
+/// Larian folders to offer when picking one, each with where it comes from: Steam's native
+/// build and Proton prefixes first, then other launchers' Wine prefixes (read-only).
+pub fn larian_dir_suggestions(game_root: Option<&Path>) -> Vec<(String, PathBuf)> {
+    match dirs_home() {
+        Some(home) => larian_dir_suggestions_in(&home, game_root),
+        None => Vec::new(),
+    }
+}
+
+pub(crate) fn larian_dir_suggestions_in(
+    home: &Path,
+    game_root: Option<&Path>,
+) -> Vec<(String, PathBuf)> {
+    let native = native_larian_dir(home);
+    let mut out: Vec<(String, PathBuf)> = Vec::new();
+    for dir in larian_dir_candidates_in(home, game_root) {
+        if !looks_like_larian_dir(&dir) {
+            continue;
+        }
+        let label = if same_path(&dir, &native) {
+            "Steam, native build"
+        } else {
+            "Steam, Proton"
+        };
+        out.push((label.to_string(), dir));
+    }
+    for item in crate::launchers::larian_dirs(home) {
+        if !out.iter().any(|(_, dir)| same_path(dir, &item.larian_dir)) {
+            out.push((item.launcher.to_string(), item.larian_dir));
+        }
+    }
+    out
+}
+
 /// The Larian data dir Steam's launch settings say BG3 reads, when it exists
 /// and differs from `larian_dir`.
 pub fn larian_dir_mismatch(game_root: &Path, larian_dir: &Path) -> Option<PathBuf> {
@@ -335,19 +369,45 @@ pub struct ScriptExtenderSetup {
     /// Steam has created BG3's Proton prefix, so SigilSmith can set the
     /// override there.
     pub prefix_exists: bool,
+    /// The game isn't in a Steam library (Lutris, Heroic, Bottles, GOG...):
+    /// SigilSmith can't read that launcher's Wine settings.
+    pub other_launcher: bool,
+    /// BG3LE, the Script Extender for the native Linux build, when installed.
+    pub native_extender: Option<NativeExtender>,
 }
 
+/// BG3LE (github.com/lenonk/bg3le, Nexus mod 25431): its installer puts a
+/// launch wrapper in `~/.local/share/bg3le` and in front of `%command%` in
+/// BG3's Steam launch options. SigilSmith only reads both.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct NativeExtender {
+    /// From its `version` file; a build from source has none.
+    pub version: Option<String>,
+    pub wrapper: PathBuf,
+}
+
+pub const BG3LE_WRAPPER_NAME: &str = "bg3le-launch";
+/// The variable another launcher has to set for the Script Extender's DLL.
+pub const LAUNCHER_DLL_OVERRIDE: &str = "WINEDLLOVERRIDES=\"DWrite.dll=n,b\"";
+
 impl ScriptExtenderSetup {
+    /// Steam runs the native build and BG3LE is installed: the Script Extender
+    /// comes from BG3LE, so Proton, DWrite.dll and its override don't apply.
+    pub fn uses_bg3le(&self) -> bool {
+        self.uses_proton == Some(false) && self.native_extender.is_some()
+    }
+
     pub fn proton_check(&self) -> SetupCheck {
         match self.uses_proton {
             Some(true) => SetupCheck::Ok,
+            Some(false) if self.uses_bg3le() => SetupCheck::Unknown,
             Some(false) => SetupCheck::Missing,
             None => SetupCheck::Unknown,
         }
     }
 
     pub fn installed_check(&self) -> SetupCheck {
-        if self.installed {
+        if self.installed || self.uses_bg3le() {
             SetupCheck::Ok
         } else {
             SetupCheck::Missing
@@ -355,6 +415,13 @@ impl ScriptExtenderSetup {
     }
 
     pub fn launch_option_check(&self) -> SetupCheck {
+        if self.uses_bg3le() {
+            return match &self.launch_options {
+                Some(options) if options.contains(BG3LE_WRAPPER_NAME) => SetupCheck::Ok,
+                Some(_) => SetupCheck::Missing,
+                None => SetupCheck::Unknown,
+            };
+        }
         if self.prefix_override {
             return SetupCheck::Ok;
         }
@@ -365,6 +432,12 @@ impl ScriptExtenderSetup {
         }
     }
 
+    /// The DLL is in place for a launcher whose Wine settings SigilSmith can't
+    /// read: the player has to check the override there.
+    pub fn needs_launcher_check(&self) -> bool {
+        self.other_launcher && self.installed
+    }
+
     pub fn is_ready(&self) -> bool {
         self.problem().is_none()
     }
@@ -372,11 +445,15 @@ impl ScriptExtenderSetup {
     /// The first missing piece, short enough for the Details panel.
     pub fn problem(&self) -> Option<&'static str> {
         if self.proton_check() == SetupCheck::Missing {
-            Some("needs Proton")
+            Some("needs Proton or BG3LE")
         } else if self.installed_check() == SetupCheck::Missing {
             Some("not installed")
         } else if self.launch_option_check() == SetupCheck::Missing {
-            Some("launch option missing")
+            Some(if self.uses_bg3le() {
+                "BG3LE launch option missing"
+            } else {
+                "launch option missing"
+            })
         } else {
             None
         }
@@ -384,7 +461,9 @@ impl ScriptExtenderSetup {
 
     /// SigilSmith can set the override in the Proton prefix itself.
     pub fn can_set_override(&self) -> bool {
-        self.launch_option_check() == SetupCheck::Missing && self.prefix_exists
+        !self.uses_bg3le()
+            && self.launch_option_check() == SetupCheck::Missing
+            && self.prefix_exists
     }
 
     /// Something "Set up for me" can fix: the DLL or the prefix override.
@@ -392,25 +471,49 @@ impl ScriptExtenderSetup {
         self.installed_check() == SetupCheck::Missing || self.can_set_override()
     }
 
-    /// The current launch options plus the DLL override, ready to paste.
+    /// The current launch options plus what the Script Extender needs, ready
+    /// to paste: BG3LE's wrapper on the native build, else the DLL override.
     pub fn suggested_launch_options(&self) -> String {
-        launch_options_with_dll_override(self.launch_options.as_deref().unwrap_or(""))
+        let current = self.launch_options.as_deref().unwrap_or("");
+        match &self.native_extender {
+            Some(extender) if self.uses_bg3le() => {
+                launch_options_with_wrapper(current, &extender.wrapper)
+            }
+            _ => launch_options_with_dll_override(current),
+        }
     }
 }
 
 pub fn script_extender_setup(game_root: &Path) -> ScriptExtenderSetup {
-    script_extender_setup_in(dirs_home().as_deref(), game_root)
+    let home = dirs_home();
+    let data_home = std::env::var_os("XDG_DATA_HOME")
+        .map(PathBuf::from)
+        .filter(|path| path.is_absolute())
+        .or_else(|| home.as_ref().map(|home| home.join(".local/share")));
+    script_extender_setup_with(home.as_deref(), data_home.as_deref(), game_root)
 }
 
+#[cfg(test)]
 fn script_extender_setup_in(home: Option<&Path>, game_root: &Path) -> ScriptExtenderSetup {
+    let data_home = home.map(|home| home.join(".local/share"));
+    script_extender_setup_with(home, data_home.as_deref(), game_root)
+}
+
+pub(crate) fn script_extender_setup_with(
+    home: Option<&Path>,
+    data_home: Option<&Path>,
+    game_root: &Path,
+) -> ScriptExtenderSetup {
     let mut setup = ScriptExtenderSetup {
         installed: dir_has_file(&game_root.join("bin"), "dwrite.dll"),
         ..ScriptExtenderSetup::default()
     };
     // Proton and launch options only apply to Steam installs.
     if steamapps_for_game_root(game_root).is_none() {
+        setup.other_launcher = true;
         return setup;
     }
+    setup.native_extender = data_home.and_then(bg3le_install);
     if let Some(user_reg) = proton_prefix_user_reg(game_root) {
         setup.prefix_exists = true;
         setup.prefix_override = fs::read(user_reg)
@@ -431,6 +534,35 @@ fn script_extender_setup_in(home: Option<&Path>, game_root: &Path) -> ScriptExte
     setup
 }
 
+/// BG3LE as its installer leaves it: the library and the launch wrapper in
+/// `<data home>/bg3le`.
+fn bg3le_install(data_home: &Path) -> Option<NativeExtender> {
+    let root = data_home.join("bg3le");
+    let wrapper = root.join("bin").join(BG3LE_WRAPPER_NAME);
+    if !root.join("lib/libbg3le.so").is_file() || !wrapper.is_file() {
+        return None;
+    }
+    let version = fs::read_to_string(root.join("version"))
+        .ok()
+        .map(|raw| raw.trim().to_string())
+        .filter(|version| !version.is_empty());
+    Some(NativeExtender { version, wrapper })
+}
+
+/// Puts BG3LE's wrapper in front of `%command%`, the way its installer does.
+pub fn launch_options_with_wrapper(existing: &str, wrapper: &Path) -> String {
+    let existing = existing.trim();
+    if existing.contains(BG3LE_WRAPPER_NAME) {
+        return existing.to_string();
+    }
+    let token = format!("\"{}\"", wrapper.display());
+    match existing.find("%command%") {
+        Some(index) => format!("{}{token} {}", &existing[..index], &existing[index..]),
+        // Options without %command% are arguments Steam passes to the game.
+        None => format!("{token} %command% {existing}").trim().to_string(),
+    }
+}
+
 /// The registry file of BG3's Proton prefix, once Steam has created it.
 fn proton_prefix_user_reg(game_root: &Path) -> Option<PathBuf> {
     let path = steamapps_for_game_root(game_root)?
@@ -438,6 +570,24 @@ fn proton_prefix_user_reg(game_root: &Path) -> Option<PathBuf> {
         .join(STEAM_APP_ID)
         .join("pfx/user.reg");
     path.is_file().then_some(path)
+}
+
+/// BG3 keeps an empty `ModCrashSanityCheck` folder in its Larian data folder while it runs and
+/// removes it on a clean exit. When it finds one at startup it turns every mod off, so a crash (or a
+/// killed game) resets the load order. Script Extender removes it at each launch; this does
+/// the same while the game isn't running. Returns the folder when one was removed.
+pub fn clear_crash_marker(larian_dir: &Path) -> Option<PathBuf> {
+    clear_crash_marker_in(larian_dir, game_running())
+}
+
+fn clear_crash_marker_in(larian_dir: &Path, running: bool) -> Option<PathBuf> {
+    let path = larian_dir.join("ModCrashSanityCheck");
+    let is_dir = fs::symlink_metadata(&path).is_ok_and(|meta| meta.is_dir());
+    if !is_dir || running {
+        return None;
+    }
+    // Only an empty folder, as the game leaves it.
+    fs::remove_dir(&path).ok().map(|()| path)
 }
 
 /// BG3 or its launcher running, or Wine still holding the game's prefix.
@@ -1082,7 +1232,7 @@ mod tests {
             setup.launch_options.as_deref(),
             Some("game-performance %command% --vulkan")
         );
-        assert_eq!(setup.problem(), Some("needs Proton"));
+        assert_eq!(setup.problem(), Some("needs Proton or BG3LE"));
 
         write_steam_config(&home.steam(), BG3_FORCED_PROTON);
         fs::write(game_root.join("bin/DWrite.dll"), b"dll").unwrap();
@@ -1133,6 +1283,82 @@ mod tests {
         assert_eq!(setup.uses_proton, None);
         assert_eq!(setup.launch_options, None);
         assert!(setup.is_ready());
+        // Ready as far as SigilSmith can tell, but the override is the launcher's.
+        assert!(setup.other_launcher);
+        assert!(setup.needs_launcher_check());
+    }
+
+    fn install_bg3le(home: &Path, version: Option<&str>) -> PathBuf {
+        let root = home.join(".local/share/bg3le");
+        fs::create_dir_all(root.join("lib")).unwrap();
+        fs::create_dir_all(root.join("bin")).unwrap();
+        fs::write(root.join("lib/libbg3le.so"), b"so").unwrap();
+        let wrapper = root.join("bin").join(BG3LE_WRAPPER_NAME);
+        fs::write(&wrapper, b"#!/bin/sh").unwrap();
+        if let Some(version) = version {
+            fs::write(root.join("version"), format!("{version}\n")).unwrap();
+        }
+        wrapper
+    }
+
+    #[test]
+    fn script_extender_setup_counts_bg3le_on_the_native_build() {
+        let home = TempHome::new("se-bg3le");
+        let game_root = make_game(&home.steam());
+        write_steam_config(&home.steam(), GLOBAL_PROTON_ONLY);
+        write_launch_options(&home.steam(), 7, "gamemoderun %command%");
+        let wrapper = install_bg3le(&home.0, Some("v0.3.4"));
+
+        let setup = script_extender_setup_in(Some(&home.0), &game_root);
+        assert!(setup.uses_bg3le(), "{setup:?}");
+        assert_eq!(
+            setup
+                .native_extender
+                .as_ref()
+                .and_then(|e| e.version.as_deref()),
+            Some("v0.3.4")
+        );
+        assert_eq!(setup.proton_check(), SetupCheck::Unknown);
+        assert_eq!(setup.installed_check(), SetupCheck::Ok);
+        assert_eq!(setup.problem(), Some("BG3LE launch option missing"));
+        // Nothing for "Set up for me": no DLL download, no prefix edit.
+        assert!(!setup.can_set_up());
+        assert_eq!(
+            setup.suggested_launch_options(),
+            format!("gamemoderun \"{}\" %command%", wrapper.display())
+        );
+
+        write_launch_options(&home.steam(), 7, &setup.suggested_launch_options());
+        let setup = script_extender_setup_in(Some(&home.0), &game_root);
+        assert!(setup.is_ready(), "{setup:?}");
+
+        // On Proton, BG3LE's wrapper leaves the game alone: the DLL route applies.
+        write_steam_config(&home.steam(), BG3_FORCED_PROTON);
+        let setup = script_extender_setup_in(Some(&home.0), &game_root);
+        assert!(!setup.uses_bg3le());
+        assert_eq!(setup.problem(), Some("not installed"));
+    }
+
+    #[test]
+    fn bg3le_wrapper_goes_in_front_of_the_command() {
+        let wrapper = Path::new("/home/me/.local/share/bg3le/bin/bg3le-launch");
+        let quoted = format!("\"{}\"", wrapper.display());
+        for (existing, expected) in [
+            ("", format!("{quoted} %command%")),
+            ("%command%", format!("{quoted} %command%")),
+            (
+                "--skip-launcher",
+                format!("{quoted} %command% --skip-launcher"),
+            ),
+            (
+                "PROTON_LOG=1 %command% -x",
+                format!("PROTON_LOG=1 {quoted} %command% -x"),
+            ),
+        ] {
+            assert_eq!(launch_options_with_wrapper(existing, wrapper), expected);
+        }
+        let installed = format!("{quoted} %command%");
+        assert_eq!(launch_options_with_wrapper(&installed, wrapper), installed);
     }
 
     #[test]
@@ -1241,5 +1467,22 @@ mod tests {
         assert!(!game_root.join("bin/dwrite.dll").exists());
         assert!(!game_root.join("bin/.DWrite.dll.sigilsmith-tmp").exists());
         assert!(install_script_extender_dll(&home.0.join("missing"), b"MZ").is_err());
+    }
+
+    #[test]
+    fn crash_marker_is_cleared_only_when_safe() {
+        let root = std::env::temp_dir().join(format!("sigilsmith-marker-{}", std::process::id()));
+        let marker = root.join("ModCrashSanityCheck");
+        fs::create_dir_all(&marker).unwrap();
+        assert_eq!(clear_crash_marker_in(&root, true), None);
+        assert!(marker.exists());
+        assert_eq!(clear_crash_marker_in(&root, false), Some(marker.clone()));
+        assert!(!marker.exists());
+        assert_eq!(clear_crash_marker_in(&root, false), None);
+        // A folder with something in it isn't the game's marker.
+        fs::create_dir_all(&marker).unwrap();
+        fs::write(marker.join("note"), b"x").unwrap();
+        assert_eq!(clear_crash_marker_in(&root, false), None);
+        let _ = fs::remove_dir_all(&root);
     }
 }
