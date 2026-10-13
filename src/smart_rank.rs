@@ -2,7 +2,8 @@ use crate::{
     config::GameConfig,
     game,
     library::{library_mod_root, InstallTarget, Library, ModEntry, ProfileEntry, TargetKind},
-    metadata, native_pak,
+    metadata::{self, DependencyLookup},
+    native_pak,
 };
 use anyhow::{Context, Result};
 use blake3::Hasher;
@@ -441,16 +442,6 @@ where
         });
     }
 
-    let mut dependents_count: HashMap<String, usize> = HashMap::new();
-    for item in &items {
-        for dep in &item.dependencies {
-            *dependents_count.entry(dep.clone()).or_insert(0) += 1;
-        }
-    }
-    for item in &mut items {
-        item.dependents = dependents_count.get(&item.id).copied().unwrap_or(0);
-    }
-
     let mut conflicts = 0usize;
     let mut conflicts_loose = 0usize;
     let mut conflicts_pak = 0usize;
@@ -512,11 +503,7 @@ where
         }
     }
 
-    let loose_order = rank_group_order(&items, RankGroup::Loose, &mod_map, &mut warnings);
-    let pak_order = rank_group_order(&items, RankGroup::Pak, &mod_map, &mut warnings);
-    let mut new_ids = Vec::new();
-    new_ids.extend(loose_order);
-    new_ids.extend(pak_order);
+    let new_ids = rank_order(&mut items, &mod_map, &mut warnings);
 
     let entry_map: HashMap<String, ProfileEntry> = profile
         .order
@@ -566,6 +553,44 @@ where
         cache: cache_out,
         scanned_mods,
     })
+}
+
+/// The new order of every mod: loose mods first, then paks, each group ranked on its own.
+fn rank_order(
+    items: &mut [RankItem],
+    mod_map: &HashMap<String, ModEntry>,
+    warnings: &mut Vec<String>,
+) -> Vec<String> {
+    resolve_dependencies(items, mod_map);
+    let mut dependents_count: HashMap<String, usize> = HashMap::new();
+    for item in items.iter() {
+        for dep in &item.dependencies {
+            *dependents_count.entry(dep.clone()).or_insert(0) += 1;
+        }
+    }
+    for item in items.iter_mut() {
+        item.dependents = dependents_count.get(&item.id).copied().unwrap_or(0);
+    }
+
+    let mut order = rank_group_order(items, RankGroup::Loose, mod_map, warnings);
+    order.extend(rank_group_order(items, RankGroup::Pak, mod_map, warnings));
+    order
+}
+
+/// Swaps each dependency name from meta.lsx ("Label_uuid") for the ids of the mods in
+/// this ranking it names. A dependency that names none of them has nothing to be
+/// ordered against and is dropped, as is a mod naming itself.
+fn resolve_dependencies(items: &mut [RankItem], mod_map: &HashMap<String, ModEntry>) {
+    let lookup = DependencyLookup::new(items.iter().filter_map(|item| mod_map.get(&item.id)));
+    for item in items.iter_mut() {
+        let mut seen = HashSet::new();
+        item.dependencies = item
+            .dependencies
+            .iter()
+            .flat_map(|dep| lookup.resolve_exact_ids(dep))
+            .filter(|id| id != &item.id && seen.insert(id.clone()))
+            .collect();
+    }
 }
 
 fn rank_group_order(
@@ -1173,5 +1198,240 @@ fn target_kind_label(kind: TargetKind) -> &'static str {
         TargetKind::Generated => "generated",
         TargetKind::Data => "data",
         TargetKind::Bin => "bin",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::library::{ModScripts, ModSource, PakInfo, Profile};
+    use std::fs;
+
+    const FRAMEWORK: &str = "4bcd0a1f-2b3c-4d5e-8f60-718293a4b5c6";
+    const SPELLBOOK: &str = "9e1f2a3b-4c5d-4e6f-8a7b-9c0d1e2f3a4b";
+    const ICONS: &str = "c3d4e5f6-a7b8-4c9d-8e0f-1a2b3c4d5e6f";
+
+    /// A meta.lsx for the mod `folder` that depends on each (name, uuid).
+    fn meta_lsx(folder: &str, uuid: &str, deps: &[(&str, &str)]) -> String {
+        let deps: String = deps
+            .iter()
+            .map(|(name, uuid)| {
+                format!(
+                    r#"<node id="ModuleShortDesc"><attribute id="Folder" type="LSString" value="{name}" /><attribute id="Name" type="LSString" value="{name}" /><attribute id="UUID" type="guid" value="{uuid}" /></node>"#
+                )
+            })
+            .collect();
+        format!(
+            r#"<?xml version="1.0" encoding="utf-8"?>
+<save><region id="Config"><node id="root"><children>
+<node id="Dependencies"><children>{deps}</children></node>
+<node id="ModuleInfo"><attribute id="Folder" type="LSString" value="{folder}" /><attribute id="Name" type="LSString" value="{folder}" /><attribute id="UUID" type="FixedString" value="{uuid}" /></node>
+</children></node></region></save>"#
+        )
+    }
+
+    fn pak_mod(uuid: &str, folder: &str) -> ModEntry {
+        ModEntry {
+            id: uuid.to_string(),
+            name: folder.to_string(),
+            created_at: None,
+            modified_at: None,
+            added_at: 0,
+            targets: vec![InstallTarget::Pak {
+                file: format!("{folder}.pak"),
+                info: PakInfo {
+                    uuid: uuid.to_string(),
+                    name: folder.to_string(),
+                    folder: folder.to_string(),
+                    version: 1,
+                    md5: None,
+                    publish_handle: None,
+                    author: None,
+                    description: None,
+                    module_type: None,
+                },
+            }],
+            target_overrides: Vec::new(),
+            source_label: None,
+            source: ModSource::Managed,
+            dependencies: Vec::new(),
+            scripts: ModScripts::default(),
+        }
+    }
+
+    /// An enabled pak with one file of its own, as a scan leaves it.
+    fn pak_item(mod_entry: &ModEntry, index: usize, dependencies: Vec<String>) -> RankItem {
+        RankItem {
+            id: mod_entry.id.clone(),
+            enabled: true,
+            group: RankGroup::Pak,
+            file_paths: HashSet::from([format!("public/{}/stats.txt", mod_entry.name)]),
+            file_count: 1,
+            total_bytes: 1,
+            conflict_files: 0,
+            conflict_partners: 0,
+            original_index: index,
+            has_data: true,
+            patch_score: 0,
+            patch_reasons: Vec::new(),
+            dependencies,
+            dependents: 0,
+            date_hint: 0,
+        }
+    }
+
+    fn rank(items: &mut [RankItem], mods: &[&ModEntry]) -> Vec<String> {
+        let mod_map = mods
+            .iter()
+            .map(|mod_entry| (mod_entry.id.clone(), (*mod_entry).clone()))
+            .collect();
+        let mut warnings = Vec::new();
+        let order = rank_order(items, &mod_map, &mut warnings);
+        assert!(warnings.is_empty(), "{warnings:?}");
+        order
+    }
+
+    fn dependents(items: &[RankItem], id: &str) -> usize {
+        items.iter().find(|item| item.id == id).unwrap().dependents
+    }
+
+    #[test]
+    fn a_pak_ranks_after_the_pak_its_meta_lsx_depends_on() {
+        let framework = pak_mod(FRAMEWORK, "Framework");
+        let spellbook = pak_mod(SPELLBOOK, "Spellbook");
+        let meta = metadata::parse_meta_lsx(
+            meta_lsx("Spellbook", SPELLBOOK, &[("Framework", FRAMEWORK)]).as_bytes(),
+        );
+        // meta.lsx dependencies arrive as "Label_uuid", not as mod ids.
+        assert_eq!(meta.dependencies, vec![format!("Framework_{FRAMEWORK}")]);
+
+        // Spellbook comes first and, being bigger, would also win on score alone.
+        let mut items = vec![
+            RankItem {
+                total_bytes: 10,
+                ..pak_item(&spellbook, 0, meta.dependencies)
+            },
+            pak_item(&framework, 1, Vec::new()),
+        ];
+        let order = rank(&mut items, &[&framework, &spellbook]);
+
+        assert_eq!(order, vec![FRAMEWORK, SPELLBOOK]);
+        assert_eq!(dependents(&items, FRAMEWORK), 1);
+        assert_eq!(dependents(&items, SPELLBOOK), 0);
+    }
+
+    #[test]
+    fn dependency_names_match_whole_never_by_a_shared_word() {
+        let framework = pak_mod(FRAMEWORK, "Framework");
+        let icons = pak_mod(ICONS, "Better Menu Icons");
+        let spellbook = pak_mod(SPELLBOOK, "Spellbook");
+        // Neither UUID is installed: Framework got a new one in a later release, and
+        // Mod Configuration Menu is missing. Only Framework's whole name fits a mod.
+        let deps = vec![
+            "Framework_0a0b0c0d-1e1f-4a2b-8c3d-4e5f6a7b8c9d".to_string(),
+            "Mod Configuration Menu_755a8a72-407f-4f0d-9a33-274ac0f0b53d".to_string(),
+        ];
+        let mut items = vec![
+            RankItem {
+                total_bytes: 10,
+                ..pak_item(&spellbook, 0, deps)
+            },
+            pak_item(&icons, 1, Vec::new()),
+            pak_item(&framework, 2, Vec::new()),
+        ];
+        let order = rank(&mut items, &[&framework, &icons, &spellbook]);
+
+        assert_eq!(order, vec![FRAMEWORK, ICONS, SPELLBOOK]);
+        assert_eq!(dependents(&items, FRAMEWORK), 1);
+        assert_eq!(dependents(&items, ICONS), 0);
+    }
+
+    #[test]
+    fn smart_rank_orders_installed_paks_by_their_meta_lsx() {
+        let root =
+            std::env::temp_dir().join(format!("sigilsmith-smart-rank-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        for dir in [
+            "game/Data",
+            "game/bin",
+            "larian/PlayerProfiles/Public",
+            "data",
+        ] {
+            fs::create_dir_all(root.join(dir)).unwrap();
+        }
+        let config = GameConfig {
+            game_id: Default::default(),
+            game_name: "Baldur's Gate 3".to_string(),
+            data_dir: root.join("data"),
+            sigillink_cache_dir: None,
+            game_root: root.join("game"),
+            larian_dir: root.join("larian"),
+            active_profile: "Default".to_string(),
+            declined_move: None,
+            keep_links_in: Vec::new(),
+        };
+        let framework = pak_mod(FRAMEWORK, "Framework");
+        let spellbook = pak_mod(SPELLBOOK, "Spellbook");
+        for (mod_entry, deps) in [
+            (&spellbook, vec![("Framework", FRAMEWORK)]),
+            (&framework, Vec::new()),
+        ] {
+            let store = config.sigillink_mods_root().join(&mod_entry.id);
+            fs::create_dir_all(&store).unwrap();
+            let folder = &mod_entry.name;
+            let meta = meta_lsx(folder, &mod_entry.id, &deps);
+            let meta_path = format!("Mods/{folder}/meta.lsx");
+            let data_path = format!("Public/{folder}/Stats/Generated/Data/{folder}.txt");
+            metadata::write_test_pak(
+                &store.join(format!("{folder}.pak")),
+                &[
+                    (meta_path.as_str(), meta.as_bytes(), false),
+                    (data_path.as_str(), b"data", false),
+                ],
+            );
+        }
+        let mut profile = Profile::new("Default");
+        for id in [SPELLBOOK, FRAMEWORK] {
+            profile.order.push(ProfileEntry {
+                id: id.to_string(),
+                enabled: true,
+                missing_label: None,
+            });
+        }
+        let library = Library {
+            mods: vec![spellbook, framework],
+            profiles: vec![profile],
+            active_profile: "Default".to_string(),
+            dependency_blocks: HashSet::new(),
+            metadata_cache_version: 0,
+            metadata_cache_key: None,
+            modsettings_hash: None,
+            modsettings_sync_enabled: true,
+            repair_version: 0,
+            renamed_ids: HashMap::new(),
+        };
+
+        let computed = smart_rank_profile_cached_with_progress(
+            &config,
+            &library,
+            None,
+            SmartRankRefreshMode::Full,
+            |_| {},
+        );
+        let _ = fs::remove_dir_all(&root);
+        let computed = computed.unwrap();
+
+        let order: Vec<String> = computed
+            .result
+            .order
+            .into_iter()
+            .map(|entry| entry.id)
+            .collect();
+        assert_eq!(order, vec![FRAMEWORK, SPELLBOOK]);
+        // The cache keeps what meta.lsx says; matching happens at each ranking.
+        assert_eq!(
+            computed.cache.mods[SPELLBOOK].dependencies,
+            vec![format!("Framework_{FRAMEWORK}")]
+        );
     }
 }

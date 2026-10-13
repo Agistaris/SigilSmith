@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Fix: SigiLink ranking ignored the dependencies a pak lists in its meta.lsx, so a mod could end up loading before a mod it needs. Ranking now puts each pak after the installed mods it depends on, found by UUID, or by the mod's full name if its UUID changed (never by a single shared word). The ranking's Dependencies list shows mod names instead of raw IDs.
+
 ## 0.9.11
 
 - Fix: some paks name other modules' UUIDs inside their meta.lsx (KaiLime UI is one), and SigilSmith imported those mods under the wrong ID. The in-game mod manager's copy then showed up as a second entry, and the load order could reset. SigilSmith now reads the mod's own UUID. On first start it fixes mods imported with a wrong ID: it backs up the library, renames them, merges the duplicate entry they caused (the mod stays on if either copy was on), and deploys again.

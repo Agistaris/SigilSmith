@@ -1,9 +1,10 @@
 use crate::{
-    app::{App, CliImportOptions, CliVerbosity, DependencyLookup, StartupMode},
+    app::{App, CliImportOptions, CliVerbosity, StartupMode},
     bg3::GamePaths,
     game,
     library::{library_mod_root, InstallTarget, Library, ModEntry, ModScripts, Profile},
-    metadata, native_pak, ui,
+    metadata::{self, DependencyLookup},
+    native_pak, ui,
 };
 use anyhow::{bail, Context, Result};
 use serde::Serialize;

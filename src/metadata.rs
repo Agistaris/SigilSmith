@@ -1,4 +1,4 @@
-use crate::library::{ModScripts, ScriptExtenderUse};
+use crate::library::{normalize_label, InstallTarget, ModEntry, ModScripts, ScriptExtenderUse};
 use flate2::read::ZlibDecoder;
 use larian_formats::lspk;
 use lz4_flex::block::decompress;
@@ -365,6 +365,208 @@ pub fn is_base_dependency_uuid(uuid: &str) -> bool {
             // PhotoMode
             | "55ef175c-59e3-b44b-3fb2-8f86acc5d550"
     )
+}
+
+/// Matches the dependency names mods declare (meta.lsx gives "Label_uuid", see
+/// `push_dependency_ref`) to the ids of installed mods.
+#[derive(Debug, Clone)]
+pub struct DependencyLookup {
+    id_map: HashMap<String, String>,
+    key_map: HashMap<String, Vec<String>>,
+    name_map: HashMap<String, Vec<String>>,
+}
+
+impl DependencyLookup {
+    pub fn new<'a>(mods: impl IntoIterator<Item = &'a ModEntry>) -> Self {
+        let mut id_map = HashMap::new();
+        let mut key_map: HashMap<String, Vec<String>> = HashMap::new();
+        let mut name_map: HashMap<String, Vec<String>> = HashMap::new();
+        for mod_entry in mods {
+            let id_key = normalize_label(&mod_entry.id);
+            if !id_key.is_empty() {
+                id_map.insert(id_key, mod_entry.id.clone());
+            }
+            for key in mod_dependency_keys(mod_entry) {
+                key_map.entry(key).or_default().push(mod_entry.id.clone());
+            }
+            for key in mod_name_keys(mod_entry) {
+                name_map.entry(key).or_default().push(mod_entry.id.clone());
+            }
+        }
+        for ids in key_map.values_mut().chain(name_map.values_mut()) {
+            ids.sort();
+            ids.dedup();
+        }
+        Self {
+            id_map,
+            key_map,
+            name_map,
+        }
+    }
+
+    pub fn resolve_ids(&self, dependency: &str) -> Vec<String> {
+        let mut out = Vec::new();
+        for key in dependency_match_keys(dependency) {
+            if let Some(id) = self.id_map.get(&key) {
+                out.push(id.clone());
+            }
+            if let Some(ids) = self.key_map.get(&key) {
+                out.extend(ids.iter().cloned());
+            }
+        }
+        out.sort();
+        out.dedup();
+        out
+    }
+
+    /// Stricter than `resolve_ids`, for when a wrong match does harm, such as load
+    /// order: trusts the dependency's UUID, or else its whole name when exactly one
+    /// mod goes by it, and never single words of that name.
+    pub fn resolve_exact_ids(&self, dependency: &str) -> Vec<String> {
+        let mut out = Vec::new();
+        let uuids = extract_uuid_candidates(dependency);
+        for uuid in &uuids {
+            if let Some(ids) = self.name_map.get(&normalize_label(uuid)) {
+                out.extend(ids.iter().cloned());
+            }
+        }
+        if out.is_empty() {
+            let label = match uuids
+                .first()
+                .and_then(|uuid| dependency.find(uuid.as_str()))
+            {
+                Some(index) => &dependency[..index],
+                None => dependency,
+            };
+            if let Some([id]) = self
+                .name_map
+                .get(&normalize_label(label))
+                .map(Vec::as_slice)
+            {
+                out.push(id.clone());
+            }
+        }
+        out.sort();
+        out.dedup();
+        out
+    }
+}
+
+fn dependency_match_keys(value: &str) -> Vec<String> {
+    let mut keys = Vec::new();
+    let normalized = normalize_label(value);
+    if !normalized.is_empty() {
+        keys.push(normalized);
+    }
+    for candidate in extract_uuid_candidates(value) {
+        let normalized = normalize_label(&candidate);
+        if !normalized.is_empty() {
+            keys.push(normalized);
+        }
+    }
+    for token in value.split(|ch: char| !ch.is_ascii_alphanumeric()) {
+        let normalized = normalize_label(token);
+        if !normalized.is_empty() {
+            keys.push(normalized);
+        }
+    }
+    keys.sort();
+    keys.dedup();
+    keys
+}
+
+pub(crate) fn extract_uuid_candidates(value: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut current = String::new();
+    for ch in value.chars() {
+        if ch.is_ascii_hexdigit() || ch == '-' {
+            current.push(ch);
+        } else {
+            if is_uuid_like(&current) {
+                out.push(current.clone());
+            }
+            current.clear();
+        }
+    }
+    if is_uuid_like(&current) {
+        out.push(current);
+    }
+    out
+}
+
+pub(crate) fn is_uuid_like(value: &str) -> bool {
+    if value.len() != 36 {
+        return false;
+    }
+    let bytes = value.as_bytes();
+    for (idx, byte) in bytes.iter().enumerate() {
+        match idx {
+            8 | 13 | 18 | 23 => {
+                if *byte != b'-' {
+                    return false;
+                }
+            }
+            _ => {
+                let ch = *byte as char;
+                if !ch.is_ascii_hexdigit() {
+                    return false;
+                }
+            }
+        }
+    }
+    true
+}
+
+/// The names a mod goes by, each with whether its single words also count as keys.
+fn mod_names(mod_entry: &ModEntry) -> Vec<(String, bool)> {
+    let mut names = vec![
+        (mod_entry.id.clone(), false),
+        (mod_entry.name.clone(), true),
+        (mod_entry.display_name(), true),
+    ];
+    if let Some(label) = mod_entry.source_label() {
+        names.push((label.to_string(), true));
+    }
+    for target in &mod_entry.targets {
+        if let InstallTarget::Pak { file, info } = target {
+            names.push((file.clone(), true));
+            names.push((info.uuid.clone(), false));
+            names.push((info.folder.clone(), true));
+            names.push((info.name.clone(), true));
+        }
+    }
+    names
+}
+
+/// A mod's whole names, normalized.
+fn mod_name_keys(mod_entry: &ModEntry) -> Vec<String> {
+    let mut keys: Vec<String> = mod_names(mod_entry)
+        .iter()
+        .map(|(name, _)| normalize_label(name))
+        .filter(|key| !key.is_empty())
+        .collect();
+    keys.sort();
+    keys.dedup();
+    keys
+}
+
+/// A mod's whole names plus their words of four or more characters, normalized.
+pub(crate) fn mod_dependency_keys(mod_entry: &ModEntry) -> Vec<String> {
+    let mut keys = Vec::new();
+    for (name, with_words) in mod_names(mod_entry) {
+        keys.push(normalize_label(&name));
+        if with_words {
+            for word in name.split(|ch: char| !ch.is_ascii_alphanumeric()) {
+                if word.len() >= 4 {
+                    keys.push(normalize_label(word));
+                }
+            }
+        }
+    }
+    keys.retain(|key| !key.is_empty());
+    keys.sort();
+    keys.dedup();
+    keys
 }
 
 pub fn read_meta_lsx(path: &Path) -> Option<ModMeta> {

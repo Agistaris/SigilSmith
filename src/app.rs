@@ -11,7 +11,10 @@ use crate::{
         ModSource, Profile, ProfileEntry, SigilLinkRankMeta, TargetKind, TargetOverride,
         SIGILLINK_RANKING_PROFILE,
     },
-    metadata, native_pak, repair, script_extender, sigillink, smart_rank, switch, update,
+    metadata::{
+        self, extract_uuid_candidates, is_uuid_like, mod_dependency_keys, DependencyLookup,
+    },
+    native_pak, repair, script_extender, sigillink, smart_rank, switch, update,
 };
 use anyhow::{Context, Result};
 use arboard::Clipboard;
@@ -671,48 +674,6 @@ impl ModFileCheck {
 impl DependencyItem {
     pub fn is_override_action(&self) -> bool {
         matches!(self.kind, DependencyItemKind::OverrideAction)
-    }
-}
-
-#[derive(Debug, Clone)]
-pub struct DependencyLookup {
-    id_map: HashMap<String, String>,
-    key_map: HashMap<String, Vec<String>>,
-}
-
-impl DependencyLookup {
-    pub fn new(mods: &[ModEntry]) -> Self {
-        let mut id_map = HashMap::new();
-        let mut key_map: HashMap<String, Vec<String>> = HashMap::new();
-        for mod_entry in mods {
-            let id_key = normalize_label(&mod_entry.id);
-            if !id_key.is_empty() {
-                id_map.insert(id_key, mod_entry.id.clone());
-            }
-            for key in mod_dependency_keys(mod_entry) {
-                key_map.entry(key).or_default().push(mod_entry.id.clone());
-            }
-        }
-        for ids in key_map.values_mut() {
-            ids.sort();
-            ids.dedup();
-        }
-        Self { id_map, key_map }
-    }
-
-    pub fn resolve_ids(&self, dependency: &str) -> Vec<String> {
-        let mut out = Vec::new();
-        for key in dependency_match_keys(dependency) {
-            if let Some(id) = self.id_map.get(&key) {
-                out.push(id.clone());
-            }
-            if let Some(ids) = self.key_map.get(&key) {
-                out.extend(ids.iter().cloned());
-            }
-        }
-        out.sort();
-        out.dedup();
-        out
     }
 }
 
@@ -15157,132 +15118,6 @@ fn encode_query(value: &str) -> String {
         }
     }
     out
-}
-
-fn dependency_match_keys(value: &str) -> Vec<String> {
-    let mut keys = Vec::new();
-    let normalized = normalize_label(value);
-    if !normalized.is_empty() {
-        keys.push(normalized);
-    }
-    for candidate in extract_uuid_candidates(value) {
-        let normalized = normalize_label(&candidate);
-        if !normalized.is_empty() {
-            keys.push(normalized);
-        }
-    }
-    for token in value.split(|ch: char| !ch.is_ascii_alphanumeric()) {
-        let normalized = normalize_label(token);
-        if !normalized.is_empty() {
-            keys.push(normalized);
-        }
-    }
-    keys.sort();
-    keys.dedup();
-    keys
-}
-
-fn extract_uuid_candidates(value: &str) -> Vec<String> {
-    let mut out = Vec::new();
-    let mut current = String::new();
-    for ch in value.chars() {
-        if ch.is_ascii_hexdigit() || ch == '-' {
-            current.push(ch);
-        } else {
-            if is_uuid_like(&current) {
-                out.push(current.clone());
-            }
-            current.clear();
-        }
-    }
-    if is_uuid_like(&current) {
-        out.push(current);
-    }
-    out
-}
-
-fn is_uuid_like(value: &str) -> bool {
-    if value.len() != 36 {
-        return false;
-    }
-    let bytes = value.as_bytes();
-    for (idx, byte) in bytes.iter().enumerate() {
-        match idx {
-            8 | 13 | 18 | 23 => {
-                if *byte != b'-' {
-                    return false;
-                }
-            }
-            _ => {
-                let ch = *byte as char;
-                if !ch.is_ascii_hexdigit() {
-                    return false;
-                }
-            }
-        }
-    }
-    true
-}
-
-fn mod_dependency_keys(mod_entry: &ModEntry) -> Vec<String> {
-    let mut keys = Vec::new();
-    let mut push_key = |value: &str| {
-        let key = normalize_label(value);
-        if !key.is_empty() {
-            keys.push(key);
-        }
-    };
-
-    push_key(&mod_entry.id);
-    push_key(&mod_entry.name);
-    for token in mod_entry.name.split(|ch: char| !ch.is_ascii_alphanumeric()) {
-        if token.len() >= 4 {
-            push_key(token);
-        }
-    }
-    push_key(&mod_entry.display_name());
-    for token in mod_entry
-        .display_name()
-        .split(|ch: char| !ch.is_ascii_alphanumeric())
-    {
-        if token.len() >= 4 {
-            push_key(token);
-        }
-    }
-    if let Some(label) = mod_entry.source_label() {
-        push_key(label);
-        for token in label.split(|ch: char| !ch.is_ascii_alphanumeric()) {
-            if token.len() >= 4 {
-                push_key(token);
-            }
-        }
-    }
-    for target in &mod_entry.targets {
-        if let InstallTarget::Pak { file, info } = target {
-            push_key(file);
-            for token in file.split(|ch: char| !ch.is_ascii_alphanumeric()) {
-                if token.len() >= 4 {
-                    push_key(token);
-                }
-            }
-            push_key(&info.uuid);
-            push_key(&info.folder);
-            for token in info.folder.split(|ch: char| !ch.is_ascii_alphanumeric()) {
-                if token.len() >= 4 {
-                    push_key(token);
-                }
-            }
-            push_key(&info.name);
-            for token in info.name.split(|ch: char| !ch.is_ascii_alphanumeric()) {
-                if token.len() >= 4 {
-                    push_key(token);
-                }
-            }
-        }
-    }
-    keys.sort();
-    keys.dedup();
-    keys
 }
 
 fn similarity_ratio(a: &str, b: &str) -> f32 {

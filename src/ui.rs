@@ -8381,7 +8381,7 @@ fn row_for_entry(
     mod_name_pad: usize,
     mod_entry: &ModEntry,
     theme: &Theme,
-    dep_lookup: Option<&crate::app::DependencyLookup>,
+    dep_lookup: Option<&crate::metadata::DependencyLookup>,
     enabled_ids: &HashSet<String>,
     loading: bool,
 ) -> (Row<'static>, usize) {
