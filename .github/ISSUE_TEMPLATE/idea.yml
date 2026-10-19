@@ -1,0 +1,16 @@
+name: Idea
+description: Suggest a feature or a change.
+labels: [enhancement]
+body:
+  - type: textarea
+    id: idea
+    attributes:
+      label: What would you like SigilSmith to do?
+      description: The problem it solves for you is the most useful part.
+    validations:
+      required: true
+  - type: textarea
+    id: more
+    attributes:
+      label: Anything else?
+      description: How you'd use it, other tools that do it well, screenshots.

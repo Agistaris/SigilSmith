@@ -1,0 +1,101 @@
+SigilSmith License v2.0
+
+Copyright (c) 2025-2026 Agistaris. All rights reserved.
+
+Effective 2026-10-18. This license covers every SigilSmith release you get
+from that date on. Copies you got earlier stay under the license they came
+with (SigilSmith Community License v1.0).
+
+"SigilSmith" means the SigilSmith program as published by Agistaris, in any
+of its official release files, and its documentation.
+
+
+1. You may use it
+
+You may install and use SigilSmith, free of charge, on any number of
+computers, for any purpose, including showing or using it in videos, streams
+and other content you make, even if you earn money from that content.
+
+
+2. You may not sell or share it
+
+Except as section 3 allows, you may not:
+
+  a. sell, rent, lease or sublicense SigilSmith, or charge for access to it;
+  b. upload, re-host or redistribute SigilSmith or its release files on any
+     website, mod site, file host, store or other service;
+  c. bundle SigilSmith with other software or with mods;
+  d. offer SigilSmith, or anything built on it, as a hosted service.
+
+Link to the official release page instead:
+https://github.com/Agistaris/SigilSmith/releases
+
+
+3. Linux packages
+
+You may make SigilSmith available through a Linux package repository (for
+example the Arch User Repository or a distribution's repository), without
+asking first, as long as:
+
+  a. the package installs the official release files, unmodified, as
+     published at https://github.com/Agistaris/SigilSmith/releases, either
+     by downloading them from there or by carrying exact copies;
+  b. the files are checked against the release's SHA256SUMS.txt;
+  c. this LICENSE file is installed with them;
+  d. the package is clearly marked as unofficial or community-maintained;
+  e. you don't charge for the package.
+
+Agistaris may withdraw this permission for a particular package or
+repository by telling its maintainer.
+
+
+4. You may not modify or take it apart
+
+You may not modify SigilSmith, or decompile, disassemble or otherwise reverse
+engineer it, except to the extent the law where you live allows this despite
+this restriction.
+
+
+5. Your files
+
+SigilSmith's own file formats are documented at
+https://github.com/Agistaris/SigilSmith, and you may read, write and convert
+your own files in those formats with any tool, including tools you write.
+
+
+6. Other components
+
+SigilSmith includes open-source components. Each is provided under its own
+license, listed in the THIRD-PARTY-LICENSES file published with each
+SigilSmith release. Nothing in this license limits your rights under those
+licenses.
+
+
+7. Name and logo
+
+"SigilSmith" and the SigilSmith logo are trademarks of Agistaris; see
+TRADEMARKS.md. This license doesn't grant any rights to them, except to
+describe SigilSmith factually and to name a package allowed by section 3.
+
+
+8. Ending this license
+
+This license ends automatically if you break its terms. If that happens,
+stop using SigilSmith and delete your copies.
+
+
+9. No warranty
+
+SIGILSMITH IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH SIGILSMITH OR THE USE OR OTHER DEALINGS IN
+SIGILSMITH. BACK UP YOUR GAME FILES AND SAVES.
+
+
+10. Anything else
+
+For any use this license doesn't cover, ask Agistaris:
+https://github.com/Agistaris/SigilSmith/issues

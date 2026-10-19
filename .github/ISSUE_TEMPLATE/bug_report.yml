@@ -1,0 +1,60 @@
+name: Bug report
+description: Something in SigilSmith doesn't work as it should.
+labels: [bug]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened?
+      description: What you did, what you expected, and what happened instead.
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: SigilSmith version
+      description: Run `sigilsmith --version` to see it.
+      placeholder: "0.9.11"
+    validations:
+      required: true
+  - type: dropdown
+    id: package
+    attributes:
+      label: How you installed it
+      options:
+        - AppImage
+        - .deb
+        - .rpm
+        - .tar.gz
+        - AUR
+        - Other
+    validations:
+      required: true
+  - type: input
+    id: distro
+    attributes:
+      label: Distro
+      placeholder: "Fedora 42, CachyOS, SteamOS (Steam Deck)…"
+    validations:
+      required: true
+  - type: dropdown
+    id: runs
+    attributes:
+      label: How you run BG3
+      options:
+        - Steam, native Linux build
+        - Steam, with Proton
+        - GOG
+        - Heroic
+        - Lutris
+        - Faugus
+        - Bottles
+        - Other
+    validations:
+      required: true
+  - type: textarea
+    id: log
+    attributes:
+      label: Log
+      description: In SigilSmith, Esc → Copy Log To Clipboard (or Export Log File), then paste it here.
+      render: text
