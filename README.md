@@ -26,7 +26,9 @@ Steam Deck all work.
 - **Native Linux packages.** AppImage, `.deb`, `.rpm` and `.tar.gz`, each with
   a published SHA-256 checksum.
 - **If SigilSmith is ever discontinued,** we'll publish a final release that
-  works without any of our servers, and the file formats stay documented.
+  works fully on its own, and the file formats stay documented. SigilSmith
+  uses no servers today; if optional online features come later, that final
+  release won't need them.
 
 ## About the source code
 
