@@ -1,11 +1,15 @@
 # Command-line reference
 
-Run `sigilsmith` with no arguments to open the app. The commands below list
-your mods, profiles and dependencies, as text or JSON, and import mods
-without opening the app. This page describes SigilSmith 0.9.11.
+Run `sigilsmith` with no arguments to open the app: the desktop window when
+your session has a display, the terminal app otherwise
+([details](install.md#first-launch)). The commands below list your mods,
+profiles and dependencies, as text or JSON, import mods, and take mods out of
+the game folders, without opening the app. This page describes SigilSmith
+1.0.0.
 
 ```text
-sigilsmith                          Open the app
+sigilsmith                          Open the app (window, or terminal if there is no display)
+sigilsmith --tui                    Open the terminal app
 sigilsmith mods [list]              List mods
 sigilsmith profiles [list]          List profiles
 sigilsmith deps [missing]           List missing dependencies (the default)
@@ -13,23 +17,28 @@ sigilsmith deps list                List every mod's dependencies
 sigilsmith deps resolved            List dependencies matched to installed mods
 sigilsmith deps debug <mod>         Show how one mod's dependencies were matched
 sigilsmith paths                    Show the game paths in use
+sigilsmith undeploy                 Take the mods out of the game folders
 sigilsmith --import <paths...>      Import mods without opening the app
+sigilsmith licenses                 Show the open-source licenses (also --licenses)
 sigilsmith --help                   Show help (also -h, help)
 sigilsmith --version                Show the version (also -V, version)
 ```
 
-Every command except `--help` and `--version` starts the way the app does: it
-reads your library, picks up changes made in the game's own mod manager and,
-unless **Updates** is **Off**, checks GitHub for a new release
+`--tui` works only on its own, with nothing after it.
+
+Every command except `--help`, `--version` and `licenses` starts the way the
+app does: it reads your library and picks up changes made in the game's own
+mod manager. Command-line commands never check for updates
 ([details](what-sigilsmith-touches.md#network)). Close the app before
-importing from the command line, so the two don't both change your library.
+importing or undeploying from the command line, so the two don't both change
+your library.
 
 ## Global options
 
 | Option | Meaning |
 | --- | --- |
 | `--format text` | Plain text for people (the default) |
-| `--format json` | JSON for scripts (`mods`, `profiles`, `deps list`, `deps missing`, `deps resolved`, `paths`) |
+| `--format json` | JSON for scripts (`mods`, `profiles`, `deps list`, `deps missing`, `deps resolved`, `paths`, `undeploy`) |
 | `--profile <name>` | Use this profile instead of the active one (`mods` and `deps`). The name must match exactly. |
 
 Options can go anywhere on the line, and `--format=json` and
@@ -108,7 +117,8 @@ Text output lists the names, with `*` before the active one. JSON:
 `sigilsmith deps` on its own is `sigilsmith deps missing`.
 
 **`deps missing`** lists what the profile's enabled mods need but don't have:
-a mod that isn't installed, or one that's turned off.
+a mod that isn't installed, or one that's turned off. A requirement we can't
+identify (a bare UUID, or a name starting with `_`) isn't listed.
 
 ```json
 [
@@ -165,6 +175,49 @@ JSON has `game_root`, `data_dir`, `larian_dir`, `larian_mods_dir`,
 `modsettings_path` and `error` (`null`, or why the paths couldn't be checked;
 then the configured paths are shown).
 
+## undeploy
+
+```bash
+sigilsmith undeploy
+sigilsmith --format json undeploy
+```
+
+Takes the last deploy out of the game folders, the same as **Undeploy mods**
+in the app: SigilSmith's links and generated files go, settings files a mod
+keeps are saved first, files SigilSmith moved aside come back, and the
+folders it made go if they're empty. The game's load-order file
+(`modsettings.lsx`) is left as it is, so the game still lists the mods. Your
+library and profiles are not touched. Text output:
+
+```text
+Undeployed: removed 12 links and 3 empty folders.
+Left as it is: /home/you/.local/share/Larian Studios/Baldur's Gate 3/PlayerProfiles/Public/modsettings.lsx
+Warning: ...
+```
+
+The `Left as it is` line appears when there is a load-order file, and each
+warning gets its own `Warning:` line. JSON:
+
+```json
+{
+  "removed_links": 12,
+  "removed_folders": 3,
+  "load_order_file": "/home/you/.local/share/Larian Studios/Baldur's Gate 3/PlayerProfiles/Public/modsettings.lsx",
+  "warnings": []
+}
+```
+
+`load_order_file` is `null` when there isn't one.
+
+## licenses
+
+```bash
+sigilsmith licenses
+```
+
+Prints the licenses of the open-source parts SigilSmith is built from, as
+text (`--licenses` works too). It doesn't read your library.
+
 ## Importing mods
 
 ```bash
@@ -201,7 +254,7 @@ failure(s)`) and lists up to eight failures.
 ## Exit status
 
 `0` when the command ran, even if some imports failed (check the summary).
-Non-zero when SigilSmith couldn't start, a deploy failed, or the command was
-wrong: an unknown profile, sort key or `deps` command. Unrecognised arguments
+Non-zero when SigilSmith couldn't start, a deploy or undeploy failed, or the
+command was wrong: an unknown profile, sort key or `deps` command. Unrecognised arguments
 show the help. (`sigilsmith debug …` commands exist only in development
 builds.)

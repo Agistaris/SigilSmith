@@ -1,5 +1,5 @@
-Open-source components in SigilSmith 0.9.11 (Linux x86_64)
-==========================================================
+Open-source components in SigilSmith (Linux x86_64)
+===================================================
 
 SigilSmith includes the open-source components listed below. Each is provided
 under its own license. They are grouped by license: for each license, the
@@ -8,13 +8,13 @@ once.
 
 What is covered
 
-  - 200 Rust crates compiled into the program, from its Cargo.lock (normal
+  - 475 Rust crates compiled into the program, from its Cargo.lock (normal
     dependencies for x86_64-unknown-linux-gnu). This errs on the side of
-    completeness: 25 of them only generate code while the program is built
+    completeness: 69 of them only generate code while the program is built
     (procedural macros and what they use).
   - C and assembly code that some of those crates compile into the program;
     see "C and assembly code" at the end.
-  - The Rust standard library from Rust 1.92.0, which is part of every Rust
+  - The Rust standard library from Rust 1.95.0, which is part of every Rust
     program.
 
 Choice of license
@@ -24,8 +24,9 @@ Choice of license
   one of the choices, and otherwise under the first of these that is offered:
   BSD-3-Clause, BSD-2-Clause, ISC, Zlib, CC0-1.0, MIT-0, 0BSD, Unlicense,
   Apache-2.0, Apache-2.0 WITH LLVM-exception, BSL-1.0, Unicode-3.0,
-  Unicode-DFS-2016, CDLA-Permissive-2.0, MPL-2.0. The licenses a component
-  offers are shown in brackets when they differ from the one used.
+  Unicode-DFS-2016, CDLA-Permissive-2.0, MPL-2.0,
+  LicenseRef-Slint-Royalty-free-2.0. The licenses a component offers are shown
+  in brackets when they differ from the one used.
 
 Source code
 
@@ -34,16 +35,19 @@ Source code
 
 Contents
 
-   1. MIT License                                                  168 entries
-   2. Unicode License v3                                            20 entries
-   3. Apache License 2.0                                             7 entries
-   4. BSD 3-Clause License                                           6 entries
-   5. Creative Commons Zero v1.0 Universal                           3 entries
-   6. ISC License                                                    3 entries
-   7. BSD 2-Clause License                                           2 entries
-   8. Community Data License Agreement - Permissive - Version 2.0    2 entries
-   9. Mozilla Public License 2.0                                     1 entry
-  10. zlib License                                                   1 entry
+   1. MIT License                                                  398 entries
+   2. Unicode License v3                                            27 entries
+   3. Apache License 2.0                                            23 entries
+   4. BSD 3-Clause License                                          15 entries
+   5. Slint Royalty-free Desktop, Mobile, and Web Applications License 2.0   9 entries
+   6. ISC License                                                    6 entries
+   7. zlib License                                                   5 entries
+   8. Creative Commons Zero v1.0 Universal                           4 entries
+   9. BSD 2-Clause License                                           2 entries
+  10. Community Data License Agreement - Permissive - Version 2.0    2 entries
+  11. LicenseRef-UnRAR                                               1 entry
+  12. Mozilla Public License 2.0                                     1 entry
+  13. bzip2 and libbzip2 License                                     1 entry
       C and assembly code compiled into the program
       Libraries loaded from the system at run time
 
@@ -54,91 +58,211 @@ Contents
 
 Components:
 
+  accesskit 0.24.1  [MIT OR Apache-2.0]
+      Its package has no license file; the license comes from its Cargo.toml.
+      Cargo.toml lists the authors as: The AccessKit contributors.
   adler2 2.0.1  [0BSD OR MIT OR Apache-2.0]
       Copyright (C) Jonas Schievink <jonasschievink@gmail.com>
-  aes 0.8.4  [MIT OR Apache-2.0]
+  aes 0.9.3  [MIT OR Apache-2.0]
+      Copyright (c) 2018-2024 The RustCrypto Project Developers
       Copyright (c) 2018 Artyom Pavlov
   allocator-api2 0.2.21  [MIT OR Apache-2.0]
       No copyright line in its license files; Cargo.toml lists the authors as:
         Zakarum.
-  anyhow 1.0.100  [MIT OR Apache-2.0]
+  annotate-snippets 0.12.16  [MIT OR Apache-2.0]
+      Copyright (c) Individual contributors
+  anstyle 1.0.14  [MIT OR Apache-2.0]
+      Copyright (c) Individual contributors
+  anyhow 1.0.104  [MIT OR Apache-2.0]
       No copyright line in its license files; Cargo.toml lists the authors as:
         David Tolnay.
   arboard 3.6.1  [MIT OR Apache-2.0]
       Copyright (c) 2022 The Arboard contributors
   arrayvec 0.7.6  [MIT OR Apache-2.0]
       Copyright (c) Ulrik Sverdrup "bluss" 2015-2023
+  as-raw-xcb-connection 1.0.1  [MIT OR Apache-2.0]
+      Copyright 2019 as-raw-xcb-connection Contributers
+  ash 0.38.0+1.3.281  [MIT OR Apache-2.0]
+      Copyright 2016 Maik Klein
+      Copyright (c) 2016 ASH
+  async-broadcast 0.7.2  [MIT OR Apache-2.0]
+      Copyright 2020 Yoshua Wuyts
+      Copyright (c) 2020 Yoshua Wuyts
+  async-channel 2.5.0  [Apache-2.0 OR MIT]
+      No copyright line in its license files; Cargo.toml lists the authors as:
+        Stjepan Glavina.
+  async-executor 1.14.1  [Apache-2.0 OR MIT]
+      No copyright line in its license files; Cargo.toml lists the authors as:
+        Stjepan Glavina, John Nunley.
+  async-io 2.6.0  [Apache-2.0 OR MIT]
+      No copyright line in its license files; Cargo.toml lists the authors as:
+        Stjepan Glavina.
+  async-lock 3.4.2  [Apache-2.0 OR MIT]
+      No copyright line in its license files; Cargo.toml lists the authors as:
+        Stjepan Glavina.
+  async-process 2.5.0  [Apache-2.0 OR MIT]
+      No copyright line in its license files; Cargo.toml lists the authors as:
+        Stjepan Glavina.
+  async-recursion 1.2.0  [MIT OR Apache-2.0]
+      No copyright line in its license files; Cargo.toml lists the authors as:
+        Robert Usher.
+  async-signal 0.2.14  [Apache-2.0 OR MIT]
+      No copyright line in its license files; Cargo.toml lists the authors as:
+        John Nunley.
+  async-task 4.7.1  [Apache-2.0 OR MIT]
+      No copyright line in its license files; Cargo.toml lists the authors as:
+        Stjepan Glavina.
+  async-trait 0.1.92  [MIT OR Apache-2.0]
+      No copyright line in its license files; Cargo.toml lists the authors as:
+        David Tolnay.
+  atomic-waker 1.1.2  [Apache-2.0 OR MIT]
+      Copyright (c) 2016 Alex Crichton
+      Copyright (c) 2017 The Tokio Authors
   base64 0.22.1  [MIT OR Apache-2.0]
       Copyright (c) 2015 Alice Maz
-  bit-set 0.6.0  [MIT/Apache-2.0]
+  base64 0.23.1  [MIT OR Apache-2.0]
+      Copyright (c) 2025 Alice Maz, Marshall Pierce
+  bit-set 0.10.0  [Apache-2.0 OR MIT]
+      Copyright (c) 2026 The Rust Project Developers
+  bit-vec 0.9.1  [Apache-2.0 OR MIT]
       Copyright (c) 2023 The Rust Project Developers
-  bit-vec 0.7.0  [MIT/Apache-2.0]
-      Copyright (c) 2023 The Rust Project Developers
-  bitflags 2.10.0  [MIT OR Apache-2.0]
+  bitflags 2.13.2  [MIT OR Apache-2.0]
       Copyright (c) 2014 The Rust Project Developers
+  bitstream-io 4.10.0  [MIT/Apache-2.0]
+      Copyright (c) 2017 Brian Langenberger
   block-buffer 0.10.4  [MIT OR Apache-2.0]
       Copyright (c) 2018-2019 The RustCrypto Project Developers
+  block-buffer 0.12.1  [MIT OR Apache-2.0]
+      Copyright (c) 2018-2025 The RustCrypto Project Developers
+  block-padding 0.4.2  [MIT OR Apache-2.0]
+      Copyright (c) 2018-2025 The RustCrypto Project Developers
+  blocking 1.7.0  [Apache-2.0 OR MIT]
+      No copyright line or author list in its package; see
+        https://github.com/smol-rs/blocking.
+  brotli 9.1.1  [BSD-3-Clause AND MIT]
+      Copyright (c) 2016 Dropbox, Inc. All rights reserved.
+      Copyright (c) 2009, 2010, 2013-2016 by the Brotli Authors.
+  brotli-decompressor 6.2.0  [BSD-3-Clause/MIT]
+      Copyright (c) 2016 Dropbox, Inc. All rights reserved.
+      Its package has no MIT text; the text below applies.
   bumpalo 3.19.1  [MIT OR Apache-2.0]
       Copyright (c) 2019 Nick Fitzgerald
-  bytemuck 1.24.0  [Zlib OR Apache-2.0 OR MIT]
+  by_address 1.2.1  [MIT OR Apache-2.0]
+      Copyright (c) 2017 Matt Brubeck
+  bytemuck 1.25.2  [Zlib OR Apache-2.0 OR MIT]
+      Copyright (c) 2019 Daniel "Lokathor" Gee.
+  bytemuck_derive 1.12.1  [Zlib OR Apache-2.0 OR MIT]
       Copyright (c) 2019 Daniel "Lokathor" Gee.
   byteorder 1.5.0  [Unlicense OR MIT]
       Copyright (c) 2015 Andrew Gallant
   byteorder-lite 0.1.0  [Unlicense OR MIT]
       Copyright (c) 2015 Andrew Gallant
-  bzip2 0.5.2  [MIT OR Apache-2.0]
+  bzip2 0.6.1  [MIT OR Apache-2.0]
       Copyright (c) 2014-2025 Alex Crichton and Contributors
-  bzip2-sys 0.1.13+1.0.8  [MIT/Apache-2.0]
-      Copyright (c) 2014-2025 Alex Crichton and Contributors
-      Uses the system library libbz2.so.1.0, loaded at run time; no copy of it
-        is part of the program.
+  cab 0.6.0
+      Copyright (c) 2017 Matthew D. Steele
+  calloop 0.14.5
+      Copyright (c) 2018 Victor Berger
+  calloop-wayland-source 0.4.1
+      Copyright (c) 2023 Kirill Chibisov
   cassowary 0.3.0  [MIT / Apache-2.0]
       Copyright (c) 2016 Dylan Ede
   castaway 0.2.4
       Copyright (c) 2021 Stephen M. Coakley
-  cfg-if 1.0.1  [MIT OR Apache-2.0]
-      Copyright (c) 2014 Alex Crichton
-      Used by the Rust standard library 1.92.0.
+  cbc 0.2.1  [MIT OR Apache-2.0]
+      Copyright (c) 2018-2022 RustCrypto Developers
+      Copyright (c) 2018 Artyom Pavlov
   cfg-if 1.0.4  [MIT OR Apache-2.0]
       Copyright (c) 2014 Alex Crichton
+      Also used by the Rust standard library 1.95.0.
   chardetng 0.1.17  [Apache-2.0 OR MIT]
       chardetng is copyright Mozilla Foundation.
       Copyright Mozilla Foundation
   chrono 0.4.43  [MIT OR Apache-2.0]
       Copyright (c) 2014--2026, Kang Seonghoon and contributors.
       Copyright (c) 2014, Kang Seonghoon.
-  cipher 0.4.4  [MIT OR Apache-2.0]
-      Copyright (c) 2016-2020 RustCrypto Developers
+  cipher 0.5.2  [MIT OR Apache-2.0]
+      Copyright (c) 2016-2025 RustCrypto Developers
+  clru 0.6.3
+      Copyright (c) 2020 Élie ROUDNINSKI (marmeladema) <xademax@gmail.com>
+  cmov 0.5.4  [Apache-2.0 OR MIT]
+      Copyright (c) 2022-2026 The RustCrypto Project Developers
+  color_quant 1.1.0
+      Copyright (c) 2016 PistonDevelopers
   compact_str 0.7.1
       Copyright (c) 2021 Parker Timmerman
+  concurrent-queue 2.5.0  [Apache-2.0 OR MIT]
+      No copyright line in its license files; Cargo.toml lists the authors as:
+        Stjepan Glavina, Taiki Endo, John Nunley.
+  const-field-offset 0.2.1  [MIT OR Apache-2.0]
+      No copyright line in its license files; Cargo.toml lists the authors as:
+        Slint Developers.
+  const-field-offset-macro 0.2.1  [MIT OR Apache-2.0]
+      No copyright line in its license files; Cargo.toml lists the authors as:
+        Slint Developers.
+  const-oid 0.10.2  [Apache-2.0 OR MIT]
+      Copyright (c) 2020-2026 The RustCrypto Project Developers
+  convert_case 0.10.0
+      Copyright (c) 2025 rutrum
+  countme 3.0.1  [MIT OR Apache-2.0]
+      No copyright line in its license files; Cargo.toml lists the authors as:
+        Aleksey Kladov.
+  cpubits 0.1.1  [MIT OR Apache-2.0]
+      Copyright (c) 2023-2026 The RustCrypto Project Developers
   cpufeatures 0.2.17  [MIT OR Apache-2.0]
       Copyright (c) 2020-2025 The RustCrypto Project Developers
-  crc 3.4.0  [MIT OR Apache-2.0]
-      Copyright (c) 2017 crc-rs Developers
-  crc-catalog 2.4.0  [MIT OR Apache-2.0]
-      Copyright 2019 Akhil Velagapudi
-      Copyright (c) 2019 Akhil Velagapudi
+  cpufeatures 0.3.1  [MIT OR Apache-2.0]
+      Copyright (c) 2020-2026 The RustCrypto Project Developers
   crc32fast 1.5.0  [MIT OR Apache-2.0]
       Copyright (c) 2018 Sam Rijs, Alex Crichton and contributors
+  critical-section 1.2.0  [MIT OR Apache-2.0]
+      Copyright (c) 2022 The critical-section authors
+  crossbeam-deque 0.8.8  [MIT OR Apache-2.0]
+      Copyright (c) 2019 The Crossbeam Project Developers
+  crossbeam-epoch 0.9.21  [MIT OR Apache-2.0]
+      Copyright (c) 2019 The Crossbeam Project Developers
+  crossbeam-utils 0.8.21  [MIT OR Apache-2.0]
+      Copyright (c) 2019 The Crossbeam Project Developers
   crossterm 0.27.0
       Copyright (c) 2019 Timon
   crossterm 0.28.1
       Copyright (c) 2019 Timon
   crypto-common 0.1.7  [MIT OR Apache-2.0]
       Copyright (c) 2021 RustCrypto Developers
+  crypto-common 0.2.2  [MIT OR Apache-2.0]
+      Copyright (c) 2021-2026 RustCrypto Developers
+  ctor 0.10.1  [Apache-2.0 OR MIT]
+      No copyright line in its license files; Cargo.toml lists the authors as:
+        Matt Mastracci.
+  ctutils 0.4.6  [Apache-2.0 OR MIT]
+      Copyright (c) 2025-2026 The RustCrypto Project Developers
+  cursor-icon 1.2.0  [MIT OR Apache-2.0 OR Zlib]
+      Copyright 2023 Kirill Chibisov
+      Copyright (c) 2023 Kirill Chibisov
   darling 0.21.3
       Copyright (c) 2017 Ted Driggs
   darling_core 0.21.3
       Copyright (c) 2017 Ted Driggs
   darling_macro 0.21.3
       Copyright (c) 2017 Ted Driggs
-  deflate64 0.1.10
+  data-url 0.3.2  [MIT OR Apache-2.0]
+      Copyright (c) 2013-2025 The rust-url developers
+  deflate64 0.1.12
       Copyright (c) .NET Foundation and Contributors
       Copyright (c) anatawa12 2023
-  deranged 0.5.5  [MIT OR Apache-2.0]
+  delharc 0.8.0  [MIT OR Apache-2.0]
+      Copyright 2023 Rafal Michalski
+  deranged 0.5.8  [MIT OR Apache-2.0]
       Copyright 2024 Jacob Pratt et al.
       Copyright (c) 2024 Jacob Pratt et al.
+  derive_more 2.1.1
+      Copyright (c) 2016 Jelte Fennema
+  derive_more-impl 2.1.1
+      Copyright (c) 2016 Jelte Fennema
   digest 0.10.7  [MIT OR Apache-2.0]
+      Copyright (c) 2017 Artyom Pavlov
+  digest 0.11.3  [MIT OR Apache-2.0]
+      Copyright (c) 2017-2025 RustCrypto Developers
       Copyright (c) 2017 Artyom Pavlov
   directories 5.0.1  [MIT OR Apache-2.0]
       Copyright (c) 2018 directories-rs contributors
@@ -147,49 +271,163 @@ Components:
   displaydoc 0.2.5  [MIT OR Apache-2.0]
       No copyright line in its license files; Cargo.toml lists the authors as:
         Jane Lusby.
+  dlib 0.5.3
+      Copyright (c) 2015 Victor Berger
+  document-features 0.2.12  [MIT OR Apache-2.0]
+      Copyright (c) 2020 Olivier Goffart <ogoffart@sixtyfps.io>
+  downcast-rs 1.2.1  [MIT/Apache-2.0]
+      Copyright (c) 2020 Ashish Myles and contributors
+  dpi 0.1.2  [Apache-2.0 AND MIT]
+      Copyright (c) 2018 Jorge Aparicio
+      Copyright © 2005-2020 Rich Felker, et al.
+      Copyright © 1993,2004 Sun Microsystems or
+      Copyright © 2003-2011 David Schultz or
+      Copyright © 2003-2009 Steven G. Kargl or
+      Copyright © 2003-2009 Bruce D. Evans or
+      Copyright © 2008 Stephen L. Moshier or
+      Copyright © 2017-2018 Arm Limited
   either 1.15.0  [MIT OR Apache-2.0]
       Copyright (c) 2015
   encoding_rs 0.8.35  [(Apache-2.0 OR MIT) AND BSD-3-Clause]
       encoding_rs is copyright Mozilla Foundation.
       Copyright Mozilla Foundation
       Copyright © WHATWG (Apple, Google, Mozilla, Microsoft).
+  endi 1.1.1
+      No copyright line in its license files; Cargo.toml lists the authors as:
+        Zeeshan Ali Khan.
+  enumflags2 0.7.12  [MIT OR Apache-2.0]
+      Copyright 2017-2023 Maik Klein, Maja Kądziołka
+      Copyright (c) 2017-2023 Maik Klein, Maja Kądziołka
+  enumflags2_derive 0.7.12  [MIT OR Apache-2.0]
+      Copyright [2017] [Maik Klein]
+      Copyright (c) 2017 Maik Klein
   equivalent 1.0.2  [Apache-2.0 OR MIT]
       Copyright (c) 2016--2023
   errno 0.3.14  [MIT OR Apache-2.0]
       Copyright (c) 2014 Chris Wong
+  euclid 0.22.14  [MIT OR Apache-2.0]
+      Copyright (c) 2012-2013 Mozilla Foundation
+  event-listener 5.4.2  [Apache-2.0 OR MIT]
+      No copyright line in its license files; Cargo.toml lists the authors as:
+        Stjepan Glavina, John Nunley.
+  event-listener-strategy 0.5.4  [Apache-2.0 OR MIT]
+      No copyright line in its license files; Cargo.toml lists the authors as:
+        John Nunley.
+  fastrand 2.5.0  [Apache-2.0 OR MIT]
+      No copyright line in its license files; Cargo.toml lists the authors as:
+        Stjepan Glavina.
   fdeflate 0.3.7  [MIT OR Apache-2.0]
       No copyright line in its license files; Cargo.toml lists the authors as:
         The image-rs Developers.
+  field-offset 0.3.6  [MIT OR Apache-2.0]
+      Copyright (c) 2016-2021 Diggory Blake, and other contributors.
   filetime 0.2.26  [MIT/Apache-2.0]
       Copyright (c) 2014 Alex Crichton
-  filetime_creation 0.2.0  [MIT/Apache-2.0]
-      Copyright (c) 2014 Alex Crichton
+  fixedbitset 0.5.7  [MIT OR Apache-2.0]
+      Copyright (c) 2015-2017
   flate2 1.1.8  [MIT OR Apache-2.0]
       Copyright (c) 2014-2025 Alex Crichton
+  float-cmp 0.9.0
+      Copyright (c) 2014-2020 Optimal Computing (NZ) Ltd
   fnv 1.0.7  [Apache-2.0 / MIT]
       Copyright (c) 2017 Contributors
+  font-types 0.12.7  [MIT OR Apache-2.0]
+      Copyright 2019 Fontations Developers
+      Copyright (c) 2019 Fontations Developers
+  fontdb 0.24.0
+      Copyright (c) 2020 Yevhenii Reizner
+  fontique 0.11.1  [Apache-2.0 OR MIT]
+      Copyright 2024 the Parley Authors
   form_urlencoded 1.2.2  [MIT OR Apache-2.0]
       Copyright (c) 2013-2016 The rust-url developers
+  futures 0.3.34  [MIT OR Apache-2.0]
+      Copyright (c) 2016 Alex Crichton
+      Copyright (c) 2017 The Tokio Authors
+  futures-channel 0.3.34  [MIT OR Apache-2.0]
+      Copyright (c) 2016 Alex Crichton
+      Copyright (c) 2017 The Tokio Authors
+  futures-core 0.3.34  [MIT OR Apache-2.0]
+      Copyright (c) 2016 Alex Crichton
+      Copyright (c) 2017 The Tokio Authors
+  futures-executor 0.3.34  [MIT OR Apache-2.0]
+      Copyright (c) 2016 Alex Crichton
+      Copyright (c) 2017 The Tokio Authors
+  futures-io 0.3.34  [MIT OR Apache-2.0]
+      Copyright (c) 2016 Alex Crichton
+      Copyright (c) 2017 The Tokio Authors
+  futures-lite 2.6.1  [Apache-2.0 OR MIT]
+      Copyright (c) 2016 Alex Crichton
+      Copyright (c) 2017 The Tokio Authors
+  futures-macro 0.3.34  [MIT OR Apache-2.0]
+      Copyright (c) 2016 Alex Crichton
+      Copyright (c) 2017 The Tokio Authors
+  futures-sink 0.3.34  [MIT OR Apache-2.0]
+      Copyright (c) 2016 Alex Crichton
+      Copyright (c) 2017 The Tokio Authors
+  futures-task 0.3.34  [MIT OR Apache-2.0]
+      Copyright (c) 2016 Alex Crichton
+      Copyright (c) 2017 The Tokio Authors
+  futures-util 0.3.34  [MIT OR Apache-2.0]
+      Copyright (c) 2016 Alex Crichton
+      Copyright (c) 2017 The Tokio Authors
   generic-array 0.14.7
       Copyright (c) 2015 Bartłomiej Kamiński
   getrandom 0.2.17  [MIT OR Apache-2.0]
       Copyright (c) 2018-2024 The rust-random Project Developers
       Copyright (c) 2014 The Rust Project Developers
-  getrandom 0.3.4  [MIT OR Apache-2.0]
-      Copyright (c) 2018-2025 The rust-random Project Developers
+  getrandom 0.4.3  [MIT OR Apache-2.0]
+      Copyright (c) 2018-2026 The rust-random Project Developers
       Copyright (c) 2014 The Rust Project Developers
-  gimli 0.32.0  [MIT OR Apache-2.0]
+  gif 0.14.2  [MIT OR Apache-2.0]
+      Copyright (c) 2015 nwin
+  gilrs 0.11.2  [Apache-2.0/MIT]
+      Its package has no license file; the license comes from its Cargo.toml.
+      Cargo.toml lists the authors as: Arvamer.
+  gilrs-core 0.6.8  [Apache-2.0/MIT]
+      Its package has no license file; the license comes from its Cargo.toml.
+      Cargo.toml lists the authors as: Mateusz Sieczko.
+  gimli 0.32.3  [MIT OR Apache-2.0]
       Copyright (c) 2015 The Rust Project Developers
-      Used by the Rust standard library 1.92.0.
+      Used by the Rust standard library 1.95.0.
+  glow 0.18.0  [MIT OR Apache-2.0 OR Zlib]
+      No copyright line in its license files; Cargo.toml lists the authors as:
+        Joshua Groves, Dzmitry Malyshau.
+  gpu-allocator 0.28.0  [MIT OR Apache-2.0]
+      Copyright 2021 Traverse Research B.V.
+      Copyright (c) 2021 Traverse Research B.V.
+  half 2.7.1  [MIT OR Apache-2.0]
+      No copyright line in its license files; Cargo.toml lists the authors as:
+        Kathryn Long.
+  harfrust 0.12.0
+      Copyright (c) HarfBuzz developers
+      Copyright (c) 2020 Yevhenii Reizner
+  hashbrown 0.14.5  [MIT OR Apache-2.0]
+      Copyright (c) 2016 Amanieu d'Antras
   hashbrown 0.15.5  [MIT OR Apache-2.0]
       Copyright (c) 2016 Amanieu d'Antras
-      Also used by the Rust standard library 1.92.0.
   hashbrown 0.16.1  [MIT OR Apache-2.0]
+      Copyright (c) 2016 Amanieu d'Antras
+      Also used by the Rust standard library 1.95.0.
+  hashbrown 0.17.1  [MIT OR Apache-2.0]
       Copyright (c) 2016 Amanieu d'Antras
   heck 0.5.0  [MIT OR Apache-2.0]
       Copyright (c) 2015 The Rust Project Developers
-  hmac 0.12.1  [MIT OR Apache-2.0]
+  hex 0.4.3  [MIT OR Apache-2.0]
+      Copyright (c) 2013-2014 The Rust Project Developers.
+      Copyright (c) 2015-2020 The rust-hex Developers
+  hmac 0.13.0  [MIT OR Apache-2.0]
       Copyright (c) 2017 Artyom Pavlov
+  htmlparser 0.2.1  [MIT OR Apache-2.0]
+      Copyright (c) 2018 Reizner Evgeniy
+  hybrid-array 0.4.10  [MIT OR Apache-2.0]
+      Copyright (c) 2022-2026 The RustCrypto Project Developers
+  i-slint-compiler 1.19.0 (LICENSES/MIT.txt)
+      Its package also carries this license file, besides the license it
+        declares (GPL-3.0-only OR LicenseRef-Slint-Royalty-free-2.0 OR
+        LicenseRef-Slint-Software-3.0).
+  iana-time-zone 0.1.65  [MIT OR Apache-2.0]
+      Copyright 2020 Andrew Straw
+      Copyright (c) 2020 Andrew D. Straw
   ident_case 1.0.1  [MIT/Apache-2.0]
       No copyright line in its license files; Cargo.toml lists the authors as:
         Ted Driggs.
@@ -200,43 +438,92 @@ Components:
   image 0.25.9  [MIT OR Apache-2.0]
       No copyright line in its license files; Cargo.toml lists the authors as:
         The image-rs Developers.
-  indexmap 2.13.0  [Apache-2.0 OR MIT]
+  image-webp 0.2.4  [MIT OR Apache-2.0]
+      No copyright line or author list in its package; see
+        https://github.com/image-rs/image-webp.
+  imagesize 0.15.0
+      Copyright (c) 2017 Maiddog
+  indexmap 2.14.2  [Apache-2.0 OR MIT]
       Copyright (c) 2016--2017
-  inout 0.1.4  [MIT OR Apache-2.0]
-      Copyright (c) 2022 The RustCrypto Project Developers
+  inout 0.2.5  [MIT OR Apache-2.0]
+      Copyright (c) 2022-2025 The RustCrypto Project Developers
       Copyright (c) 2022 Artyom Pavlov
   itertools 0.13.0  [MIT OR Apache-2.0]
+      Copyright (c) 2015
+  itertools 0.15.0  [MIT OR Apache-2.0]
       Copyright (c) 2015
   itoa 1.0.17  [MIT OR Apache-2.0]
       No copyright line in its license files; Cargo.toml lists the authors as:
         David Tolnay.
-  libc 0.2.177  [MIT OR Apache-2.0]
+  keyboard-types 0.8.3  [MIT OR Apache-2.0]
+      Copyright (c) 2017 Pyfisch
+  kurbo 0.13.1  [Apache-2.0 OR MIT]
+      Copyright (c) 2018 Raph Levien
+  landlock 0.4.4  [MIT OR Apache-2.0]
+      Copyright 2020 Mickaël Salaün
+      Copyright (c) 2020 Mickaël Salaün
+  lazy_static 1.5.1  [MIT OR Apache-2.0]
+      No copyright line in its license files; Cargo.toml lists the authors as:
+        Marvin Löbel.
+  libc 0.2.178  [MIT OR Apache-2.0]
       Copyright (c) 2014-2020 The Rust Project Developers
-      Used by the Rust standard library 1.92.0.
-  libc 0.2.180  [MIT OR Apache-2.0]
-      Copyright (c) 2014-2020 The Rust Project Developers
-  linux-raw-sys 0.11.0  [Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT]
+      Used by the Rust standard library 1.95.0.
+  libc 0.2.191  [MIT OR Apache-2.0]
+      Copyright (c) The Rust Project Developers
+  libm 0.2.16
+      Copyright (c) 2018 Jorge Aparicio
+      Copyright © 2005-2020 Rich Felker, et al.
+      Copyright © 1993,2004 Sun Microsystems or
+      Copyright © 2003-2011 David Schultz or
+      Copyright © 2003-2009 Steven G. Kargl or
+      Copyright © 2003-2009 Bruce D. Evans or
+      Copyright © 2008 Stephen L. Moshier or
+      Copyright © 2017-2018 Arm Limited
+  libudev-sys 0.1.4
+      Copyright (c) 2015 David Cuddeback
+  linebender_resource_handle 0.1.1  [Apache-2.0 OR MIT]
+      No copyright line or author list in its package; see
+        https://github.com/linebender/raw_resource_handle.
+  linux-raw-sys 0.12.1  [Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT]
       No copyright line in its license files; Cargo.toml lists the authors as:
         Dan Gohman.
   linux-raw-sys 0.4.15  [Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT]
       No copyright line in its license files; Cargo.toml lists the authors as:
         Dan Gohman.
+  litrs 1.0.1  [MIT OR Apache-2.0]
+      Copyright (c) 2020 Project Developers
   lock_api 0.4.14  [MIT OR Apache-2.0]
       Copyright (c) 2016 The Rust Project Developers
   log 0.4.29  [MIT OR Apache-2.0]
       Copyright (c) 2014 The Rust Project Developers
   lru 0.12.5
       Copyright (c) 2016 Jerome Froelich
-  lz4_flex 0.11.5
+  lyon_algorithms 1.0.21  [MIT OR Apache-2.0]
+      Its package has no license file; the license comes from its Cargo.toml.
+      Cargo.toml lists the authors as: Nicolas Silva.
+  lyon_extra 1.1.0  [MIT OR Apache-2.0]
+      Its package has no license file; the license comes from its Cargo.toml.
+      Cargo.toml lists the authors as: Nicolas Silva.
+  lyon_geom 1.0.19  [MIT OR Apache-2.0]
+      Its package has no license file; the license comes from its Cargo.toml.
+      Cargo.toml lists the authors as: Nicolas Silva.
+  lyon_path 1.0.19  [MIT OR Apache-2.0]
+      Its package has no license file; the license comes from its Cargo.toml.
+      Cargo.toml lists the authors as: Nicolas Silva.
+  lz4_flex 0.11.6
       Copyright (c) 2020 Pascal Seitz
-  lzma-rs 0.3.0
-      Copyright (c) 2017 - 2018 Guillaume Endignoux
-  lzma-sys 0.1.20  [MIT/Apache-2.0]
-      Copyright (c) 2016 Alex Crichton
-      Uses the system library liblzma.so.5, loaded at run time; no copy of it
-        is part of the program.
-  memchr 2.7.6  [Unlicense OR MIT]
+  lz4_flex 0.14.0
+      Copyright (c) 2020 Pascal Seitz
+  lzxd 0.2.7  [MIT OR Apache-2.0]
+      Copyright (c) 2020 Lonami <gh@lonami.dev>
+  memchr 2.8.3  [Unlicense OR MIT]
       Copyright (c) 2015 Andrew Gallant
+  memmap2 0.9.11  [MIT OR Apache-2.0]
+      Copyright [2015] [Dan Burkert]
+      Copyright (c) 2020 Yevhenii Reizner
+      Copyright (c) 2015 Dan Burkert
+  memoffset 0.9.1
+      Copyright (c) 2017 Gilad Naaman
   miniz_oxide 0.8.9  [MIT OR Zlib OR Apache-2.0]
       Copyright 2013-2014 RAD Game Tools and Valve Software
       Copyright 2010-2014 Rich Geldreich and Tenacious Software LLC
@@ -247,18 +534,39 @@ Components:
       Copyright (c) 2014 Carl Lerche and other MIO contributors
   mio 1.1.1
       Copyright (c) 2014 Carl Lerche and other MIO contributors
-  nt-time 0.8.1  [Apache-2.0 OR MIT]
-      Copyright (c) 2023 Shun Sakai
-  num-conv 0.1.0  [MIT OR Apache-2.0]
-      Copyright 2023 Jacob Pratt
-      Copyright (c) 2023 Jacob Pratt
+  naga 30.0.1  [MIT OR Apache-2.0]
+      Copyright (c) 2025 The gfx-rs developers
+  naga-types 30.0.1  [MIT OR Apache-2.0]
+      Copyright (c) 2025 The gfx-rs developers
+  natord 1.0.9
+      Copyright (c) 2014, Kang Seonghoon.
+  nix 0.31.3
+      Copyright (c) 2015 Carl Lerche + nix-rust Authors
+  no_std_io2 0.9.4  [Apache-2.0 OR MIT]
+      Copyright (c) 2020-2021 Brendan Molloy <brendan@bbqsrc.net>
+  nom 8.0.0
+      Copyright (c) 2014-2019 Geoffroy Couprie
+  num-conv 0.2.2  [MIT OR Apache-2.0]
+      Copyright (c) Jacob Pratt
   num-traits 0.2.19  [MIT OR Apache-2.0]
       Copyright (c) 2014 The Rust Project Developers
+  num_enum 0.7.6  [BSD-3-Clause OR MIT OR Apache-2.0]
+      Copyright (c) 2018, Daniel Wagner-Hall All rights reserved.
+  num_enum_derive 0.7.6  [BSD-3-Clause OR MIT OR Apache-2.0]
+      Copyright (c) 2018, Daniel Wagner-Hall All rights reserved.
   oem_cp 2.1.2
       Copyright © 2020 Tatsunori Uchino <tats.u@live.jp>
-  once_cell 1.21.3  [MIT OR Apache-2.0]
+  once_cell 1.21.4  [MIT OR Apache-2.0]
       No copyright line in its license files; Cargo.toml lists the authors as:
         Aleksey Kladov.
+  ordered-float 5.5.0
+      Copyright (c) 2015 Jonathan Reem
+  ordered-stream 0.2.0  [MIT OR Apache-2.0]
+      No copyright line in its license files; Cargo.toml lists the authors as:
+        Daniel De Graaf, Zeeshan Ali Khan.
+  os_pipe 1.2.3
+      No copyright line in its license files; Cargo.toml lists the authors as:
+        Jack O'Connor.
   oval 2.0.0
       Copyright (c) 2024 Geoffroy Couprie et Amos Wenger
   ownable 0.6.2  [MIT OR Apache-2.0]
@@ -267,68 +575,140 @@ Components:
   ownable-macro 0.6.3  [MIT OR Apache-2.0]
       Copyright 2023 Alex Kazik
       Copyright (c) 2023 Alex Kazik.
+  parking 2.2.1  [Apache-2.0 OR MIT]
+      Copyright 2014-2020 The Rust Project Developers
   parking_lot 0.12.5  [MIT OR Apache-2.0]
       Copyright (c) 2016 The Rust Project Developers
   parking_lot_core 0.9.12  [MIT OR Apache-2.0]
       Copyright (c) 2016 The Rust Project Developers
+  parlance 0.1.1  [Apache-2.0 OR MIT]
+      Copyright 2020 the Parley Authors
+  parley 0.11.1  [Apache-2.0 OR MIT]
+      Copyright 2020 the Parley Authors
+  parley_data 0.11.1  [Apache-2.0 OR MIT]
+      Copyright 2020 the Parley Authors
   paste 1.0.15  [MIT OR Apache-2.0]
       No copyright line in its license files; Cargo.toml lists the authors as:
         David Tolnay.
-  pbkdf2 0.12.2  [MIT OR Apache-2.0]
+  pbkdf2 0.13.0  [MIT OR Apache-2.0]
       Copyright (c) 2017 Artyom Pavlov
       Copyright (c) 2018-2023 The RustCrypto Project Developers
   percent-encoding 2.3.2  [MIT OR Apache-2.0]
       Copyright (c) 2013-2025 The rust-url developers
+  petgraph 0.8.3  [MIT OR Apache-2.0]
+      Copyright (c) 2015
   phf 0.11.3
       Copyright (c) 2014-2022 Steven Fackler, Yuki Okushi
   phf_shared 0.11.3
       Copyright (c) 2014-2022 Steven Fackler, Yuki Okushi
+  pico-args 0.5.0
+      Copyright (c) 2019 Yevhenii Reizner
+  pin-project 1.1.13  [Apache-2.0 OR MIT]
+      No copyright line or author list in its package; see
+        https://github.com/taiki-e/pin-project.
+  pin-project-internal 1.1.13  [Apache-2.0 OR MIT]
+      No copyright line or author list in its package; see
+        https://github.com/taiki-e/pin-project.
   pin-project-lite 0.2.16  [Apache-2.0 OR MIT]
       No copyright line or author list in its package; see
         https://github.com/taiki-e/pin-project-lite.
+  pin-utils 0.1.1  [MIT OR Apache-2.0]
+      Copyright 2018 The pin-utils authors
+      Copyright (c) 2018 The pin-utils authors
+  pin-weak 1.1.0
+      Copyright (c) 2020 Olivier Goffart <ogoffart@sixtyfps.io>
+  piper 0.2.5  [MIT OR Apache-2.0]
+      No copyright line in its license files; Cargo.toml lists the authors as:
+        Stjepan Glavina, John Nunley.
   png 0.18.0  [MIT OR Apache-2.0]
       Copyright (c) 2015 nwin
+  polling 3.11.0  [Apache-2.0 OR MIT]
+      No copyright line in its license files; Cargo.toml lists the authors as:
+        Stjepan Glavina, John Nunley.
+  polycool 0.4.0  [MIT OR Apache-2.0]
+      Copyright (c) 2018 Raph Levien
+  portable-atomic 1.15.0  [Apache-2.0 OR MIT]
+      No copyright line or author list in its package; see
+        https://github.com/taiki-e/portable-atomic.
   positioned-io 0.3.5
       Copyright (c) 2016 Dave Vasilevsky
   powerfmt 0.2.0  [MIT OR Apache-2.0]
       Copyright 2023 Jacob Pratt et al.
       Copyright (c) 2023 Jacob Pratt et al.
+  presser 0.3.1  [MIT OR Apache-2.0]
+      Copyright (c) 2019 Embark Studios
+  proc-macro-crate 3.5.0  [MIT OR Apache-2.0]
+      No copyright line in its license files; Cargo.toml lists the authors as:
+        Bastian Köcher.
   proc-macro2 1.0.105  [MIT OR Apache-2.0]
       No copyright line in its license files; Cargo.toml lists the authors as:
         David Tolnay, Alex Crichton.
-  quick-xml 0.31.0
+  profiling 1.0.18  [MIT OR Apache-2.0]
+      Its package has no license file; the license comes from its Cargo.toml.
+      Cargo.toml lists the authors as: Philip Degarmo.
+  pulldown-cmark 0.13.6
+      Copyright 2015 Google Inc. All rights reserved.
+  quick-error 2.0.1  [MIT/Apache-2.0]
+      Copyright (c) 2015 The quick-error Developers
+  quick-xml 0.41.0
       Copyright (c) 2016 Johann Tuffe
-  quick-xml 0.36.2
-      Copyright (c) 2016 Johann Tuffe
-  quote 1.0.43  [MIT OR Apache-2.0]
+  quote 1.0.47  [MIT OR Apache-2.0]
       No copyright line in its license files; Cargo.toml lists the authors as:
         David Tolnay.
   ratatui 0.27.0
       Copyright (c) 2016-2022 Florian Dehau
       Copyright (c) 2023-2024 The Ratatui Developers
+  raw-window-handle 0.6.2  [MIT OR Apache-2.0 OR Zlib]
+      Copyright (c) 2019 Osspial
+      Copyright (c) 2020 Osspial
+  rayon 1.12.0  [MIT OR Apache-2.0]
+      Copyright (c) 2010 The Rust Project Developers
+  rayon-core 1.13.0  [MIT OR Apache-2.0]
+      Copyright (c) 2010 The Rust Project Developers
   rc-zip 5.4.1  [Apache-2.0 OR MIT]
       Its package has no license file; the license comes from its Cargo.toml.
       Cargo.toml lists the authors as: Amos Wenger.
   rc-zip-sync 4.4.2  [Apache-2.0 OR MIT]
       Its package has no license file; the license comes from its Cargo.toml.
       Cargo.toml lists the authors as: Amos Wenger.
-  Rust standard library 1.92.0 (std, core, alloc)  [Apache-2.0 OR MIT]
+  read-fonts 0.41.0  [MIT OR Apache-2.0]
+      Copyright 2019 Fontations Developers
+      Copyright (c) 2019 Fontations Developers
+  renderdoc-sys 1.1.0  [MIT OR Apache-2.0]
+      Copyright (c) 2022 Eyal Kalderon
+  resvg 0.48.1  [Apache-2.0 OR MIT]
+      Copyright 2017 the Resvg Authors
+  rgb 0.8.53
+      Copyright (c) 2019 Kornel
+  rowan 0.17.0  [MIT OR Apache-2.0]
+      No copyright line in its license files; Cargo.toml lists the authors as:
+        Aleksey Kladov.
+  roxmltree 0.21.1  [MIT OR Apache-2.0]
+      Copyright (c) 2018 Yevhenii Reizner
+  rspolib 0.1.2
+      Its package has no license file; the license comes from its Cargo.toml.
+      No copyright line or author list in its package; see
+        https://github.com/mondeja/rspolib.
+  Rust standard library 1.95.0 (std, core, alloc)  [Apache-2.0 OR MIT]
       Copyright The Rust Project Developers (see https://thanks.rust-lang.org)
       In library/backtrace:
         Copyright 2014 Alex Crichton
       In library/std/src/sync/mpmc:
         Copyright 2019 The Crossbeam Project Developers
       Part of every Rust program.
-  rustc-demangle 0.1.26  [MIT/Apache-2.0]
+  rustc-demangle 0.1.27  [MIT/Apache-2.0]
       Copyright (c) 2014 Alex Crichton
-      Used by the Rust standard library 1.92.0.
+      Used by the Rust standard library 1.95.0.
+  rustc-hash 1.1.0  [Apache-2.0/MIT]
+      No copyright line in its license files; Cargo.toml lists the authors as:
+        The Rust Project Developers.
   rustix 0.38.44  [Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT]
       No copyright line in its license files; Cargo.toml lists the authors as:
         Dan Gohman, Jakub Konka.
-  rustix 1.1.3  [Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT]
+  rustix 1.1.5  [Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT]
       No copyright line in its license files; Cargo.toml lists the authors as:
         Dan Gohman, Jakub Konka.
-  rustls 0.23.36  [Apache-2.0 OR ISC OR MIT]
+  rustls 0.23.46  [Apache-2.0 OR ISC OR MIT]
       Copyright (c) 2016, Joseph Birr-Pixton <jpixton@gmail.com>
       Copyright (c) 2016 Joseph Birr-Pixton <jpixton@gmail.com>
   rustls-pki-types 1.14.0  [MIT OR Apache-2.0]
@@ -339,8 +719,14 @@ Components:
         David Tolnay.
   same-file 1.0.6  [Unlicense/MIT]
       Copyright (c) 2017 Andrew Gallant
+  scoped-tls 1.0.1  [MIT/Apache-2.0]
+      Copyright (c) 2014 Alex Crichton
+  scoped-tls-hkt 0.1.5  [MIT/Apache-2.0]
+      Copyright (c) 2020 Diggory Blake
   scopeguard 1.2.0  [MIT OR Apache-2.0]
       Copyright (c) 2016-2019 Ulrik Sverdrup "bluss" and scopeguard developers
+  sctk-adwaita 0.12.0
+      Copyright (c) 2022 Bartłomiej Maryńczak
   serde 1.0.228  [MIT OR Apache-2.0]
       No copyright line in its license files; Cargo.toml lists the authors as:
         Erick Tryzelaar, David Tolnay.
@@ -353,14 +739,23 @@ Components:
   serde_json 1.0.149  [MIT OR Apache-2.0]
       No copyright line in its license files; Cargo.toml lists the authors as:
         Erick Tryzelaar, David Tolnay.
-  sha1 0.10.6  [MIT OR Apache-2.0]
-      Copyright (c) 2006-2009 Graydon Hoare
-      Copyright (c) 2009-2013 Mozilla Foundation
+  serde_repr 0.1.21  [MIT OR Apache-2.0]
+      No copyright line in its license files; Cargo.toml lists the authors as:
+        David Tolnay.
+  sha1 0.11.0  [MIT OR Apache-2.0]
+      Copyright (c) 2016-2026 The RustCrypto Project Developers
       Copyright (c) 2016 Artyom Pavlov
+      Copyright (c) 2009-2013 Mozilla Foundation
+      Copyright (c) 2006-2009 Graydon Hoare
   sha2 0.10.9  [MIT OR Apache-2.0]
       Copyright (c) 2006-2009 Graydon Hoare
       Copyright (c) 2009-2013 Mozilla Foundation
       Copyright (c) 2016 Artyom Pavlov
+  sha2 0.11.1  [MIT OR Apache-2.0]
+      Copyright (c) 2016-2026 The RustCrypto Project Developers
+      Copyright (c) 2016 Artyom Pavlov
+      Copyright (c) 2009-2013 Mozilla Foundation
+      Copyright (c) 2006-2009 Graydon Hoare
   signal-hook 0.3.18  [Apache-2.0/MIT]
       Copyright (c) 2017 tokio-jsonrpc developers
   signal-hook-mio 0.2.5  [MIT OR Apache-2.0]
@@ -369,12 +764,42 @@ Components:
       Copyright (c) 2017 tokio-jsonrpc developers
   simd-adler32 0.3.8
       Copyright (c) [2021] [Marvin Countryman]
+  simplecss 0.2.2  [Apache-2.0 OR MIT]
+      Copyright (c) 2018 Reizner Evgeniy
   siphasher 1.0.1  [MIT/Apache-2.0]
       Copyright 2012-2016 The Rust Project Developers.
       Copyright 2016-2024 Frank Denis.
       Its package has no MIT text; the text below applies.
+  skia-bindings 0.153.3
+      Its package has no license file; the license comes from its Cargo.toml.
+      Compiles C or assembly code into the program.
+      Cargo.toml lists the authors as: LongYinan, Armin Sander.
+  skia-safe 0.153.3
+      Its package has no license file; the license comes from its Cargo.toml.
+      Cargo.toml lists the authors as: Armin Sander.
+  skrifa 0.44.0  [MIT OR Apache-2.0]
+      Copyright 2019 Fontations Developers
+      Copyright (c) 2019 Fontations Developers
+  slab 0.4.12
+      Copyright (c) 2019 Carl Lerche
   smallvec 1.15.1  [MIT OR Apache-2.0]
       Copyright (c) 2018 The Servo Project Developers
+  smithay-client-toolkit 0.21.1
+      Copyright (c) 2018 Victor Berger
+  smol_str 0.3.6  [MIT OR Apache-2.0]
+      No copyright line in its license files; Cargo.toml lists the authors as:
+        Aleksey Kladov, Lukas Wirth.
+  snafu 0.8.9  [MIT OR Apache-2.0]
+      Copyright 2019- Jake Goulding
+      Copyright (c) 2019- Jake Goulding
+  snafu-derive 0.8.9  [MIT OR Apache-2.0]
+      Copyright 2019- Jake Goulding
+      Copyright (c) 2019- Jake Goulding
+  softbuffer 0.4.8  [MIT OR Apache-2.0]
+      Copyright 2022 Kirill Chibisov
+  spin_on 0.1.1  [Apache-2.0 OR MIT]
+      No copyright line in its license files; Cargo.toml lists the authors as:
+        paulkernfeld.
   stability 0.2.1
       Copyright (c) 2020 Stephen M. Coakley
   stable_deref_trait 1.2.1  [MIT OR Apache-2.0]
@@ -383,19 +808,45 @@ Components:
       Copyright (c) 2017 Nikolai Vazquez
   static_assertions_next 1.1.2  [MIT OR Apache-2.0]
       Copyright (c) 2017 Nikolai Vazquez
+  strict-num 0.1.1
+      Copyright (c) 2022 Yevhenii Reizner
   strsim 0.11.1
       Copyright (c) 2015 Danny Guo
       Copyright (c) 2016 Titus Wormer <tituswormer@gmail.com>
       Copyright (c) 2018 Akash Kurdekar
   strum 0.26.3
       Copyright (c) 2019 Peter Glotfelty
+  strum 0.28.0
+      Copyright (c) 2019 Peter Glotfelty
   strum_macros 0.26.4
       Copyright (c) 2019 Peter Glotfelty
+  strum_macros 0.28.0
+      Copyright (c) 2019 Peter Glotfelty
+  svgtypes 0.16.1  [Apache-2.0 OR MIT]
+      Copyright (c) 2018 Yevhenii Reizner
+  swash 0.2.10  [Apache-2.0 OR MIT]
+      Copyright (c) 2020 Chad Brokaw
   syn 2.0.114  [MIT OR Apache-2.0]
+      No copyright line in its license files; Cargo.toml lists the authors as:
+        David Tolnay.
+  syn 3.0.9  [MIT OR Apache-2.0]
       No copyright line in its license files; Cargo.toml lists the authors as:
         David Tolnay.
   synstructure 0.13.2
       Copyright 2016 Nika Layzell
+  synstructure 0.14.0
+      Copyright 2016 Nika Layzell
+  sys-locale 0.3.2  [MIT OR Apache-2.0]
+      Copyright (c) 2021 1Password
+  taffy 0.10.1
+      Its package has no license file; the license comes from its Cargo.toml.
+      Cargo.toml lists the authors as: Alice Cecile, Johnathan Kelley, Nico
+        Burns.
+  tar 0.4.46  [MIT OR Apache-2.0]
+      Copyright (c) The tar-rs Project Contributors
+  text-size 1.1.1  [MIT OR Apache-2.0]
+      No copyright line in its license files; Cargo.toml lists the authors as:
+        Aleksey Kladov, Christopher Durham (CAD97).
   thiserror 1.0.69  [MIT OR Apache-2.0]
       No copyright line in its license files; Cargo.toml lists the authors as:
         David Tolnay.
@@ -408,30 +859,71 @@ Components:
   thiserror-impl 2.0.17  [MIT OR Apache-2.0]
       No copyright line in its license files; Cargo.toml lists the authors as:
         David Tolnay.
-  time 0.3.45  [MIT OR Apache-2.0]
+  time 0.3.55  [MIT OR Apache-2.0]
       Copyright (c) Jacob Pratt et al.
-  time-core 0.1.7  [MIT OR Apache-2.0]
+  time-core 0.1.9  [MIT OR Apache-2.0]
       Copyright (c) Jacob Pratt et al.
-  time-macros 0.2.25  [MIT OR Apache-2.0]
+  time-macros 0.2.32  [MIT OR Apache-2.0]
       Copyright (c) Jacob Pratt et al.
+  tiny-xlib 0.2.5  [MIT OR Apache-2.0 OR Zlib]
+      Copyright (c) 2023 John Nunley
+  tinyvec 1.13.3  [Zlib OR Apache-2.0 OR MIT]
+      Copyright (c) 2019 Daniel "Lokathor" Gee.
+  toml_datetime 1.1.2+spec-1.1.0  [MIT OR Apache-2.0]
+      Copyright Individual contributors
+      Copyright (c) Individual contributors
+  toml_edit 0.25.17+spec-1.1.0  [MIT OR Apache-2.0]
+      Copyright Individual contributors
+      Copyright (c) Individual contributors
+  toml_parser 1.1.5+spec-1.1.0  [MIT OR Apache-2.0]
+      Copyright Individual contributors
+      Copyright (c) Individual contributors
+  toml_writer 1.1.3+spec-1.1.0  [MIT OR Apache-2.0]
+      Copyright Individual contributors
+      Copyright (c) Individual contributors
   tracing 0.1.44
+      Copyright (c) 2019 Tokio Contributors
+  tracing-attributes 0.1.31
       Copyright (c) 2019 Tokio Contributors
   tracing-core 0.1.36
       Copyright (c) 2019 Tokio Contributors
       In src/spin:
         Copyright (c) 2014 Mathijs van de Nes
+  tree_magic_mini 3.2.2
+      Copyright (c) 2017 Aaron Hancock
+  ttf-parser 0.25.1  [MIT OR Apache-2.0]
+      Copyright (c) 2018 Yevhenii Reizner
   twox-hash 2.1.2
       Copyright (c) 2015 Jake Goulding
+  typed-index-collections 3.5.0  [MIT OR Apache-2.0]
+      Copyright (c) 2020 Andrey Zheleznov <zheland.net@gmail.com>
+  typed-path 0.13.0  [MIT OR Apache-2.0]
+      No copyright line in its license files; Cargo.toml lists the authors as:
+        Chip Senkbeil.
   typenum 1.19.0  [MIT OR Apache-2.0]
       Copyright 2014 Paho Lurie-Gregg
       Copyright (c) 2014 Paho Lurie-Gregg
+  unicase 2.10.0  [MIT OR Apache-2.0]
+      Copyright (c) 2014-2026 Sean McArthur
+  unicode-bidi 0.3.18  [MIT OR Apache-2.0]
+      copyright 2015, The Servo Project Developers (given in the
+      Copyright (c) 2015 The Rust Project Developers
   unicode-ident 1.0.22  [(MIT OR Apache-2.0) AND Unicode-3.0]
       Copyright © 1991-2023 Unicode, Inc.
+  unicode-script 0.5.8  [MIT OR Apache-2.0]
+      Copyright 2021 The Unicode-rs Developers
+      Copyright (c) 2019 Manish Goregaokar
   unicode-segmentation 1.12.0  [MIT OR Apache-2.0]
       Copyright (c) 2015 The Rust Project Developers
   unicode-truncate 1.1.0  [MIT OR Apache-2.0]
       Copyright (c) 2019 Aetf <aetf at unlimitedcodeworks dot xyz>
+  unicode-vo 0.1.0  [MIT/Apache-2.0]
+      Copyright (c) 2018 Reizner Evgeniy
   unicode-width 0.1.14  [MIT OR Apache-2.0]
+      Copyright (c) 2015 The Rust Project Developers
+  unicode-width 0.2.2  [MIT OR Apache-2.0]
+      Copyright (c) 2015 The Rust Project Developers
+  unicode-xid 0.2.6  [MIT OR Apache-2.0]
       Copyright (c) 2015 The Rust Project Developers
   ureq 2.12.1  [MIT OR Apache-2.0]
       Copyright (c) 2019 Martin Algesten
@@ -440,24 +932,125 @@ Components:
         Copyright (c) 2015 The rust-chunked-transfer Contributors
   url 2.5.8  [MIT OR Apache-2.0]
       Copyright (c) 2013-2025 The rust-url developers
+  usvg 0.48.1  [Apache-2.0 OR MIT]
+      Copyright 2017 the Resvg Authors
   utf8_iter 1.0.4  [Apache-2.0 OR MIT]
       Copyright Mozilla Foundation
+  uuid 1.28.0  [Apache-2.0 OR MIT]
+      Copyright (c) 2014 The Rust Project Developers
+      Copyright (c) 2018 Ashley Mannix, Christopher Armstrong, Dylan DPC,
+        Hunar Roop Kahlon
+  vec_map 0.8.2  [MIT/Apache-2.0]
+      Copyright (c) 2015 The Rust Project Developers
+  vtable 0.5.0  [MIT OR Apache-2.0]
+      No copyright line in its license files; Cargo.toml lists the authors as:
+        Slint Developers.
+  vtable-macro 0.5.0  [MIT OR Apache-2.0]
+      No copyright line in its license files; Cargo.toml lists the authors as:
+        Slint Developers.
+  Vulkan Memory Allocator (inside Skia)
+      Copyright (c) Advanced Micro Devices, Inc. All rights reserved.
+      Linked into the program from the same prebuilt Skia library.
   walkdir 2.5.0  [Unlicense/MIT]
       Copyright (c) 2015 Andrew Gallant
+  wayland-backend 0.3.17
+      Copyright (c) 2015 Elinor Berger
+      Compiles C or assembly code into the program.
+  wayland-client 0.31.15
+      Copyright (c) 2015 Elinor Berger
+  wayland-csd-frame 0.3.0
+      Copyright (c) 2023 Kirill Chibisov
+  wayland-cursor 0.31.14
+      Copyright (c) 2015 Elinor Berger
+  wayland-protocols 0.32.13
+      Copyright (c) 2015 Elinor Berger
+      In protocols:
+        Copyright © 2008-2013 Kristian Høgsberg
+        Copyright © 2010-2013 Intel Corporation
+        Copyright © 2013 Rafael Antognolli
+        Copyright © 2013 Jasper St. Pierre
+        Copyright © 2014 Jonas Ådahl
+        Copyright © 2014 Jason Ekstrand
+        Copyright © 2014-2015 Collabora, Ltd.
+        Copyright © 2015 Red Hat Inc.
+  wayland-protocols-experimental 20251230.0.3
+      Copyright (c) 2015 Elinor Berger
+  wayland-protocols-misc 0.3.12
+      Copyright (c) 2015 Elinor Berger
+  wayland-protocols-wlr 0.3.12
+      Copyright (c) 2015 Elinor Berger
+  wayland-scanner 0.31.11
+      Copyright (c) 2015 Elinor Berger
+  wayland-sys 0.31.11
+      Copyright (c) 2015 Elinor Berger
+  webbrowser 1.2.4  [MIT OR Apache-2.0]
+      Copyright (c) 2015-2022 Amod Malviya
+  weezl 0.1.12  [MIT OR Apache-2.0]
+      Copyright (c) HeroicKatora 2020
+  wgpu 30.0.1  [MIT OR Apache-2.0]
+      Copyright (c) 2025 The gfx-rs developers
+  wgpu-core 30.0.1  [MIT OR Apache-2.0]
+      Copyright (c) 2025 The gfx-rs developers
+  wgpu-core-deps-windows-linux-android 30.0.1  [MIT OR Apache-2.0]
+      Copyright (c) 2025 The gfx-rs developers
+  wgpu-hal 30.0.1  [MIT OR Apache-2.0]
+      Copyright (c) 2025 The gfx-rs developers
+  wgpu-naga-bridge 30.0.1  [MIT OR Apache-2.0]
+      Copyright (c) 2025 The gfx-rs developers
+  wgpu-types 30.0.1  [MIT OR Apache-2.0]
+      Copyright (c) 2025 The gfx-rs developers
   winnow 0.5.40
       No copyright line or author list in its package; see
         https://github.com/winnow-rs/winnow.
+  winnow 1.0.4
+      No copyright line or author list in its package; see
+        https://github.com/winnow-rs/winnow.
+  wl-clipboard-rs 0.9.4  [MIT OR Apache-2.0]
+      Copyright (c) 2019 Ivan Molodetskikh
+  x11-dl 2.21.0
+      No copyright line in its license files; Cargo.toml lists the authors as:
+        daggerbot, Erle Pereira, AltF02.
   x11rb 0.13.2  [MIT OR Apache-2.0]
       Copyright 2019 x11rb Contributers
   x11rb-protocol 0.13.2  [MIT OR Apache-2.0]
       Copyright 2019 x11rb Contributers
-  xz2 0.1.7  [MIT/Apache-2.0]
-      Copyright (c) 2016 Alex Crichton
+  xattr 1.6.1  [MIT OR Apache-2.0]
+      Copyright (c) 2015 Steven Allen
+  xcursor 0.3.11
+      Copyright (c) 2020 Samuele Esposito
+  xkbcommon-dl 0.4.2
+      Copyright (c) 2023 Kirill Chibisov
+  xkeysym 0.2.1  [MIT OR Apache-2.0 OR Zlib]
+      Copyright 2022-2023 John Nunley
+      Copyright (c) 2022-2023 John Nunley
+  xmlwriter 0.1.0
+      Copyright (c) 2019 Reizner Evgeniy
+  yazi 0.2.1  [Apache-2.0 OR MIT]
+      Copyright (c) 2020 Chad Brokaw
+  yeslogic-fontconfig-sys 6.0.1
+      Copyright 2019 YesLogic Pty. Ltd.
+      Copyright 2016 Manuel Reinhardt
+      Copyright 2014 Austin Bonander
+      Copyright 2013 The Servo Project Developers.
+  zbus 5.19.0
+      Copyright (c) 2024 Zeeshan Ali Khan & zbus contributors
+  zbus_macros 5.19.0
+      Copyright (c) 2024 Zeeshan Ali Khan & zbus contributors
+  zbus_names 4.3.5
+      Copyright (c) 2024 Zeeshan Ali Khan & zbus contributors
+  zcheapstr 1.1.0
+      Copyright (c) 2026 Zeeshan Ali Khan & zcheapstr contributors
+  zeno 0.3.3  [Apache-2.0 OR MIT]
+      Copyright (c) 2020 Chad Brokaw
+  zerocopy 0.8.33  [BSD-2-Clause OR Apache-2.0 OR MIT]
+      Copyright 2023 The Fuchsia Authors
+      Copyright 2019 The Fuchsia Authors.
+  zerocopy-derive 0.8.33  [BSD-2-Clause OR Apache-2.0 OR MIT]
+      Copyright 2023 The Fuchsia Authors
+      Copyright 2019 The Fuchsia Authors.
   zeroize 1.8.2  [Apache-2.0 OR MIT]
       Copyright (c) 2018-2021 The RustCrypto Project Developers
-  zeroize_derive 1.4.3  [Apache-2.0 OR MIT]
-      Copyright (c) 2019-2023 The RustCrypto Project Developers
-  zip 2.4.2
+  zip 9.1.2
       Copyright (c) 2014 Mathijs van de Nes
   zmij 1.0.15
       No copyright line in its license files; Cargo.toml lists the authors as:
@@ -466,13 +1059,17 @@ Components:
       lib/dictBuilder/divsufsort.h
       Copyright (c) 2003-2008 Yuta Mori All Rights Reserved.
       Source files in Zstandard (zstd) C library 1.5.7 under MIT License.
-  zstd 0.13.3
-      Copyright (c) 2016 Alexandre Bury
-  zstd-safe 7.2.4  [MIT OR Apache-2.0]
-      Copyright (c) 2016 Alexandre Bury
-  zstd-sys 2.0.16+zstd.1.5.7  [MIT/Apache-2.0]
-      Copyright (c) 2016-present, Facebook, Inc. All rights reserved.
-      Copyright (c) 2016 Alexandre Bury
+  zune-core 0.5.3  [MIT OR Apache-2.0 OR Zlib]
+      Copyright (c) zune-image developers
+  zune-jpeg 0.5.15  [MIT OR Apache-2.0 OR Zlib]
+      Copyright (c) zune-image developers
+  zvariant 5.15.1
+      Copyright (c) 2024 Zeeshan Ali Khan & zbus contributors
+  zvariant_derive 5.15.1
+      Copyright (c) 2024 Zeeshan Ali Khan & zbus contributors
+  zvariant_utils 4.2.0
+      No copyright line in its license files; Cargo.toml lists the authors as:
+        Zeeshan Ali Khan, turbocooler.
 
 License text:
 
@@ -501,7 +1098,8 @@ IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 DEALINGS IN THE SOFTWARE.
 
 ------------------------------------------------------------------------------
-The MIT License as worded in the package of bytemuck 1.24.0:
+The MIT License as worded in the package of bytemuck 1.25.2, bytemuck_derive
+1.12.1:
 ------------------------------------------------------------------------------
 
 Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated documentation files (the "Software"), to deal in the Software without restriction, including without limitation the rights to use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of the Software, and to permit persons to whom the Software is furnished to do so, subject to the following conditions:
@@ -517,25 +1115,46 @@ THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLI
 
 Components:
 
-  icu_collections 2.1.1
+  fixed_decimal 0.7.2
       Copyright © 2020-2024 Unicode, Inc.
       © 1995-2016 International Business Machines Corporation and others.
-  icu_locale_core 2.1.1
+  icu_collections 2.3.0
       Copyright © 2020-2024 Unicode, Inc.
       © 1995-2016 International Business Machines Corporation and others.
-  icu_normalizer 2.1.1
+  icu_decimal 2.3.0
       Copyright © 2020-2024 Unicode, Inc.
       © 1995-2016 International Business Machines Corporation and others.
-  icu_normalizer_data 2.1.1
+  icu_decimal_data 2.3.0
       Copyright © 2020-2024 Unicode, Inc.
       © 1995-2016 International Business Machines Corporation and others.
-  icu_properties 2.1.2
+  icu_locale_core 2.3.0
       Copyright © 2020-2024 Unicode, Inc.
       © 1995-2016 International Business Machines Corporation and others.
-  icu_properties_data 2.1.2
+  icu_locale_fallback 2.3.0
       Copyright © 2020-2024 Unicode, Inc.
       © 1995-2016 International Business Machines Corporation and others.
-  icu_provider 2.1.1
+  icu_locale_fallback_data 2.3.0
+      Copyright © 2020-2024 Unicode, Inc.
+      © 1995-2016 International Business Machines Corporation and others.
+  icu_normalizer 2.3.0
+      Copyright © 2020-2024 Unicode, Inc.
+      © 1995-2016 International Business Machines Corporation and others.
+  icu_normalizer_data 2.3.0
+      Copyright © 2020-2024 Unicode, Inc.
+      © 1995-2016 International Business Machines Corporation and others.
+  icu_properties 2.3.0
+      Copyright © 2020-2024 Unicode, Inc.
+      © 1995-2016 International Business Machines Corporation and others.
+  icu_properties_data 2.3.0
+      Copyright © 2020-2024 Unicode, Inc.
+      © 1995-2016 International Business Machines Corporation and others.
+  icu_provider 2.3.1
+      Copyright © 2020-2024 Unicode, Inc.
+      © 1995-2016 International Business Machines Corporation and others.
+  icu_segmenter 2.3.0
+      Copyright © 2020-2024 Unicode, Inc.
+      © 1995-2016 International Business Machines Corporation and others.
+  icu_segmenter_data 2.3.0
       Copyright © 2020-2024 Unicode, Inc.
       © 1995-2016 International Business Machines Corporation and others.
   litemap 0.8.1
@@ -544,21 +1163,21 @@ Components:
   potential_utf 0.1.4
       Copyright © 2020-2024 Unicode, Inc.
       © 1995-2016 International Business Machines Corporation and others.
-  Rust standard library 1.92.0: library/core/src/unicode/unicode_data.rs
+  Rust standard library 1.95.0: library/core/src/unicode/unicode_data.rs
       [Unicode-3.0]
       Copyright 1991-2024 Unicode, Inc
-  tinystr 0.8.2
+  tinystr 0.8.4
       Copyright © 2020-2024 Unicode, Inc.
       © 1995-2016 International Business Machines Corporation and others.
   unicode-ident 1.0.22  [(MIT OR Apache-2.0) AND Unicode-3.0]
       Copyright © 1991-2023 Unicode, Inc.
-  writeable 0.6.2
+  writeable 0.6.4
       Copyright © 2020-2024 Unicode, Inc.
       © 1995-2016 International Business Machines Corporation and others.
-  yoke 0.8.1
+  yoke 0.8.3
       Copyright © 2020-2024 Unicode, Inc.
       © 1995-2016 International Business Machines Corporation and others.
-  yoke-derive 0.8.1
+  yoke-derive 0.8.4
       Copyright © 2020-2024 Unicode, Inc.
       © 1995-2016 International Business Machines Corporation and others.
   zerofrom 0.1.6
@@ -567,13 +1186,13 @@ Components:
   zerofrom-derive 0.1.6
       Copyright © 2020-2024 Unicode, Inc.
       © 1995-2016 International Business Machines Corporation and others.
-  zerotrie 0.2.3
+  zerotrie 0.2.5
       Copyright © 2020-2024 Unicode, Inc.
       © 1995-2016 International Business Machines Corporation and others.
-  zerovec 0.11.5
+  zerovec 0.11.8
       Copyright © 2020-2024 Unicode, Inc.
       © 1995-2016 International Business Machines Corporation and others.
-  zerovec-derive 0.11.2
+  zerovec-derive 0.11.6
       Copyright © 2020-2024 Unicode, Inc.
       © 1995-2016 International Business Machines Corporation and others.
 
@@ -677,16 +1296,46 @@ authorization of the copyright holder.
 
 Components:
 
+  ab_glyph 0.2.32
+      No copyright line in its license files; Cargo.toml lists the authors as:
+        Alex Butler.
+  ab_glyph_rasterizer 0.1.10
+      No copyright line in its license files; Cargo.toml lists the authors as:
+        Alex Butler.
+  codespan-reporting 0.13.1
+      No copyright line in its license files; Cargo.toml lists the authors as:
+        Brendan Zabarauskas.
+  dpi 0.1.2  [Apache-2.0 AND MIT]
+      Copyright (c) 2018 Jorge Aparicio
+      Copyright © 2005-2020 Rich Felker, et al.
+      Copyright © 1993,2004 Sun Microsystems or
+      Copyright © 2003-2011 David Schultz or
+      Copyright © 2003-2009 Steven G. Kargl or
+      Copyright © 2003-2009 Bruce D. Evans or
+      Copyright © 2008 Stephen L. Moshier or
+      Copyright © 2017-2018 Arm Limited
   gethostname 1.1.0
       No copyright line in its license files; Cargo.toml lists the authors as:
         Sebastian Wiesner.
+  glutin 0.32.3
+      Copyright 2022 Kirill Chibisov
+  glutin_egl_sys 0.7.1
+      Copyright 2022 Kirill Chibisov
+  glutin_glx_sys 0.6.1
+      Copyright 2022 Kirill Chibisov
+  i-slint-compiler 1.19.0 (LICENSES/Apache-2.0.txt)
+      Its package also carries this license file, besides the license it
+        declares (GPL-3.0-only OR LicenseRef-Slint-Royalty-free-2.0 OR
+        LicenseRef-Slint-Software-3.0).
   larian-formats 0.3.0
-      Its package has no license file; the license comes from its Cargo.toml.
-      Cargo.toml lists the authors as: Saghm Rossi.
-  lzma-rust 0.1.7
-      Its package has no license file; the license comes from its Cargo.toml.
+      No copyright line in its license files; Cargo.toml lists the authors as:
+        Saghm Rossi.
+  lzma-rust2 0.23.0
       No copyright line or author list in its package; see
-        https://github.com/dyz1990/sevenz-rust/tree/main/lzma-rust.
+        https://github.com/hasenbanck/lzma-rust2/.
+  owned_ttf_parser 0.25.1
+      No copyright line in its license files; Cargo.toml lists the authors as:
+        Alex Butler.
   ring 0.17.14  [Apache-2.0 AND ISC]
       Copyright (c) 2009 The Go Authors. All rights reserved.
       Copyright 2015 The Chromium Authors. All rights reserved.
@@ -736,9 +1385,30 @@ Components:
   ryu 1.0.22  [Apache-2.0 OR BSL-1.0]
       No copyright line in its license files; Cargo.toml lists the authors as:
         David Tolnay.
-  sevenz-rust 0.6.1
+  sevenz-rust2 0.24.1
       No copyright line or author list in its package; see
-        https://github.com/dyz1990/sevenz-rust.
+        https://github.com/hasenbanck/sevenz-rust.
+  spirv 0.4.0+sdk-1.4.341.0
+      Its package has no license file; the license comes from its Cargo.toml.
+      Cargo.toml lists the authors as: Lei Zhang.
+  unicode-linebreak 0.1.5
+      No copyright line in its license files; Cargo.toml lists the authors as:
+        Axel Forsman.
+  winit 0.31.0-beta.3
+      No copyright line or author list in its package; see
+        https://github.com/rust-windowing/winit.
+  winit-common 0.31.0-beta.3
+      No copyright line or author list in its package; see
+        https://github.com/rust-windowing/winit.
+  winit-core 0.31.0-beta.3
+      No copyright line in its license files; Cargo.toml lists the authors as:
+        The winit contributors, Kirill Chibisov.
+  winit-wayland 0.31.0-beta.3
+      No copyright line or author list in its package; see
+        https://github.com/rust-windowing/winit.
+  winit-x11 0.31.0-beta.3
+      No copyright line or author list in its package; see
+        https://github.com/rust-windowing/winit.
   zopfli 0.8.3
       Copyright 2011 Google Inc.
 
@@ -928,6 +1598,14 @@ END OF TERMS AND CONDITIONS
 
 Components:
 
+  alloc-no-stdlib 3.0.0
+      Copyright (c) 2016 Dropbox, Inc. All rights reserved.
+  alloc-stdlib 0.3.0
+      Its package has no license file; the license comes from its Cargo.toml.
+      Cargo.toml lists the authors as: Daniel Reiter Horn.
+  brotli 9.1.1  [BSD-3-Clause AND MIT]
+      Copyright (c) 2016 Dropbox, Inc. All rights reserved.
+      Copyright (c) 2009, 2010, 2013-2016 by the Brotli Authors.
   encoding_rs 0.8.35  [(Apache-2.0 OR MIT) AND BSD-3-Clause]
       encoding_rs is copyright Mozilla Foundation.
       Copyright Mozilla Foundation
@@ -938,10 +1616,22 @@ Components:
   pxfm 0.1.27  [BSD-3-Clause OR Apache-2.0]
       Copyright 2024 Radzivon Bartoshyk
       Copyright (c) Radzivon Bartoshyk. All rights reserved.
+  seccompiler 0.5.0  [Apache-2.0 OR BSD-3-Clause]
+      Copyright 2021 Amazon.com, Inc. or its affiliates. All Rights Reserved.
+  Skia graphics library (prebuilt, with skcms)
+      Copyright (c) 2011 Google Inc. All rights reserved.
+      Skia's C++ code is linked into the program from the prebuilt static
+        library that skia-bindings downloads.
   subtle 2.6.1
       Copyright (c) 2016-2017 Isis Agora Lovecruft, Henry de Valence. All
         rights reserved.
       Copyright (c) 2016-2024 Isis Agora Lovecruft. All rights reserved.
+  tiny-skia 0.12.0
+      Copyright (c) 2011 Google Inc. All rights reserved.
+      Copyright (c) 2020 Yevhenii Reizner All rights reserved.
+  tiny-skia-path 0.12.0
+      Copyright (c) 2011 Google Inc. All rights reserved.
+      Copyright (c) 2020 Yevhenii Reizner All rights reserved.
   Zstandard (zstd) C library 1.5.7
       Copyright (c) Meta Platforms, Inc. and affiliates. All rights reserved.
       In its C sources:
@@ -951,39 +1641,60 @@ Components:
         Copyright (c) Yann Collet, Meta Platforms, Inc. and affiliates. All
           rights reserved.
       C library compiled into the program from the copy in the crate zstd-sys
-        2.0.16+zstd.1.5.7.
+        2.1.2+zstd.1.5.7.
       Zstandard is offered under BSD-3-Clause or GPL-2.0-only; it is used here
         under BSD-3-Clause.
-  zstd-sys 2.0.16+zstd.1.5.7 (LICENSE.BSD-3-Clause)
-      Copyright (c) 2016-present, Facebook, Inc. All rights reserved.
-      Its package also carries this license file, besides the license it
-        declares (MIT/Apache-2.0).
+  zstd 0.14.3
+      Copyright (c) 2026, Alexandre Bury
+  zstd-safe 8.2.0
+      Copyright (c) 2026, Alexandre Bury
+  zstd-sys 2.1.2+zstd.1.5.7
+      Copyright (c) 2026, Alexandre Bury
+      Copyright (c) Meta Platforms, Inc. and affiliates. All rights reserved.
 
 License text:
 
+Redistribution and use in source and binary forms, with or without modification, are permitted provided that the following conditions are met:
+
+1. Redistributions of source code must retain the above copyright notice, this list of conditions and the following disclaimer.
+
+2. Redistributions in binary form must reproduce the above copyright notice, this list of conditions and the following disclaimer in the documentation and/or other materials provided with the distribution.
+
+3. Neither the name of the copyright holder nor the names of its contributors may be used to endorse or promote products derived from this software without specific prior written permission.
+
+THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+
+------------------------------------------------------------------------------
+The BSD 3-Clause License as worded in the package of Skia graphics library
+(prebuilt, with skcms), tiny-skia 0.12.0, tiny-skia-path 0.12.0:
+------------------------------------------------------------------------------
+
 Redistribution and use in source and binary forms, with or without
-modification, are permitted provided that the following conditions are met:
+modification, are permitted provided that the following conditions are
+met:
 
-1. Redistributions of source code must retain the above copyright notice, this
-   list of conditions and the following disclaimer.
+  * Redistributions of source code must retain the above copyright
+    notice, this list of conditions and the following disclaimer.
 
-2. Redistributions in binary form must reproduce the above copyright notice,
-   this list of conditions and the following disclaimer in the documentation
-   and/or other materials provided with the distribution.
+  * Redistributions in binary form must reproduce the above copyright
+    notice, this list of conditions and the following disclaimer in
+    the documentation and/or other materials provided with the
+    distribution.
 
-3. Neither the name of the copyright holder nor the names of its
-   contributors may be used to endorse or promote products derived from
-   this software without specific prior written permission.
+  * Neither the name of the copyright holder nor the names of its
+    contributors may be used to endorse or promote products derived
+    from this software without specific prior written permission.
 
-THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
-AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
-IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
-DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE
-FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
-DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
-SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
-CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
-OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
+"AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
+LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
+A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
+OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
+SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
+LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
+DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
+THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+(INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ------------------------------------------------------------------------------
@@ -1016,39 +1727,198 @@ ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
 (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
 SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
-------------------------------------------------------------------------------
-The BSD 3-Clause License as worded in the package of zstd-sys
-2.0.16+zstd.1.5.7 (LICENSE.BSD-3-Clause):
-------------------------------------------------------------------------------
 
-Redistribution and use in source and binary forms, with or without modification,
-are permitted provided that the following conditions are met:
+==============================================================================
+5. Slint Royalty-free Desktop, Mobile, and Web Applications License 2.0
+==============================================================================
 
- * Redistributions of source code must retain the above copyright notice, this
-   list of conditions and the following disclaimer.
+Slint is used under this license, not under the GPL it is also offered under.
+Its condition (section 2) is attribution: the application shows the AboutSlint
+widget in an About screen, and the page the program is downloaded from shows
+the "Made with Slint" badge. Made with Slint: https://slint.dev
 
- * Redistributions in binary form must reproduce the above copyright notice,
-   this list of conditions and the following disclaimer in the documentation
-   and/or other materials provided with the distribution.
+Components:
 
- * Neither the name Facebook nor the names of its contributors may be used to
-   endorse or promote products derived from this software without specific
-   prior written permission.
+  i-slint-backend-selector 1.19.0  [GPL-3.0-only OR
+      LicenseRef-Slint-Royalty-free-2.0 OR LicenseRef-Slint-Software-3.0]
+      No copyright line in its license files; Cargo.toml lists the authors as:
+        Slint Developers.
+  i-slint-backend-winit 1.19.0  [GPL-3.0-only OR
+      LicenseRef-Slint-Royalty-free-2.0 OR LicenseRef-Slint-Software-3.0]
+      No copyright line in its license files; Cargo.toml lists the authors as:
+        Slint Developers.
+  i-slint-common 1.19.0  [GPL-3.0-only OR LicenseRef-Slint-Royalty-free-2.0 OR
+      LicenseRef-Slint-Software-3.0]
+      No copyright line in its license files; Cargo.toml lists the authors as:
+        Slint Developers.
+  i-slint-compiler 1.19.0  [GPL-3.0-only OR LicenseRef-Slint-Royalty-free-2.0
+      OR LicenseRef-Slint-Software-3.0]
+      No copyright line in its license files; Cargo.toml lists the authors as:
+        Slint Developers.
+  i-slint-core 1.19.0  [GPL-3.0-only OR LicenseRef-Slint-Royalty-free-2.0 OR
+      LicenseRef-Slint-Software-3.0]
+      No copyright line in its license files; Cargo.toml lists the authors as:
+        Slint Developers.
+  i-slint-core-macros 1.19.0  [GPL-3.0-only OR
+      LicenseRef-Slint-Royalty-free-2.0 OR LicenseRef-Slint-Software-3.0]
+      No copyright line in its license files; Cargo.toml lists the authors as:
+        Slint Developers.
+  i-slint-renderer-skia 1.19.0  [GPL-3.0-only OR
+      LicenseRef-Slint-Royalty-free-2.0 OR LicenseRef-Slint-Software-3.0]
+      No copyright line in its license files; Cargo.toml lists the authors as:
+        Slint Developers.
+  slint 1.19.0  [GPL-3.0-only OR LicenseRef-Slint-Royalty-free-2.0 OR
+      LicenseRef-Slint-Software-3.0]
+      No copyright line in its license files; Cargo.toml lists the authors as:
+        Slint Developers.
+  slint-macros 1.19.0  [GPL-3.0-only OR LicenseRef-Slint-Royalty-free-2.0 OR
+      LicenseRef-Slint-Software-3.0]
+      No copyright line in its license files; Cargo.toml lists the authors as:
+        Slint Developers.
 
-THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND
-ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
-WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
-DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE FOR
-ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
-(INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
-LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON
-ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
-(INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
-SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+License text:
+
+# Slint Royalty-free Desktop, Mobile, and Web Applications License
+
+Version 2.0
+
+## Preamble
+
+Slint is a toolkit that can be used to build user interfaces for applications. Slint (hereafter referred to as **Software**) is made available under different licenses by SixtyFPS GmbH incorporated at Oranienburger Str. 44, 16540 Hohen Neuendorf, Germany (**SixtyFPS**). The **Slint Royalty-free Desktop, Mobile, and Web Applications License** is suitable for those who develop desktop, mobile, or web applications and do not want to use open source components under copyleft licenses.
+
+## 1. Grant of Rights
+
+SixtyFPS hereby grants You a world-wide, royalty-free, non-exclusive license to use, reproduce, make available, modify, display, perform, distribute the Software as part of a Desktop, Mobile, or Web Application.
+
+A **Desktop Application** is a computer program that is designed to run on a general-purpose computer (PC or notebook), typically installed and executed locally on the computer's operating system.
+
+A **Mobile Application** is a computer program that is designed to run on a general-purpose mobile computer (mobile phone or tablet), typically installed and executed locally on the computer's operating system.
+
+A **Web Application** is a computer program that is designed to run in the sandbox environment provided by a web browser.
+
+Desktop Application, Mobile Application, and Web Application are hereafter referred to as **Application**.
+
+## 2. License Conditions - Attribution
+
+You may distribute the Software as part of an Application, modified or unmodified, provided that You do either of the following:
+
+(a) Display the [`AboutSlint`](https://docs.slint.dev/latest/docs/slint/reference/std-widgets/misc/aboutslint/) widget in an "About" screen or dialog that is accessible from the top level menu of the Application. In the absence of such a screen or dialog, display the widget in the "Splash Screen" of the Application.
+
+(b) Display the [Slint attribution badge](https://github.com/slint-ui/slint/tree/master/logo/MadeWithSlint-logo-whitebg.png) on a public webpage, preferably where the binaries of your Application can be downloaded from, in such a way that it can be easily found by any visitor to that page.
+
+## 3. Limitations
+
+The License does not permit to distribute or make the Software publicly available alone and without integration into an Application. For this purpose you may use the Software under the GNU General Public License, version 3.
+
+The License does not permit the use of the Software within Embedded Systems. An **Embedded System** is a computer system designed to perform a specific task within a larger mechanical or electrical system.
+
+The License does not permit the distribution of Application that exposes the APIs, in part or in total, of the Software.
+
+You may not remove or alter any license notices (including copyright notices, disclaimers of warranty, or limitations of liability) contained within the source code form of the Software.
+
+## 4. Warranty and Liability
+
+SixtyFPS is only liable for conflicting rights of third parties if SixtyFPS was aware of these rights without informing you. Unless required by applicable law or agreed to in writing, SixtyFPS provides the Software on an "as is" basis, without warranties or conditions of any kind, either express or implied, including, without limitation, any warranties or conditions of merchantability, or fitness for a particular purpose.
+
+Unless required by law, SixtyFPS won't be liable for any direct, indirect, incidental, or consequential damages arising in any way out of the use of the Software.
 
 
 ==============================================================================
-5. Creative Commons Zero v1.0 Universal (SPDX: CC0-1.0)
+6. ISC License (SPDX: ISC)
+==============================================================================
+
+Components:
+
+  inotify 0.11.5
+      Copyright (c) Hanno Braun and contributors
+  inotify-sys 0.1.8
+      Copyright (c) Hanno Braun and contributors
+  libloading 0.8.9
+      Copyright © 2015, Simonas Kazlauskas
+  ring 0.17.14  [Apache-2.0 AND ISC]
+      Copyright (c) 2009 The Go Authors. All rights reserved.
+      Copyright 2015 The Chromium Authors. All rights reserved.
+      Copyright 2015-2025 Brian Smith.
+      Compiles C or assembly code into the program.
+      Copyright notices in that code: listed under Apache License 2.0.
+  rustls-webpki 0.103.16
+      Copyright 2015 Brian Smith.
+  untrusted 0.9.0
+      Copyright 2015-2016 Brian Smith.
+
+License text:
+
+Permission to use, copy, modify, and/or distribute this software for any purpose
+with or without fee is hereby granted, provided that the above copyright notice
+and this permission notice appear in all copies.
+
+THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES WITH
+REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF MERCHANTABILITY AND
+FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR ANY SPECIAL, DIRECT,
+INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES WHATSOEVER RESULTING FROM LOSS
+OF USE, DATA OR PROFITS, WHETHER IN AN ACTION OF CONTRACT, NEGLIGENCE OR OTHER
+TORTIOUS ACTION, ARISING OUT OF OR IN CONNECTION WITH THE USE OR PERFORMANCE OF
+THIS SOFTWARE.
+
+------------------------------------------------------------------------------
+The ISC License as worded in the package of rustls-webpki 0.103.16, untrusted
+0.9.0:
+------------------------------------------------------------------------------
+
+Permission to use, copy, modify, and/or distribute this software for any
+purpose with or without fee is hereby granted, provided that the above
+copyright notice and this permission notice appear in all copies.
+
+THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHORS DISCLAIM ALL WARRANTIES
+WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF
+MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHORS BE LIABLE FOR
+ANY SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES
+WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN
+ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
+OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
+
+
+==============================================================================
+7. zlib License (SPDX: Zlib)
+==============================================================================
+
+Components:
+
+  foldhash 0.1.5
+      Copyright (c) 2024 Orson Peters
+  foldhash 0.2.0
+      Copyright (c) 2024 Orson Peters
+      Also used by the Rust standard library 1.95.0.
+  gilrs 0.11.2: code in SDL_GameControllerDB/
+      Copyright (C) 1997-2025 Sam Lantinga <slouken@libsdl.org>
+  slotmap 1.1.1
+      Copyright (c) 2021 Orson Peters <orsonpeters@gmail.com>
+  zlib-rs 0.5.5
+      (C) 2024 Trifecta Tech Foundation
+
+License text:
+
+This software is provided 'as-is', without any express or implied warranty. In
+no event will the authors be held liable for any damages arising from the use of
+this software.
+
+Permission is granted to anyone to use this software for any purpose, including
+commercial applications, and to alter it and redistribute it freely, subject to
+the following restrictions:
+
+1. The origin of this software must not be misrepresented; you must not claim
+    that you wrote the original software. If you use this software in a product,
+    an acknowledgment in the product documentation would be appreciated but is
+    not required.
+
+2. Altered source versions must be plainly marked as such, and must not be
+    misrepresented as being the original software.
+
+3. This notice may not be removed or altered from any source distribution.
+
+
+==============================================================================
+8. Creative Commons Zero v1.0 Universal (SPDX: CC0-1.0)
 ==============================================================================
 
 Components:
@@ -1056,12 +1926,14 @@ Components:
   blake3 1.8.3  [CC0-1.0 OR Apache-2.0 OR Apache-2.0 WITH LLVM-exception]
       Copyright 2019 Jack O'Connor and Samuel Neves
       Compiles C or assembly code into the program.
-  constant_time_eq 0.3.1  [CC0-1.0 OR MIT-0 OR Apache-2.0]
-      No copyright line in its license files; Cargo.toml lists the authors as:
-        Cesar Eduardo Barros.
   constant_time_eq 0.4.2  [CC0-1.0 OR MIT-0 OR Apache-2.0]
       No copyright line in its license files; Cargo.toml lists the authors as:
         Cesar Eduardo Barros.
+  constant_time_eq 0.6.1  [CC0-1.0 OR MIT-0 OR Apache-2.0]
+      No copyright line in its license files; Cargo.toml lists the authors as:
+        Cesar Eduardo Barros.
+  ppmd-rust 1.5.2  [CC0-1.0 OR MIT-0]
+      Copyright 2026 The ppmd-rust authors
 
 License text:
 
@@ -1187,57 +2059,134 @@ express Statement of Purpose.
     party to this document and has no duty or obligation with respect to
     this CC0 or use of the Work.
 
-
-==============================================================================
-6. ISC License (SPDX: ISC)
-==============================================================================
-
-Components:
-
-  ring 0.17.14  [Apache-2.0 AND ISC]
-      Copyright (c) 2009 The Go Authors. All rights reserved.
-      Copyright 2015 The Chromium Authors. All rights reserved.
-      Copyright 2015-2025 Brian Smith.
-      Compiles C or assembly code into the program.
-      Copyright notices in that code: listed under Apache License 2.0.
-  rustls-webpki 0.103.9
-      Copyright 2015 Brian Smith.
-  untrusted 0.9.0
-      Copyright 2015-2016 Brian Smith.
-
-License text:
-
-Permission to use, copy, modify, and/or distribute this software for any
-purpose with or without fee is hereby granted, provided that the above
-copyright notice and this permission notice appear in all copies.
-
-THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHORS DISCLAIM ALL WARRANTIES
-WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF
-MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHORS BE LIABLE FOR
-ANY SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES
-WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN
-ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
-OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
-
 ------------------------------------------------------------------------------
-The ISC License as worded in the package of ring 0.17.14:
+The Creative Commons Zero v1.0 Universal as worded in the package of ppmd-rust
+1.5.2:
 ------------------------------------------------------------------------------
 
-Permission to use, copy, modify, and/or distribute this software for any
-purpose with or without fee is hereby granted, provided that the above
-copyright notice and this permission notice appear in all copies.
+CC0 1.0 Universal
 
-THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES
-WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF
-MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR ANY
-SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES
-WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN ACTION
-OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF OR IN
-CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
+    CREATIVE COMMONS CORPORATION IS NOT A LAW FIRM AND DOES NOT PROVIDE
+    LEGAL SERVICES. DISTRIBUTION OF THIS DOCUMENT DOES NOT CREATE AN
+    ATTORNEY-CLIENT RELATIONSHIP. CREATIVE COMMONS PROVIDES THIS
+    INFORMATION ON AN "AS-IS" BASIS. CREATIVE COMMONS MAKES NO WARRANTIES
+    REGARDING THE USE OF THIS DOCUMENT OR THE INFORMATION OR WORKS
+    PROVIDED HEREUNDER, AND DISCLAIMS LIABILITY FOR DAMAGES RESULTING FROM
+    THE USE OF THIS DOCUMENT OR THE INFORMATION OR WORKS PROVIDED
+    HEREUNDER.
+
+Statement of Purpose
+
+The laws of most jurisdictions throughout the world automatically confer
+exclusive Copyright and Related Rights (defined below) upon the creator
+and subsequent owner(s) (each and all, an "owner") of an original work of
+authorship and/or a database (each, a "Work").
+
+Certain owners wish to permanently relinquish those rights to a Work for
+the purpose of contributing to a commons of creative, cultural and
+scientific works ("Commons") that the public can reliably and without fear
+of later claims of infringement build upon, modify, incorporate in other
+works, reuse and redistribute as freely as possible in any form whatsoever
+and for any purposes, including without limitation commercial purposes.
+These owners may contribute to the Commons to promote the ideal of a free
+culture and the further production of creative, cultural and scientific
+works, or to gain reputation or greater distribution for their Work in
+part through the use and efforts of others.
+
+For these and/or other purposes and motivations, and without any
+expectation of additional consideration or compensation, the person
+associating CC0 with a Work (the "Affirmer"), to the extent that he or she
+is an owner of Copyright and Related Rights in the Work, voluntarily
+elects to apply CC0 to the Work and publicly distribute the Work under its
+terms, with knowledge of his or her Copyright and Related Rights in the
+Work and the meaning and intended legal effect of CC0 on those rights.
+
+1. Copyright and Related Rights. A Work made available under CC0 may be
+   protected by copyright and related or neighboring rights ("Copyright and
+   Related Rights"). Copyright and Related Rights include, but are not
+   limited to, the following:
+
+i. the right to reproduce, adapt, distribute, perform, display,
+communicate, and translate a Work;
+ii. moral rights retained by the original author(s) and/or performer(s);
+iii. publicity and privacy rights pertaining to a person's image or
+likeness depicted in a Work;
+iv. rights protecting against unfair competition in regards to a Work,
+subject to the limitations in paragraph 4(a), below;
+v. rights protecting the extraction, dissemination, use and reuse of data
+in a Work;
+vi. database rights (such as those arising under Directive 96/9/EC of the
+European Parliament and of the Council of 11 March 1996 on the legal
+protection of databases, and under any national implementation
+thereof, including any amended or successor version of such
+directive); and
+vii. other similar, equivalent or corresponding rights throughout the
+world based on applicable law or treaty, and any national
+implementations thereof.
+
+2. Waiver. To the greatest extent permitted by, but not in contravention
+   of, applicable law, Affirmer hereby overtly, fully, permanently,
+   irrevocably and unconditionally waives, abandons, and surrenders all of
+   Affirmer's Copyright and Related Rights and associated claims and causes
+   of action, whether now known or unknown (including existing as well as
+   future claims and causes of action), in the Work (i) in all territories
+   worldwide, (ii) for the maximum duration provided by applicable law or
+   treaty (including future time extensions), (iii) in any current or future
+   medium and for any number of copies, and (iv) for any purpose whatsoever,
+   including without limitation commercial, advertising or promotional
+   purposes (the "Waiver"). Affirmer makes the Waiver for the benefit of each
+   member of the public at large and to the detriment of Affirmer's heirs and
+   successors, fully intending that such Waiver shall not be subject to
+   revocation, rescission, cancellation, termination, or any other legal or
+   equitable action to disrupt the quiet enjoyment of the Work by the public
+   as contemplated by Affirmer's express Statement of Purpose.
+
+3. Public License Fallback. Should any part of the Waiver for any reason
+   be judged legally invalid or ineffective under applicable law, then the
+   Waiver shall be preserved to the maximum extent permitted taking into
+   account Affirmer's express Statement of Purpose. In addition, to the
+   extent the Waiver is so judged Affirmer hereby grants to each affected
+   person a royalty-free, non transferable, non sublicensable, non exclusive,
+   irrevocable and unconditional license to exercise Affirmer's Copyright and
+   Related Rights in the Work (i) in all territories worldwide, (ii) for the
+   maximum duration provided by applicable law or treaty (including future
+   time extensions), (iii) in any current or future medium and for any number
+   of copies, and (iv) for any purpose whatsoever, including without
+   limitation commercial, advertising or promotional purposes (the
+   "License"). The License shall be deemed effective as of the date CC0 was
+   applied by Affirmer to the Work. Should any part of the License for any
+   reason be judged legally invalid or ineffective under applicable law, such
+   partial invalidity or ineffectiveness shall not invalidate the remainder
+   of the License, and in such case Affirmer hereby affirms that he or she
+   will not (i) exercise any of his or her remaining Copyright and Related
+   Rights in the Work or (ii) assert any associated claims and causes of
+   action with respect to the Work, in either case contrary to Affirmer's
+   express Statement of Purpose.
+
+4. Limitations and Disclaimers.
+
+a. No trademark or patent rights held by Affirmer are waived, abandoned,
+surrendered, licensed or otherwise affected by this document.
+b. Affirmer offers the Work as-is and makes no representations or
+warranties of any kind concerning the Work, express, implied,
+statutory or otherwise, including without limitation warranties of
+title, merchantability, fitness for a particular purpose, non
+infringement, or the absence of latent or other defects, accuracy, or
+the present or absence of errors, whether or not discoverable, all to
+the greatest extent permissible under applicable law.
+c. Affirmer disclaims responsibility for clearing rights of other persons
+that may apply to the Work or any use thereof, including without
+limitation any person's Copyright and Related Rights in the Work.
+Further, Affirmer disclaims responsibility for obtaining any necessary
+consents, permissions or other rights required for any use of the
+Work.
+d. Affirmer understands and acknowledges that Creative Commons is not a
+party to this document and has no duty or obligation with respect to
+this CC0 or use of the Work.
 
 
 ==============================================================================
-7. BSD 2-Clause License (SPDX: BSD-2-Clause)
+9. BSD 2-Clause License (SPDX: BSD-2-Clause)
 ==============================================================================
 
 Components:
@@ -1310,7 +2259,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 
 ==============================================================================
-8. Community Data License Agreement - Permissive - Version 2.0 (SPDX: CDLA-Permissive-2.0)
+10. Community Data License Agreement - Permissive - Version 2.0 (SPDX: CDLA-Permissive-2.0)
 ==============================================================================
 
 Components:
@@ -1318,7 +2267,7 @@ Components:
   webpki-roots 0.26.11
       No copyright line or author list in its package; see
         https://github.com/rustls/webpki-roots.
-  webpki-roots 1.0.5
+  webpki-roots 1.0.11
       No copyright line or author list in its package; see
         https://github.com/rustls/webpki-roots.
 
@@ -1388,7 +2337,63 @@ insights.
 
 
 ==============================================================================
-9. Mozilla Public License 2.0 (SPDX: MPL-2.0)
+11. LicenseRef-UnRAR
+==============================================================================
+
+Components:
+
+  UnRAR 7.3.2 (RarLab; Alexander Roshal)
+      Compiled into SigilSmith from RarLab's UnRAR source. Its licence forbids
+        using this code to build a RAR compressor.
+
+License text:
+
+******    *****   ******   UnRAR - free utility for RAR archives
+**   **  **   **  **   **  ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+******   *******  ******    License for use and distribution of
+**   **  **   **  **   **   ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+**   **  **   **  **   **         FREE portable version
+                                  ~~~~~~~~~~~~~~~~~~~~~
+
+     The source code of UnRAR utility is freeware. This means:
+
+  1. All copyrights to RAR and the utility UnRAR are exclusively
+     owned by the author - Alexander Roshal.
+
+  2. UnRAR source code may be used in any software to handle
+     RAR archives without limitations free of charge, but cannot be
+     used to develop RAR (WinRAR) compatible archiver and to
+     re-create RAR compression algorithm, which is proprietary.
+     Distribution of modified UnRAR source code in separate form
+     or as a part of other software is permitted, provided that
+     full text of this paragraph, starting from "UnRAR source code"
+     words, is included in license, or in documentation if license
+     is not available, and in source code comments of resulting package.
+
+  3. The UnRAR utility may be freely distributed. It is allowed
+     to distribute UnRAR inside of other software packages.
+
+  4. THE RAR ARCHIVER AND THE UnRAR UTILITY ARE DISTRIBUTED "AS IS".
+     NO WARRANTY OF ANY KIND IS EXPRESSED OR IMPLIED.  YOU USE AT
+     YOUR OWN RISK. THE AUTHOR WILL NOT BE LIABLE FOR DATA LOSS,
+     DAMAGES, LOSS OF PROFITS OR ANY OTHER KIND OF LOSS WHILE USING
+     OR MISUSING THIS SOFTWARE.
+
+  5. Installing and using the UnRAR utility signifies acceptance of
+     these terms and conditions of the license.
+
+  6. If you don't agree with terms of the license you must remove
+     UnRAR files from your storage devices and cease to use the
+     utility.
+
+     Thank you for your interest in RAR and UnRAR.
+
+
+                                           Alexander L. Roshal
+
+
+==============================================================================
+12. Mozilla Public License 2.0 (SPDX: MPL-2.0)
 ==============================================================================
 
 Components:
@@ -1777,33 +2782,49 @@ Exhibit B - "Incompatible With Secondary Licenses" Notice
 
 
 ==============================================================================
-10. zlib License (SPDX: Zlib)
+13. bzip2 and libbzip2 License (SPDX: bzip2-1.0.6)
 ==============================================================================
 
 Components:
 
-  foldhash 0.1.5
-      Copyright (c) 2024 Orson Peters
+  libbz2-rs-sys 0.2.5
+      Copyright (C) 1996-2021 Julian R Seward.
+      Copyright (C) 2019-2020 Federico Mena Quintero
+      Copyright (C) 2021 Micah Snyder
+      Copyright (C) 2024-2025 Trifecta Tech Foundation and contributors
 
 License text:
 
-This software is provided 'as-is', without any express or implied warranty. In
-no event will the authors be held liable for any damages arising from the use of
-this software.
+Redistribution and use in source and binary forms, with or without
+modification, are permitted provided that the following conditions
+are met:
 
-Permission is granted to anyone to use this software for any purpose, including
-commercial applications, and to alter it and redistribute it freely, subject to
-the following restrictions:
+1. Redistributions of source code must retain the above copyright
+   notice, this list of conditions and the following disclaimer.
 
-1. The origin of this software must not be misrepresented; you must not claim
-    that you wrote the original software. If you use this software in a product,
-    an acknowledgment in the product documentation would be appreciated but is
-    not required.
+2. The origin of this software must not be misrepresented; you must
+   not claim that you wrote the original software.  If you use this
+   software in a product, an acknowledgment in the product
+   documentation would be appreciated but is not required.
 
-2. Altered source versions must be plainly marked as such, and must not be
-    misrepresented as being the original software.
+3. Altered source versions must be plainly marked as such, and must
+   not be misrepresented as being the original software.
 
-3. This notice may not be removed or altered from any source distribution.
+4. The name of the author may not be used to endorse or promote
+   products derived from this software without specific prior written
+   permission.
+
+THIS SOFTWARE IS PROVIDED BY THE AUTHOR ``AS IS'' AND ANY EXPRESS
+OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
+WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+ARE DISCLAIMED.  IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR ANY
+DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE
+GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
+INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY,
+WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING
+NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
+SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 
 ==============================================================================
@@ -1814,8 +2835,21 @@ C and assembly code compiled into the program
     under Creative Commons Zero v1.0 Universal.
   - ring 0.17.14: compiles its own C or assembly code into the program. Listed
     under Apache License 2.0 and ISC License.
+  - Skia graphics library (prebuilt, with skcms): C++ code that the crate
+    skia-bindings 0.153.3 downloads as a prebuilt static library and links
+    into the program. Listed under BSD 3-Clause License.
+  - skia-bindings 0.153.3: compiles its own C or assembly code into the
+    program. Listed under MIT License.
+  - UnRAR 7.3.2 (RarLab; Alexander Roshal): a C library that the crate
+    sigilsmith-unrar 1.0.0 carries and compiles into the program. Listed under
+    LicenseRef-UnRAR.
+  - Vulkan Memory Allocator (inside Skia): C++ code that the crate
+    skia-bindings 0.153.3 downloads as a prebuilt static library and links
+    into the program. Listed under MIT License.
+  - wayland-backend 0.3.17: compiles its own C or assembly code into the
+    program. Listed under MIT License.
   - Zstandard (zstd) C library 1.5.7: a C library that the crate zstd-sys
-    2.0.16+zstd.1.5.7 carries and compiles into the program. Listed under BSD
+    2.1.2+zstd.1.5.7 carries and compiles into the program. Listed under BSD
     3-Clause License.
 
 ==============================================================================
@@ -1825,8 +2859,29 @@ Libraries loaded from the system at run time
 The program loads these libraries from the Linux system it runs on. They come
 with the system, not with the program, and no copy of them is part of it:
 
-  - liblzma.so.5 (used through lzma-sys 0.1.20)
-  - libbz2.so.1.0 (used through bzip2-sys 0.1.13+1.0.8)
-  - libgcc_s.so.1
-  - libc.so.6
   - ld-linux-x86-64.so.2
+  - libc.so.6
+  - libfontconfig.so.1
+  - libfreetype.so.6
+  - libgcc_s.so.1
+  - libm.so.6
+  - libstdc++.so.6
+  - libudev.so.1
+
+It also opens these libraries, when it opens its window: the window system's
+and the graphics drivers'. They come with the system and its graphics drivers
+too, and no copy of them is part of the program. Where they are missing it
+runs as the terminal app instead:
+
+  - libEGL.so.1
+  - libGL.so.1
+  - libX11-xcb.so.1
+  - libX11.so.6
+  - libXi.so.6
+  - libXrender.so.1
+  - libvulkan.so.1
+  - libwayland-client.so.0
+  - libwayland-egl.so.1
+  - libxcb.so.1
+  - libxkbcommon-x11.so.0
+  - libxkbcommon.so.0

@@ -14,7 +14,7 @@ body:
     attributes:
       label: SigilSmith version
       description: Run `sigilsmith --version` to see it.
-      placeholder: "0.9.11"
+      placeholder: "1.0.0"
     validations:
       required: true
   - type: dropdown
@@ -56,5 +56,5 @@ body:
     id: log
     attributes:
       label: Log
-      description: In SigilSmith, Esc → Copy Log To Clipboard (or Export Log File), then paste it here.
+      description: In SigilSmith, open the Log screen and choose Copy Log (This Session) (or Export Log File), then paste it here.
       render: text

@@ -1,13 +1,13 @@
 SigilSmith License v2.0
 
-Copyright (c) 2025-2026 Agistaris. All rights reserved.
+Copyright (c) 2025-2026 CipherChow LLC. All rights reserved.
 
 Effective 2026-10-18. This license covers every SigilSmith release you get
 from that date on. Copies you got earlier stay under the license they came
 with (SigilSmith Community License v1.0).
 
-"SigilSmith" means the SigilSmith program as published by Agistaris, in any
-of its official release files, and its documentation.
+"SigilSmith" means the SigilSmith program as published by CipherChow LLC, in
+any of its official release files, and its documentation.
 
 
 1. You may use it
@@ -45,7 +45,7 @@ asking first, as long as:
   d. the package is clearly marked as unofficial or community-maintained;
   e. you don't charge for the package.
 
-Agistaris may withdraw this permission for a particular package or
+CipherChow LLC may withdraw this permission for a particular package or
 repository by telling its maintainer.
 
 
@@ -73,7 +73,7 @@ licenses.
 
 7. Name and logo
 
-"SigilSmith" and the SigilSmith logo are trademarks of Agistaris; see
+"SigilSmith" and the SigilSmith logo are trademarks of CipherChow LLC; see
 TRADEMARKS.md. This license doesn't grant any rights to them, except to
 describe SigilSmith factually and to name a package allowed by section 3.
 
@@ -97,5 +97,5 @@ SIGILSMITH. BACK UP YOUR GAME FILES AND SAVES.
 
 10. Anything else
 
-For any use this license doesn't cover, ask Agistaris:
+For any use this license doesn't cover, ask CipherChow LLC:
 https://github.com/Agistaris/SigilSmith/issues

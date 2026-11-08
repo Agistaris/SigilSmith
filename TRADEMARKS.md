@@ -1,6 +1,6 @@
 # Trademarks
 
-"SigilSmith" and the SigilSmith logo are trademarks of Agistaris.
+"SigilSmith" and the SigilSmith logo are trademarks of CipherChow LLC.
 
 You may use the name "SigilSmith" to refer to this project in a factual way,
 for example in documentation, tutorials, or comparisons. You may not use the
