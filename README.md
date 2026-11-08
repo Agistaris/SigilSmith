@@ -50,11 +50,17 @@ later.
 
 ## About the source code
 
-Up to version 0.9.11, SigilSmith's source code was published here. SigilSmith
-is now a bigger project, with a graphical app for the desktop and the Steam
-Deck and more games to come, and its development has moved to a private
-repository. This repository stays its public home: releases, docs, the
-changelog and the issue tracker.
+Up to version 0.9.11, SigilSmith's source code was published here under
+Apache-2.0. SigilSmith is now a bigger project, with a graphical app for the
+desktop and the Steam Deck and more games to come, and its development has
+moved to a private repository. This repository stays its public home: releases,
+docs, the changelog and the issue tracker.
+
+The old code is no longer hosted here, and neither are the releases before
+0.9.11. 1.0 is built directly on that code, and we're no longer developing in
+the open, so we chose not to keep handing out its foundation. Versions released
+under Apache-2.0 stay Apache-2.0: anyone with a copy can use, fork and share
+them under its terms.
 
 Nothing changes in how you use it. SigilSmith is free, it keeps every promise
 above, and everything you need to trust it, script it or move away from it is
