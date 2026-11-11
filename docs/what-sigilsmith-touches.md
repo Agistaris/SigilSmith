@@ -1,7 +1,7 @@
 # What SigilSmith touches
 
 Every folder SigilSmith reads or writes, every network call it makes, and how
-to turn the network calls off. This page describes SigilSmith 1.0.0 and is
+to turn the network calls off. This page describes SigilSmith 1.0.1 and is
 updated with each release.
 
 In short:

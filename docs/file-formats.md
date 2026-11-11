@@ -1,7 +1,7 @@
 # File formats
 
 The files SigilSmith reads and writes, so you can back them up, script
-against them or move to another tool. This page describes SigilSmith 1.0.0.
+against them or move to another tool. This page describes SigilSmith 1.0.1.
 
 | File | Status |
 | --- | --- |
@@ -53,7 +53,7 @@ It carries one profile's order, on/off state and conflict picks.
 {
   "schema_version": 1,
   "exported_at": "2026-10-17T14:02:11Z",
-  "sigilsmith_version": "1.0.0",
+  "sigilsmith_version": "1.0.1",
   "game_id": "bg3",
   "game_name": "Baldur's Gate 3",
   "profile_name": "Default",

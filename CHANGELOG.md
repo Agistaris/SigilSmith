@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.0.1
+
+Released: 10 November 2026.
+
+- Fix (desktop app): dragging a mod straight away, without clicking it first, now works. The list no longer pulls back to the selected mod, so a mod can be moved past it; held at the top or bottom edge, the list keeps scrolling as far as you hold it; and letting go anywhere drops the mod (a release far from where the drag started used to be lost).
+- Dragging a mod in the desktop app is clearer: a bright line shows where it will land while the other rows stay put, a grey line marks its old place, and the mod you grab becomes the selected one, with Details showing the place it will land in.
+- Fix (desktop app): the profile menu's Rename, Duplicate, Export, Import and Delete did nothing when clicked with the mouse. F2 now renames the current profile after you click it, too.
+- Fix (desktop app): dragging one of several ticked mods now moves them all, in their order, with a stacked card that says how many and the places they will land in (#9–#11). Before, only the grabbed mod moved, and a drag could not start while mods were ticked. Ctrl+click ticks or unticks a mod and Shift+click ticks a range.
+- New: a thin scrollbar on the desktop mod list. It shows while the list scrolls, while you drag a mod and when the pointer is over the list, then fades. Drag it to scroll, or click beside it to move a page.
+
 ## 1.0.0
 
 Released: 7 November 2026.

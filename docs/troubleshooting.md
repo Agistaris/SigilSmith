@@ -1,7 +1,7 @@
 # Troubleshooting and FAQ
 
 Answers to the questions that come up most. This page describes SigilSmith
-1.0.0. The keys and panel names are the terminal app's (`sigilsmith --tui`),
+1.0.1. The keys and panel names are the terminal app's (`sigilsmith --tui`),
 where **Esc** opens the menu. The desktop app has the same settings under
 **Settings**; where its names differ, they are given too. If your problem
 isn't here, see [Report a bug](#report-a-bug).
@@ -322,7 +322,7 @@ one:
 - **Run it without FUSE.** Add `--appimage-extract-and-run`:
 
   ```bash
-  ./sigilsmith-1.0.0-x86_64.AppImage --appimage-extract-and-run
+  ./sigilsmith-1.0.1-x86_64.AppImage --appimage-extract-and-run
   ```
 
   Setting `APPIMAGE_EXTRACT_AND_RUN=1` does the same. It unpacks the app to a
@@ -343,8 +343,8 @@ back to the terminal app and says why; some system libraries may be missing
 
 SigilSmith 0.9.11 doesn't start on Fedora or openSUSE, from any of its
 packages: it looks for the bzip2 library under a file name those distros don't
-use (`libbz2.so.1.0`). SigilSmith 1.0.0 has bzip2 built in, so it starts there;
-install 1.0.0 ([install guide](install.md)). The
+use (`libbz2.so.1.0`). SigilSmith 1.0.0 and later have bzip2 built in, so they start there;
+install the latest release ([install guide](install.md)). The
 [changelog](../CHANGELOG.md) has the details.
 
 ## The title bar or window size looks wrong

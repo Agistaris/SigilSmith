@@ -2841,7 +2841,7 @@ C and assembly code compiled into the program
   - skia-bindings 0.153.3: compiles its own C or assembly code into the
     program. Listed under MIT License.
   - UnRAR 7.3.2 (RarLab; Alexander Roshal): a C library that the crate
-    sigilsmith-unrar 1.0.0 carries and compiles into the program. Listed under
+    sigilsmith-unrar 1.0.1 carries and compiles into the program. Listed under
     LicenseRef-UnRAR.
   - Vulkan Memory Allocator (inside Skia): C++ code that the crate
     skia-bindings 0.153.3 downloads as a prebuilt static library and links

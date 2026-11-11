@@ -13,23 +13,23 @@ console), and it says so.
 Every package is on the
 [latest release](https://github.com/Agistaris/SigilSmith/releases/latest),
 with a SHA-256 checksum in `SHA256SUMS.txt`. The
-commands below use 1.0.0; change the version to the one you downloaded.
+commands below use 1.0.1; change the version to the one you downloaded.
 
 ## AppImage (works almost anywhere)
 
 ```bash
-chmod +x sigilsmith-1.0.0-x86_64.AppImage
-./sigilsmith-1.0.0-x86_64.AppImage
+chmod +x sigilsmith-1.0.1-x86_64.AppImage
+./sigilsmith-1.0.1-x86_64.AppImage
 ```
 
 Double-clicking it in a file manager opens the desktop app. For the terminal
-app, add `--tui` (`./sigilsmith-1.0.0-x86_64.AppImage --tui`). An AppImage
+app, add `--tui` (`./sigilsmith-1.0.1-x86_64.AppImage --tui`). An AppImage
 needs FUSE 2 and some system libraries; see [System libraries](#system-libraries).
 
 ## .deb (Debian, Ubuntu, Mint, Pop!_OS)
 
 ```bash
-sudo apt install ./sigilsmith_1.0.0-1_amd64.deb
+sudo apt install ./sigilsmith_1.0.1-1_amd64.deb
 ```
 
 This installs `sigilsmith` in `/usr/bin` and adds SigilSmith to your app menu;
@@ -41,11 +41,11 @@ recommends off.
 ## .rpm (Fedora, openSUSE)
 
 ```bash
-sudo dnf install ./sigilsmith-1.0.0-1.x86_64.rpm
+sudo dnf install ./sigilsmith-1.0.1-1.x86_64.rpm
 ```
 
 On openSUSE, use
-`sudo zypper install --allow-unsigned-rpm ./sigilsmith-1.0.0-1.x86_64.rpm`: the
+`sudo zypper install --allow-unsigned-rpm ./sigilsmith-1.0.1-1.x86_64.rpm`: the
 `.rpm` itself has no signature (the signed `SHA256SUMS.txt` covers it), so without
 the option zypper stops and asks first. Like the `.deb`, it installs `/usr/bin/sigilsmith` and an app menu entry.
 
@@ -54,7 +54,7 @@ the option zypper stops and asks first. Like the `.deb`, it installs `/usr/bin/s
 The archive holds one file, the `sigilsmith` program.
 
 ```bash
-tar -xzf sigilsmith-1.0.0-linux-x86_64.tar.gz
+tar -xzf sigilsmith-1.0.1-linux-x86_64.tar.gz
 ./sigilsmith
 ```
 
@@ -98,7 +98,7 @@ code inside the program, so no archive tools or `liblzma` are needed.
 We haven't tested SigilSmith on NixOS yet. These are the usual ways to run a
 program built for other distros; please tell us what you find.
 
-- **AppImage:** `appimage-run ./sigilsmith-1.0.0-x86_64.AppImage`
+- **AppImage:** `appimage-run ./sigilsmith-1.0.1-x86_64.AppImage`
 - **`.tar.gz`:** `steam-run ./sigilsmith`
 - **Either, without a wrapper:** turn on `programs.nix-ld` and add the
   libraries from [System libraries](#system-libraries) (the

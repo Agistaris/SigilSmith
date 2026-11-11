@@ -5,7 +5,7 @@ your session has a display, the terminal app otherwise
 ([details](install.md#first-launch)). The commands below list your mods,
 profiles and dependencies, as text or JSON, import mods, and take mods out of
 the game folders, without opening the app. This page describes SigilSmith
-1.0.0.
+1.0.1.
 
 ```text
 sigilsmith                          Open the app (window, or terminal if there is no display)
